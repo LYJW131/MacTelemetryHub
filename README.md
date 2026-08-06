@@ -1,0 +1,163 @@
+# Mac Telemetry Hub
+
+A private, extensible macOS status reporter. Charger telemetry is one optional
+module alongside desktop activity, local Apple Music playback, and coding
+usage, rather than the identity of the whole application.
+
+## What the app includes
+
+- independently switchable charger, foreground-app, Apple Music, and ccusage modules
+- CoreBluetooth discovery or a pinned peripheral UUID for the charger module
+- AES-GCM + ephemeral P-256 ECDH session handshake
+- account-scoped 40-character Anker user ID stored in Keychain
+- native dashboard and menu-bar controls
+- disconnect and reconnect actions
+- local HTTP server on all network interfaces
+- the existing minimal `/status` shape and separate `/debug/status`
+- `/health`, `/ports`, `/metrics`, `POST /disconnect`, and `POST /reconnect`
+- a versioned telemetry envelope posted to one shared ingest endpoint
+- direct local Music.app state via Apple Events (separate from Apple Music Web API)
+- foreground application reporting, limited to the app's name, bundle ID, and icon
+- ccusage aggregation that never uploads session IDs, project paths, prompts, or replies
+- login launch using `SMAppService.mainApp`
+
+Each module can be disabled without stopping the others. Disabling the charger
+module also stops its BLE session. The Anker user ID is deliberately not
+compiled into the app and is only required while the charger module is enabled.
+
+## Unified ingest protocol
+
+Point the app at `https://<site>/api/ingest/telemetry` and set the same Bearer
+secret as the site's `TELEMETRY_INGEST_SECRET`. Every request uses a versioned
+envelope and may contain only the modules that have fresh data:
+
+```json
+{
+  "version": 2,
+  "modules": {
+    "desktop": {},
+    "apple_music": {},
+    "charger": {},
+    "vibe_coding": {}
+  }
+}
+```
+
+Version 2 is the only accepted contract; there is no legacy payload fallback.
+The POST body is deliberately bounded. ccusage's complete reports stay on the
+Mac for the native dashboard; the app uploads only display-ready totals, seven
+daily points, 30-day token totals, and 60 twelve-hour activity buckets. That
+module is sent again only after ccusage refreshes, while the smaller live
+modules are also sent only when their display content changes. A heartbeat-only
+envelope is sent every 30 seconds so the site can detect an offline reporter
+without receiving duplicate charger, desktop, music, or ccusage snapshots.
+
+`position_ms` in the music module is an anchor, not a stream. Paired with
+`observed_at` and `state` it lets the site interpolate the playhead on its own,
+so the module is re-sent only on a track change, a play/pause transition, or a
+seek — detected as the playhead drifting more than 2.5 s from what the site
+would be showing. A track played straight through uploads once, not once per
+post interval.
+
+Play/pause transitions, track changes, and foreground-application switches skip
+the throttle window entirely: they wake the reporter loop the moment they happen
+and upload at once, then reset the window so the next scheduled post is a full
+interval away. Everything else — seeks, charger readings, ccusage — waits for
+that window, and rides along in whichever envelope goes out first. While a post
+is failing, the urgent path is suspended until the backoff expires.
+
+Foreground activity is event-driven: the snapshot is rewritten by the
+`NSWorkspace` activation notification, using the `NSRunningApplication` the
+notification carries rather than re-reading `frontmostApplication`, which can
+still hold the previous app when the notification arrives.
+
+Playback is event-driven too. Music.app posts `com.apple.Music.playerInfo` on
+`DistributedNotificationCenter` for every track change and play/pause, carrying
+the player state, track identity, and total time — but neither the playhead nor
+the artwork. The notification is therefore used only as a trigger: each one runs
+a single AppleScript read for the two fields it omits. Music.app fires several
+notifications per change, so refreshes coalesce rather than queue up. Scrubbing
+the playhead posts nothing at all, which is the one transition left to a 25
+second fallback poll; every other change arrives as an event.
+
+Both monitors wake the reporter loop directly rather than waiting to be sampled.
+An activation reschedules a 400 ms settle timer, so a burst of Cmd-Tab switches
+uploads only the application it lands on — the ones passed through never outlive
+the window. Playback needs no such timer; the confirmation read already absorbs
+the race. The loop's own five-second tick is left to the parts with no event
+source at all: charger sampling, the 30 second heartbeat, and the ccusage
+interval check.
+
+Measured end to end, from the event to the site serving the new state: play and
+pause land in 320–490 ms, application switches in 560–620 ms.
+
+The app also exposes local debugging snapshots at `GET /activity` and
+`GET /telemetry`; the original charger `GET /status` remains compatible.
+
+## Module permissions
+
+- Foreground app names and icons use `NSWorkspace` and need no special
+  permission. Window contents and titles are never read, so the app needs no
+  Accessibility permission at all.
+- Apple Music asks once for permission to communicate with Music.app.
+- ccusage requires paths to the local Node executable and
+  `node_modules/ccusage/src/cli.js`; its minimum refresh interval is 60 seconds.
+
+## Open and run in Xcode
+
+1. Open `MacTelemetryHub.xcodeproj`.
+2. Select the `MacTelemetryHub` target, then **Signing & Capabilities**.
+3. Select your Apple Developer team and keep **Automatically manage signing**
+   enabled.
+4. Run on **My Mac** and approve the Bluetooth prompt once.
+5. Open Settings in the app, enter the Anker user ID and optional CoreBluetooth
+   device UUID, then choose **保存并重连**.
+
+The current charger's CoreBluetooth identifier is
+`102DC514-2EB9-DAC9-C11A-4A0781776A73`. Leaving it blank enables scanning for an
+`ASHDJW*` device instead.
+
+## Build a local app bundle
+
+```bash
+chmod +x build-release.sh
+./build-release.sh
+open "build/Mac Telemetry Hub.app"
+```
+
+This script makes a local ad-hoc signature. For login launch and a stable TCC
+Bluetooth grant, move the app to `/Applications` and use an Apple Development
+or Developer ID signature from Xcode.
+
+## Login launch
+
+After installing the signed app in `/Applications`, enable **登录后自动启动** in
+Settings. This uses the supported macOS `SMAppService` API and starts after the
+user logs in; it is not a root LaunchDaemon.
+
+Closing the dashboard window does not stop the service. Use the menu-bar status
+icon to reopen the window, disconnect, reconnect, or quit.
+
+## HTTP API
+
+The default port is `8787` and the listener accepts connections on all local
+interfaces, including the Mac's Tailscale address. If the port is temporarily
+occupied, the app retries every three seconds.
+
+`GET /status` always returns a fixed machine-readable shape. Nullable fields
+are present as JSON `null` rather than being omitted. Numeric voltage, current,
+and power values are rounded to two decimal places; `updated_at` is the Unix
+timestamp of the last decoded charger data.
+
+## Tests
+
+The protocol core is also a Swift package so it can be tested without opening
+Xcode:
+
+```bash
+swift test
+```
+
+Tests cover the Python-compatible AES-GCM frame vector, fragmented FF09 frame
+assembly, user-ID injection, live port/cable/device parsing, and the fixed
+minimal JSON response.

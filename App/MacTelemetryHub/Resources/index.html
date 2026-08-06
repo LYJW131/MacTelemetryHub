@@ -1,0 +1,16 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Mac Telemetry Hub</title>
+<style>
+:root{color-scheme:light dark;font:15px -apple-system,BlinkMacSystemFont,sans-serif;background:Canvas;color:CanvasText}*{box-sizing:border-box}body{margin:0;padding:24px}.wrap{max-width:900px;margin:auto}header{display:flex;align-items:center;gap:12px;margin-bottom:18px}h1{font-size:20px;margin:0}header span{color:#888}button{padding:7px 12px;border-radius:8px;border:1px solid #8886;background:Canvas;color:CanvasText}header div{margin-left:auto;display:flex;gap:8px}.hero,.port{border:1px solid #8884;border-radius:14px;padding:18px;background:color-mix(in srgb,CanvasText 3%,Canvas)}.power{font-size:54px;font-weight:650}.power small{font-size:22px;color:#888}.meta,.detail{color:#888;font-size:12px}.ports{display:grid;grid-template-columns:repeat(3,1fr);gap:12px;margin-top:12px}.port h2{font-size:15px;margin:0 0 12px}.metrics{display:flex;gap:14px}.metric b{font-size:20px;display:block}.on{color:#24a148}.off{color:#888}.error{color:#d33}@media(max-width:650px){.ports{grid-template-columns:1fr}}
+</style>
+</head>
+<body><div class="wrap"><header><section><h1>Anker Prime 160W</h1><span id="status">正在连接…</span></section><div><button id="disconnect">断开</button><button id="reconnect">重连</button></div></header><main><article class="hero"><div>总输出功率</div><div class="power"><span id="total">—</span><small> W</small></div><div class="meta" id="meta">—</div></article><section class="ports" id="ports"></section></main></div>
+<script>
+const $=s=>document.querySelector(s),fmt=(n,d=2)=>n==null?'—':Number(n).toFixed(d),keys=['C1','C2','C3'];
+function render(x){$('#status').textContent=x.connected?'已连接':'未连接';$('#status').className=x.connected?'on':'error';$('#total').textContent=fmt(x.total_output_power_w);let d=x.device||{},age=x.updated_at==null?'—':Math.max(0,Date.now()/1000-x.updated_at).toFixed(1)+' 秒前';$('#meta').textContent=`序列号 ${d.serial_number||'—'} · MAC ${d.mac_address||'—'} · 固件 ${d.firmware_version||'—'} · ${age}`;$('#ports').innerHTML=keys.map(k=>{let p=(x.ports||{})[k]||{};return `<article class="port"><h2>USB-C ${k.slice(1)} <span class="${p.mode?'on':'off'}">${p.mode?'输出':'关闭'}</span></h2><div class="metrics"><div class="metric"><b>${fmt(p.voltage_v)}</b>V</div><div class="metric"><b>${fmt(p.current_a)}</b>A</div><div class="metric"><b>${fmt(p.power_w)}</b>W</div></div><p class="detail">${p.cable||'—'}<br>${p.charging_info||''}<br>${p.model||p.vendor||''}</p></article>`}).join('')}
+async function tick(){try{let r=await fetch('/status',{cache:'no-store'});render(await r.json())}catch(e){$('#status').textContent='API 无法访问';$('#status').className='error'}}
+async function action(name){await fetch('/'+name,{method:'POST'});await tick()}$('#disconnect').onclick=()=>action('disconnect');$('#reconnect').onclick=()=>action('reconnect');tick();setInterval(tick,1000);
+</script></body></html>

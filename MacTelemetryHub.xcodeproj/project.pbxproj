@@ -1,0 +1,285 @@
+// !$*UTF8*$!
+{
+	archiveVersion = 1;
+	classes = {};
+	objectVersion = 56;
+	objects = {
+
+/* Begin PBXBuildFile section */
+		B10000000000000000000001 /* MacTelemetryHubApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = F10000000000000000000001 /* MacTelemetryHubApp.swift */; };
+		B10000000000000000000002 /* AppSettings.swift in Sources */ = {isa = PBXBuildFile; fileRef = F10000000000000000000002 /* AppSettings.swift */; };
+		B10000000000000000000003 /* BluetoothService.swift in Sources */ = {isa = PBXBuildFile; fileRef = F10000000000000000000003 /* BluetoothService.swift */; };
+		B10000000000000000000004 /* DashboardView.swift in Sources */ = {isa = PBXBuildFile; fileRef = F10000000000000000000004 /* DashboardView.swift */; };
+		B10000000000000000000005 /* LocalHTTPServer.swift in Sources */ = {isa = PBXBuildFile; fileRef = F10000000000000000000005 /* LocalHTTPServer.swift */; };
+		B10000000000000000000006 /* ServiceController.swift in Sources */ = {isa = PBXBuildFile; fileRef = F10000000000000000000006 /* ServiceController.swift */; };
+		B10000000000000000000007 /* SettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = F10000000000000000000007 /* SettingsView.swift */; };
+		B10000000000000000000008 /* UIComponents.swift in Sources */ = {isa = PBXBuildFile; fileRef = F10000000000000000000008 /* UIComponents.swift */; };
+		B10000000000000000000010 /* TelemetryModules.swift in Sources */ = {isa = PBXBuildFile; fileRef = F10000000000000000000010 /* TelemetryModules.swift */; };
+		B10000000000000000000011 /* VibeCodingUsageView.swift in Sources */ = {isa = PBXBuildFile; fileRef = F10000000000000000000011 /* VibeCodingUsageView.swift */; };
+		B10000000000000000000009 /* A2687Crypto.swift in Sources */ = {isa = PBXBuildFile; fileRef = F10000000000000000000009 /* A2687Crypto.swift */; };
+		B1000000000000000000000A /* A2687Protocol.swift in Sources */ = {isa = PBXBuildFile; fileRef = F1000000000000000000000A /* A2687Protocol.swift */; };
+		B1000000000000000000000B /* Models.swift in Sources */ = {isa = PBXBuildFile; fileRef = F1000000000000000000000B /* Models.swift */; };
+		B1000000000000000000000C /* index.html in Resources */ = {isa = PBXBuildFile; fileRef = F1000000000000000000000C /* index.html */; };
+		B1000000000000000000000D /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = F1000000000000000000000F /* Assets.xcassets */; };
+/* End PBXBuildFile section */
+
+/* Begin PBXFileReference section */
+		F10000000000000000000001 /* MacTelemetryHubApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MacTelemetryHubApp.swift; sourceTree = "<group>"; };
+		F10000000000000000000002 /* AppSettings.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppSettings.swift; sourceTree = "<group>"; };
+		F10000000000000000000003 /* BluetoothService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BluetoothService.swift; sourceTree = "<group>"; };
+		F10000000000000000000004 /* DashboardView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DashboardView.swift; sourceTree = "<group>"; };
+		F10000000000000000000005 /* LocalHTTPServer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LocalHTTPServer.swift; sourceTree = "<group>"; };
+		F10000000000000000000006 /* ServiceController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ServiceController.swift; sourceTree = "<group>"; };
+		F10000000000000000000007 /* SettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SettingsView.swift; sourceTree = "<group>"; };
+		F10000000000000000000008 /* UIComponents.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = UIComponents.swift; sourceTree = "<group>"; };
+		F10000000000000000000010 /* TelemetryModules.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TelemetryModules.swift; sourceTree = "<group>"; };
+		F10000000000000000000011 /* VibeCodingUsageView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VibeCodingUsageView.swift; sourceTree = "<group>"; };
+		F10000000000000000000009 /* A2687Crypto.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = A2687Crypto.swift; sourceTree = "<group>"; };
+		F1000000000000000000000A /* A2687Protocol.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = A2687Protocol.swift; sourceTree = "<group>"; };
+		F1000000000000000000000B /* Models.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Models.swift; sourceTree = "<group>"; };
+		F1000000000000000000000C /* index.html */ = {isa = PBXFileReference; lastKnownFileType = text.html; path = index.html; sourceTree = "<group>"; };
+		F1000000000000000000000D /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
+		F1000000000000000000000E /* Mac Telemetry Hub.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = "Mac Telemetry Hub.app"; sourceTree = BUILT_PRODUCTS_DIR; };
+		F1000000000000000000000F /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
+/* End PBXFileReference section */
+
+/* Begin PBXFrameworksBuildPhase section */
+		A10000000000000000000003 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = ();
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXFrameworksBuildPhase section */
+
+/* Begin PBXGroup section */
+		A10000000000000000000001 = {
+			isa = PBXGroup;
+			children = (
+				A10000000000000000000010 /* MacTelemetryHub */,
+				A10000000000000000000011 /* ChargerTelemetryKit */,
+				A10000000000000000000012 /* Products */,
+			);
+			sourceTree = "<group>";
+		};
+		A10000000000000000000010 /* MacTelemetryHub */ = {
+			isa = PBXGroup;
+			children = (
+				F10000000000000000000001 /* MacTelemetryHubApp.swift */,
+				F10000000000000000000002 /* AppSettings.swift */,
+				F10000000000000000000003 /* BluetoothService.swift */,
+				F10000000000000000000004 /* DashboardView.swift */,
+				F10000000000000000000005 /* LocalHTTPServer.swift */,
+				F10000000000000000000006 /* ServiceController.swift */,
+				F10000000000000000000007 /* SettingsView.swift */,
+				F10000000000000000000008 /* UIComponents.swift */,
+				F10000000000000000000010 /* TelemetryModules.swift */,
+				F10000000000000000000011 /* VibeCodingUsageView.swift */,
+				F1000000000000000000000D /* Info.plist */,
+				F1000000000000000000000F /* Assets.xcassets */,
+				A10000000000000000000013 /* Resources */,
+			);
+			path = App/MacTelemetryHub;
+			sourceTree = SOURCE_ROOT;
+		};
+		A10000000000000000000011 /* ChargerTelemetryKit */ = {
+			isa = PBXGroup;
+			children = (
+				F10000000000000000000009 /* A2687Crypto.swift */,
+				F1000000000000000000000A /* A2687Protocol.swift */,
+				F1000000000000000000000B /* Models.swift */,
+			);
+			path = Sources/ChargerTelemetryKit;
+			sourceTree = SOURCE_ROOT;
+		};
+		A10000000000000000000012 /* Products */ = {
+			isa = PBXGroup;
+			children = (F1000000000000000000000E /* Mac Telemetry Hub.app */);
+			name = Products;
+			sourceTree = "<group>";
+		};
+		A10000000000000000000013 /* Resources */ = {
+			isa = PBXGroup;
+			children = (F1000000000000000000000C /* index.html */);
+			path = Resources;
+			sourceTree = "<group>";
+		};
+/* End PBXGroup section */
+
+/* Begin PBXNativeTarget section */
+		A10000000000000000000020 /* MacTelemetryHub */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = A10000000000000000000031 /* Build configuration list for PBXNativeTarget "MacTelemetryHub" */;
+			buildPhases = (
+				A10000000000000000000002 /* Sources */,
+				A10000000000000000000003 /* Frameworks */,
+				A10000000000000000000004 /* Resources */,
+			);
+			buildRules = ();
+			dependencies = ();
+			name = MacTelemetryHub;
+			productName = "Mac Telemetry Hub";
+			productReference = F1000000000000000000000E /* Mac Telemetry Hub.app */;
+			productType = "com.apple.product-type.application";
+		};
+/* End PBXNativeTarget section */
+
+/* Begin PBXProject section */
+		A10000000000000000000021 /* Project object */ = {
+			isa = PBXProject;
+			attributes = {
+				BuildIndependentTargetsInParallel = 1;
+				LastSwiftUpdateCheck = 2640;
+				LastUpgradeCheck = 2640;
+				TargetAttributes = { A10000000000000000000020 = { CreatedOnToolsVersion = 26.4; }; };
+			};
+			buildConfigurationList = A10000000000000000000030 /* Build configuration list for PBXProject "MacTelemetryHub" */;
+			compatibilityVersion = "Xcode 14.0";
+			developmentRegion = zh_CN;
+			hasScannedForEncodings = 0;
+			knownRegions = (zh_CN, en, Base);
+			mainGroup = A10000000000000000000001;
+			productRefGroup = A10000000000000000000012 /* Products */;
+			projectDirPath = "";
+			projectRoot = "";
+			targets = (A10000000000000000000020 /* MacTelemetryHub */);
+		};
+/* End PBXProject section */
+
+/* Begin PBXResourcesBuildPhase section */
+		A10000000000000000000004 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				B1000000000000000000000C /* index.html in Resources */,
+				B1000000000000000000000D /* Assets.xcassets in Resources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXResourcesBuildPhase section */
+
+/* Begin PBXSourcesBuildPhase section */
+		A10000000000000000000002 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				B10000000000000000000001 /* MacTelemetryHubApp.swift in Sources */,
+				B10000000000000000000002 /* AppSettings.swift in Sources */,
+				B10000000000000000000003 /* BluetoothService.swift in Sources */,
+				B10000000000000000000004 /* DashboardView.swift in Sources */,
+				B10000000000000000000005 /* LocalHTTPServer.swift in Sources */,
+				B10000000000000000000006 /* ServiceController.swift in Sources */,
+				B10000000000000000000007 /* SettingsView.swift in Sources */,
+				B10000000000000000000008 /* UIComponents.swift in Sources */,
+				B10000000000000000000010 /* TelemetryModules.swift in Sources */,
+				B10000000000000000000011 /* VibeCodingUsageView.swift in Sources */,
+				B10000000000000000000009 /* A2687Crypto.swift in Sources */,
+				B1000000000000000000000A /* A2687Protocol.swift in Sources */,
+				B1000000000000000000000B /* Models.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXSourcesBuildPhase section */
+
+/* Begin XCBuildConfiguration section */
+		C10000000000000000000001 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				COPY_PHASE_STRIP = NO;
+				DEBUG_INFORMATION_FORMAT = dwarf;
+				ENABLE_TESTABILITY = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu17;
+				GCC_OPTIMIZATION_LEVEL = 0;
+				GCC_PREPROCESSOR_DEFINITIONS = ("DEBUG=1", "$(inherited)");
+				MACOSX_DEPLOYMENT_TARGET = 14.0;
+				MTL_ENABLE_DEBUG_INFO = INCLUDE_SOURCE;
+				ONLY_ACTIVE_ARCH = YES;
+				SDKROOT = macosx;
+				SWIFT_ACTIVE_COMPILATION_CONDITIONS = "DEBUG $(inherited)";
+				SWIFT_OPTIMIZATION_LEVEL = "-Onone";
+			};
+			name = Debug;
+		};
+		C10000000000000000000002 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				COPY_PHASE_STRIP = NO;
+				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
+				ENABLE_NS_ASSERTIONS = NO;
+				GCC_C_LANGUAGE_STANDARD = gnu17;
+				MACOSX_DEPLOYMENT_TARGET = 14.0;
+				MTL_ENABLE_DEBUG_INFO = NO;
+				SDKROOT = macosx;
+				SWIFT_COMPILATION_MODE = wholemodule;
+			};
+			name = Release;
+		};
+		C10000000000000000000003 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				CODE_SIGN_STYLE = Automatic;
+				COMBINE_HIDPI_IMAGES = YES;
+				CURRENT_PROJECT_VERSION = 1;
+				ENABLE_APP_SANDBOX = NO;
+				ENABLE_HARDENED_RUNTIME = YES;
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = App/MacTelemetryHub/Info.plist;
+				LD_RUNPATH_SEARCH_PATHS = "$(inherited) @executable_path/../Frameworks";
+				MACOSX_DEPLOYMENT_TARGET = 14.0;
+				MARKETING_VERSION = 1.0.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.liangyangjunwei.MacTelemetryHub;
+				PRODUCT_NAME = "Mac Telemetry Hub";
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_STRICT_CONCURRENCY = complete;
+				SWIFT_VERSION = 6.0;
+			};
+			name = Debug;
+		};
+		C10000000000000000000004 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				CODE_SIGN_STYLE = Automatic;
+				COMBINE_HIDPI_IMAGES = YES;
+				CURRENT_PROJECT_VERSION = 1;
+				ENABLE_APP_SANDBOX = NO;
+				ENABLE_HARDENED_RUNTIME = YES;
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = App/MacTelemetryHub/Info.plist;
+				LD_RUNPATH_SEARCH_PATHS = "$(inherited) @executable_path/../Frameworks";
+				MACOSX_DEPLOYMENT_TARGET = 14.0;
+				MARKETING_VERSION = 1.0.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.liangyangjunwei.MacTelemetryHub;
+				PRODUCT_NAME = "Mac Telemetry Hub";
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_STRICT_CONCURRENCY = complete;
+				SWIFT_VERSION = 6.0;
+			};
+			name = Release;
+		};
+/* End XCBuildConfiguration section */
+
+/* Begin XCConfigurationList section */
+		A10000000000000000000030 /* Build configuration list for PBXProject "MacTelemetryHub" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (C10000000000000000000001 /* Debug */, C10000000000000000000002 /* Release */);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		A10000000000000000000031 /* Build configuration list for PBXNativeTarget "MacTelemetryHub" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (C10000000000000000000003 /* Debug */, C10000000000000000000004 /* Release */);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+/* End XCConfigurationList section */
+	};
+	rootObject = A10000000000000000000021 /* Project object */;
+}

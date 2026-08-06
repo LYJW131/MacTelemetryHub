@@ -1,0 +1,11 @@
+# 构建产物
+/build/
+/.build/
+DerivedData/
+
+# Xcode 的用户级状态（窗口布局、断点、上次选中的 scheme）
+xcuserdata/
+*.xcuserstate
+
+# macOS
+.DS_Store
