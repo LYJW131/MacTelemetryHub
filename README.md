@@ -85,8 +85,33 @@ An activation reschedules a 400 ms settle timer, so a burst of Cmd-Tab switches
 uploads only the application it lands on — the ones passed through never outlive
 the window. Playback needs no such timer; the confirmation read already absorbs
 the race. The loop's own five-second tick is left to the parts with no event
-source at all: charger sampling, the 30 second heartbeat, and the ccusage
-interval check.
+source of their own: the 30 second heartbeat and the ccusage interval check,
+plus charger sampling — the charger does push (below), but at ~1 Hz, which is
+far finer than anything worth uploading.
+
+The charger is event-driven at the acquisition layer as well. Nothing is polled
+over BLE: the handshake — specifically `0x0022`/`0x0027` — arms an unprompted
+`0x0300` stream that the charger then pushes at ~1 Hz, and after that the app
+transmits nothing. Measured on firmware `v0.0.5.1`, disabling the former 12 s
+status and 6 s realtime polls left the rate unchanged at 1.00 frames/s with a
+1.24 s worst-case gap, and a 72 second capture recorded 9 transmitted frames,
+all of them handshake steps, against 72 received pushes.
+
+Dropping the polls also drops the only thing that used to fail loudly when the
+charger stopped answering — a BLE link can stay connected while the stream is
+dead, leaving the dashboard and the uploader on a frozen snapshot.
+`startStreamWatchdog` covers that without reintroducing periodic traffic: under
+10 s of silence it does nothing; past that it re-sends the arming pair once per
+quiet period; past 20 s it drops the peripheral so the normal reconnect path
+builds a fresh session. The observed worst-case gap is ~1.2 s, so the threshold
+sits far outside normal jitter, and the timer is local — it puts nothing on the
+air unless the stream has already gone quiet.
+
+One consequence worth knowing: `raw_status` is no longer refreshed on a timer.
+It holds whatever the last `0x0200` reply carried, normally the one the
+handshake requested, so it carries its own `raw_status_updated_at` in
+`/debug/status`. Port telemetry stays ~1 Hz fresh; the two ages are not
+interchangeable.
 
 Measured end to end, from the event to the site serving the new state: play and
 pause land in 320–490 ms, application switches in 560–620 ms.
