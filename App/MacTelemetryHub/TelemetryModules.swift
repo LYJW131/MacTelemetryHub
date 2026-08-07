@@ -46,7 +46,6 @@ struct AppleMusicSnapshot: Codable, Equatable, Sendable {
     let artist: String?
     let album: String?
     let trackID: String?
-    let artworkData: Data?
     let positionMs: Int
     let durationMs: Int
     /**
@@ -157,7 +156,12 @@ final class DesktopActivityMonitor: ObservableObject {
 
     private static func pngData(for icon: NSImage?) -> Data? {
         guard let icon else { return nil }
-        let size = NSSize(width: 128, height: 128)
+        /**
+         * 128pt 在 Retina 上会渲成 256px、约 125KB，而网页那个位置只有 40 CSS px。
+         * 站点入口还会再压一道，但没必要先把这么大一坨传上去 —— 换一次前台应用
+         * 就是一次上传。64pt（Retina 上 128px）已经比展示所需的 80px 富余。
+         */
+        let size = NSSize(width: 64, height: 64)
         let resized = NSImage(size: size)
         resized.lockFocus()
         NSGraphicsContext.current?.imageInterpolation = .high
@@ -314,7 +318,6 @@ final class AppleMusicMonitor: ObservableObject {
                 artist: nil,
                 album: nil,
                 trackID: nil,
-                artworkData: nil,
                 positionMs: 0,
                 durationMs: 0,
                 repeatOne: false,
@@ -347,15 +350,15 @@ final class AppleMusicMonitor: ObservableObject {
             try
                 set songDuration to duration of currentSong
             end try
-            set songArtwork to ""
+            set cloudState to ""
             try
-                if (count of artworks of currentSong) > 0 then set songArtwork to raw data of artwork 1 of currentSong
+                set cloudState to (cloud status of currentSong as text)
             end try
             set repeatMode to "off"
         try
             set repeatMode to (song repeat as text)
         end try
-        return {stateText, songName, songArtist, songAlbum, songID, (player position as text), (songDuration as text), songArtwork, repeatMode}
+        return {stateText, songName, songArtist, songAlbum, songID, (player position as text), (songDuration as text), cloudState, repeatMode}
         end tell
         """
         var errorInfo: NSDictionary?
@@ -368,6 +371,19 @@ final class AppleMusicMonitor: ObservableObject {
             result.atIndex(index)?.stringValue?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         }
         let rawState = item(1)
+        /**
+         * 只上报 Apple Music 目录里的曲子，本地导入的跳过。
+         *
+         * 判据用 `cloud status` 而不是 `class`：下载到本机的订阅歌曲 class 也是
+         * `file track`（实测），分不出来；cloud status 才区分内容来源。
+         *
+         * 排除的是 `uploaded` / `not uploaded` —— 那两个就是「你自己的文件」。
+         * 其余一律放行，包括读不到这个属性的情况：宁可偶尔多报一首本地歌
+         * （后果只是网页那边查不到封面），也不能因为某台机器读不到它就把整个
+         * 音乐模块哑掉。
+         */
+        let cloudStatus = item(8).lowercased()
+        if cloudStatus == "uploaded" || cloudStatus == "not uploaded" { return nil }
         let state = rawState == "playing" || rawState == "paused" ? rawState : "stopped"
         return AppleMusicSnapshot(
             state: state,
@@ -375,24 +391,13 @@ final class AppleMusicMonitor: ObservableObject {
             artist: item(3).nilIfEmpty,
             album: item(4).nilIfEmpty,
             trackID: item(5).nilIfEmpty,
-            artworkData: optimizedArtworkData(result.atIndex(8)?.data),
             positionMs: Int((Double(item(6)) ?? 0) * 1_000),
             durationMs: Int((Double(item(7)) ?? 0) * 1_000),
-            // 封面是二进制，占 8；循环状态接在它后面
             repeatOne: item(9) == "one",
             observedAt: Int64(Date().timeIntervalSince1970 * 1_000)
         )
     }
 
-    nonisolated private static func optimizedArtworkData(_ data: Data?) -> Data? {
-        guard let data, !data.isEmpty else { return nil }
-        guard let bitmap = NSBitmapImageRep(data: data),
-              let jpeg = bitmap.representation(
-                using: .jpeg,
-                properties: [.compressionFactor: 0.82]
-              ) else { return data }
-        return jpeg
-    }
 }
 
 extension DesktopActivitySnapshot {
@@ -406,22 +411,6 @@ extension DesktopActivitySnapshot {
     }
 }
 
-extension AppleMusicSnapshot {
-    func withArtworkData(_ artworkData: Data?) -> AppleMusicSnapshot {
-        AppleMusicSnapshot(
-            state: state,
-            title: title,
-            artist: artist,
-            album: album,
-            trackID: trackID,
-            artworkData: artworkData,
-            positionMs: positionMs,
-            durationMs: durationMs,
-            repeatOne: repeatOne,
-            observedAt: observedAt
-        )
-    }
-}
 
 struct AgentLimitWindow: Codable, Equatable, Sendable {
     /// 桶 + 窗口的稳定标识，如 "codex.primary" / "weekly_scoped"

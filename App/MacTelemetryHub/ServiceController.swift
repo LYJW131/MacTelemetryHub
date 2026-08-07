@@ -79,7 +79,6 @@ private struct AppleMusicUploadSignature: Equatable {
     let artist: String?
     let album: String?
     let trackID: String?
-    let artworkData: Data?
     let durationMs: Int
     /// 切换循环模式要让网页知道，所以它进签名
     let repeatOne: Bool
@@ -90,7 +89,6 @@ private struct AppleMusicUploadSignature: Equatable {
         artist = snapshot.artist
         album = snapshot.album
         trackID = snapshot.trackID
-        artworkData = snapshot.artworkData
         durationMs = snapshot.durationMs
         repeatOne = snapshot.repeatOne
     }
@@ -468,14 +466,9 @@ final class ServiceController: ObservableObject {
                                 $0.iconData != lastPostedDesktop?.iconData
                             return $0.withIconData(shouldSendIcon ? $0.iconData : nil)
                         }
-                        let musicPayload = music.map {
-                            // 进度更新不重复带封面；换歌时即使封面二进制相同也重新发送，
-                            // 因为服务端以 track ID 决定能否复用旧封面。
-                            let shouldSendArtwork =
-                                $0.trackID != lastPostedAppleMusic?.trackID ||
-                                $0.artworkData != lastPostedAppleMusic?.artworkData
-                            return $0.withArtworkData(shouldSendArtwork ? $0.artworkData : nil)
-                        }
+                        // 封面不再由这边送：网页那边为了拿曲目链接本来就要查一次
+                        // Apple Music 目录，那次查询的结果自带封面 URL。
+                        let musicPayload = music
                         let envelope = makeTelemetryEnvelope(
                             charger: chargerChanged ? charger : nil,
                             desktop: desktopChanged ? desktopPayload : nil,
