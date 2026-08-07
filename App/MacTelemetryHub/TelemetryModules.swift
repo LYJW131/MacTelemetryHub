@@ -495,6 +495,8 @@ final class AgentLimitsMonitor: ObservableObject {
     @Published private(set) var plans: [String: AgentPlanSnapshot] = [:]
     @Published private(set) var lastSuccess: Date?
     @Published private(set) var lastError: String?
+    /// 按 agent 分开的限额失败原因，随载荷发给网页 —— 页面要能把「没配」和「取不到」分开
+    @Published private(set) var limitErrors: [String: String] = [:]
 
     private var refreshing = false
     /// 间隔门闩看的是「上次尝试」而不是 lastSuccess：codex 路径配错时每次采集都要
@@ -522,12 +524,33 @@ final class AgentLimitsMonitor: ObservableObject {
         // @Published 订阅者）把每次采集都当成「套餐变了」。
         var fresh = outcome.plans
         for (agent, snapshot) in fresh {
-            if let previous = plans[agent], previous.hasSameContent(as: snapshot) {
+            /**
+             * 这一轮没取到限额时，沿用上一次拿到的那几条，不要清空。
+             *
+             * 清空会让页面上那几根条整个消失 —— 而「取不到」和「没有限额」是
+             * 两回事，前者该继续显示上次的值并标明它不是当前值。失败原因走
+             * limitErrors 单独送出去，页面据此决定怎么标。
+             */
+            var merged = snapshot
+            if snapshot.limits.isEmpty,
+               outcome.limitErrors[agent] != nil,
+               let previous = plans[agent], !previous.limits.isEmpty {
+                merged = AgentPlanSnapshot(
+                    tier: snapshot.tier,
+                    label: snapshot.label,
+                    limits: previous.limits,
+                    observedAt: previous.observedAt
+                )
+            }
+            if let previous = plans[agent], previous.hasSameContent(as: merged) {
                 fresh[agent] = previous
+            } else {
+                fresh[agent] = merged
             }
         }
         plans = fresh
         lastError = outcome.errors.isEmpty ? nil : outcome.errors.joined(separator: "；")
+        limitErrors = outcome.limitErrors
         if !fresh.isEmpty { lastSuccess = Date() }
     }
 }
@@ -535,6 +558,9 @@ final class AgentLimitsMonitor: ObservableObject {
 private struct AgentLimitsOutcome: Sendable {
     let plans: [String: AgentPlanSnapshot]
     let errors: [String]
+    /// 按 agent 分开的限额失败原因，要跟着载荷发给网页 —— 页面得能把
+    /// 「这个 agent 没配」和「配了但取不到」分开，两者都是空数组。
+    let limitErrors: [String: String]
 }
 
 /// Process 不是 Sendable，超时看门狗又必须在另一个队列上摸它。这里只碰
@@ -565,6 +591,7 @@ private enum AgentLimitsCollector {
     nonisolated static func collect(codexPath: String) async -> AgentLimitsOutcome {
         var plans: [String: AgentPlanSnapshot] = [:]
         var errors: [String] = []
+        var limitErrors: [String: String] = [:]
         do {
             // 子进程那套是纯阻塞的，丢进 detached 里跑，别占着协作线程
             plans["codex"] = try await Task.detached(priority: .utility) {
@@ -572,6 +599,7 @@ private enum AgentLimitsCollector {
             }.value
         } catch {
             errors.append(error.localizedDescription)
+            limitErrors["codex"] = error.localizedDescription
         }
 
         // tier 和 limits 再分一层：usage 接口挂了（限流 / 凭据过期）不该把套餐名
@@ -584,6 +612,7 @@ private enum AgentLimitsCollector {
                 limits = try await claudeLimits(credentials: credentials)
             } catch {
                 errors.append(error.localizedDescription)
+                limitErrors["claude"] = error.localizedDescription
             }
             plans["claude"] = AgentPlanSnapshot(
                 tier: tier,
@@ -593,8 +622,9 @@ private enum AgentLimitsCollector {
             )
         } catch {
             errors.append(error.localizedDescription)
+            limitErrors["claude"] = error.localizedDescription
         }
-        return AgentLimitsOutcome(plans: plans, errors: errors)
+        return AgentLimitsOutcome(plans: plans, errors: errors, limitErrors: limitErrors)
     }
 
     nonisolated private static func codexPlan(codexPath: String) throws -> AgentPlanSnapshot {
@@ -778,7 +808,18 @@ private enum AgentLimitsCollector {
         guard let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
             throw TelemetryModuleError.agentLimits("Claude 用量响应不是有效 JSON")
         }
-        return parseClaudeLimits(root)
+        let windows = parseClaudeLimits(root)
+        /**
+         * 空数组当错误报，不当「这个账号没有限额」。
+         *
+         * 订阅账号一定至少有一个会话窗口，所以解出零条只可能是响应结构变了 ——
+         * 那是这个未公开端点最可能的失效方式，而静默返回空数组会让页面显示成
+         * 「没有限额」，和「取不到」混为一谈。
+         */
+        guard !windows.isEmpty else {
+            throw TelemetryModuleError.agentLimits("Claude 用量响应里没有 limits 数组，接口结构可能变了")
+        }
+        return windows
     }
 
     nonisolated private static func parseClaudeLimits(_ root: [String: Any]) -> [AgentLimitWindow] {
@@ -845,7 +886,8 @@ final class CcusageMonitor: ObservableObject {
         nodePath: String,
         cliPath: String,
         interval: Double,
-        plans: [String: AgentPlanSnapshot]
+        plans: [String: AgentPlanSnapshot],
+        limitErrors: [String: String]
     ) async {
         guard !refreshing else { return }
         // 套餐变了要立刻重采：plans 是随 ccusage 一起上报的，光等间隔门闩的话
@@ -856,7 +898,7 @@ final class CcusageMonitor: ObservableObject {
         defer { refreshing = false }
         do {
             let collection = try await Task.detached(priority: .utility) {
-                try CcusageCollector.collect(nodePath: nodePath, cliPath: cliPath, plans: plans)
+                try CcusageCollector.collect(nodePath: nodePath, cliPath: cliPath, plans: plans, limitErrors: limitErrors)
             }.value
             payload = collection.localPayload
             uploadPayload = collection.uploadPayload
@@ -878,7 +920,8 @@ private enum CcusageCollector {
     nonisolated static func collect(
         nodePath: String,
         cliPath: String,
-        plans: [String: AgentPlanSnapshot]
+        plans: [String: AgentPlanSnapshot],
+        limitErrors: [String: String]
     ) throws -> CcusageCollection {
         guard FileManager.default.isExecutableFile(atPath: nodePath) else {
             throw TelemetryModuleError.ccusage("Node 路径不可执行：\(nodePath)")
@@ -910,7 +953,7 @@ private enum CcusageCollector {
         let data = try JSONSerialization.data(withJSONObject: reports)
         let localPayload = try JSONDecoder().decode(JSONValue.self, from: data)
         let uploadData = try JSONSerialization.data(
-            withJSONObject: makeUploadSummary(reports, plans: plans)
+            withJSONObject: makeUploadSummary(reports, plans: plans, limitErrors: limitErrors)
         )
         return CcusageCollection(
             localPayload: localPayload,
@@ -1003,7 +1046,8 @@ private enum CcusageCollector {
     /// daily/model output on the Mac and send this bounded summary instead.
     private static func makeUploadSummary(
         _ reports: [String: Any],
-        plans: [String: AgentPlanSnapshot]
+        plans: [String: AgentPlanSnapshot],
+        limitErrors: [String: String]
     ) -> [String: Any] {
         let calendar = Calendar.current
         let today = calendar.startOfDay(for: Date())
@@ -1080,6 +1124,9 @@ private enum CcusageCollector {
                 "last30DaysTokens": recentDays.reduce(0.0) { $0 + number($1["totalTokens"]) },
                 "plan": planValue,
                 "limits": limitValues,
+                // 空 limits 有两种含义：这个 agent 没配，或者配了但取不到。
+                // 页面得能分开 —— 前者该整块不渲染，后者该渲染并说明取不到。
+                "limitsError": limitErrors[agent] ?? NSNull(),
             ])
         }
 

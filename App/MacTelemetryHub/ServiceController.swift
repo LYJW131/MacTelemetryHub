@@ -18,19 +18,19 @@ private struct ChargerUploadSignature: Equatable {
 /**
  * 只包含「插拔 / 换设备」这类结构性变化的指纹，用来决定要不要即时上报。
  *
- * 刻意读 `PortState` 而不是上报载荷：载荷里那几个看着像结构信息的字段其实都
- * 是功率派生的 —— `mode` 是 `power > 0.2` 算出来的，`cable` 和 `chargingInfo`
- * 又都挂在同样功率派生的 `PortState.connected` 上。拿它们当判据的话，涓流充电
- * 在 0.2W 上下摆一摆就会每 6 秒翻一次，即时上报退化成 5 秒一次的风暴。
+ * `mode` 是充电头自己给的端口开关位（0xA5/0xA6/0xA7 结构体的第一个字节），
+ * 不是从功率推出来的 —— 实测插着线不取电的口是 `Output` + 0.00W，功率阈值
+ * 那套会把它误判成关。所以它是最直接的插拔信号，比设备身份还灵：插一个
+ * 表里没有的设备，身份查不出名字，但开关位一定会翻。
  *
- * 这里这几个字段全部直接来自 12 秒的 status 探针，不经过任何功率阈值：
- * 身份槽用哨兵值表示空口，拔掉时会被清成 nil，插上时才有值。
- *
- * 载荷里的 `model` / `vendor` 也不够用：它们是查表查出来的显示名，遇到表里
- * 没有的设备就是 nil，跟空口分不出来。`vendorID` / `productID` 是原始值，没这个问题。
+ * 读 `PortState` 而不是上报载荷，是因为载荷里的 `model` / `vendor` 是查表查出来
+ * 的显示名，表里没有的设备就是 nil、跟空口分不出来。`vendorID` / `productID`
+ * 是原始值，没这个问题。
  */
 private struct ChargerStructuralSignature: Equatable {
     private struct Port: Equatable {
+        /// 充电头给的端口开关位，插拔最直接的信号
+        let mode: String
         let vendorID: UInt16?
         let productID: UInt16?
         let brandCode: UInt8?
@@ -38,6 +38,7 @@ private struct ChargerStructuralSignature: Equatable {
         let cableCode: String?
 
         init(_ port: PortState) {
+            mode = port.mode
             vendorID = port.vendorID
             productID = port.productID
             brandCode = port.brandCode
@@ -372,7 +373,8 @@ final class ServiceController: ObservableObject {
                             nodePath: settings.nodePath,
                             cliPath: settings.ccusageCLIPath,
                             interval: settings.ccusageRefreshInterval,
-                            plans: agentLimits.plans
+                            plans: agentLimits.plans,
+                            limitErrors: agentLimits.limitErrors
                         )
                     }
 
@@ -656,6 +658,21 @@ final class ServiceController: ObservableObject {
                 phase: bluetooth.phase.label,
                 state: bluetooth.state
             ))
+        /**
+         * 采集侧各模块最近一次的失败原因。
+         *
+         * 限额那条会静默失败 —— 凭据被拒、接口限流、token 过期，表现都只是
+         * 「limits 变成空数组」，套餐等级还在（它是本地文件读的）。没有这个
+         * 端点就只能靠猜。
+         */
+        case ("GET", "/debug/errors"):
+            return encode([
+                "agentLimits": agentLimits.lastError,
+                "ccusage": ccusage.lastError,
+                "appleMusic": appleMusic.lastError,
+                "bluetooth": bluetooth.lastError,
+                "reporter": reporterLastError,
+            ])
         case ("GET", "/ports"):
             return encode(statusPayload.ports)
         case ("GET", let path) where path.hasPrefix("/ports/"):

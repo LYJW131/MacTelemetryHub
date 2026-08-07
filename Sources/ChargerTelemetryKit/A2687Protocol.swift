@@ -234,13 +234,13 @@ public enum A2687Protocol {
         let fields = Dictionary(uniqueKeysWithValues: parseTLV(payload, offset: tlvOffset(payload)).map { ($0.type, TypedValue($0.value)) })
         let portTypes: [(UInt8, String)] = [(0xA5, "C1"), (0xA6, "C2"), (0xA7, "C3")]
         let cableTypes: [(UInt8, String)] = [(0xAC, "C1"), (0xAD, "C2"), (0xAE, "C3")]
+        /// 0xA5/0xA6/0xA7 是 8 字节结构体：第 1 字节是端口开关位，其后依次是
+        /// 电压、电流、功率各两字节小端。没有这个结构就是这帧不带端口数据。
         let hasPortStruct = portTypes.contains { type, _ in
             guard let value = fields[type] else { return false }
             return value.tag == 0x04 && value.payload.count >= 7
         }
-        guard hasPortStruct else {
-            return parseLegacyRealtime(fields, command: command, state: &state, now: now)
-        }
+        guard hasPortStruct else { return false }
 
         var changed = false
         if !statusSnapshotCommands.contains(command) {
@@ -410,44 +410,6 @@ public enum A2687Protocol {
         return changed
     }
 
-    private static func parseLegacyRealtime(
-        _ fields: [UInt8: TypedValue],
-        command: UInt16,
-        state: inout ChargerState,
-        now: Date
-    ) -> Bool {
-        guard !statusSnapshotCommands.contains(command) else { return false }
-        let voltageTypes: [String: UInt8] = ["C1": 0xA2, "C2": 0xA3, "C3": 0xA4]
-        let currentTypes: [String: UInt8] = ["C1": 0xA5, "C2": 0xA6, "C3": 0xA7]
-        let powerTypes: [String: UInt8] = ["C1": 0xB0, "C2": 0xB1, "C3": 0xB2]
-        func number(_ type: UInt8?) -> Int64? {
-            guard let type, let value = fields[type] else { return nil }
-            return value.unsigned.map(Int64.init) ?? value.signed
-        }
-        var changed = false
-        for key in ["C1", "C2", "C3"] {
-            let voltageRaw = number(voltageTypes[key])
-            let currentRaw = number(currentTypes[key])
-            let powerRaw = number(powerTypes[key])
-            guard currentRaw != nil || powerRaw != nil else { continue }
-            let voltage = voltageRaw.map { Double($0) / 10 }
-            let current = currentRaw.map { Double($0) / 10 }
-            let power = powerRaw.map(Double.init) ?? ((voltage != nil && current != nil) ? voltage! * current! : nil)
-            var port = state.ports[key] ?? PortState()
-            port.mode = (power ?? 0) > 0.2 ? "Output" : "Off"
-            if port.mode == "Off" {
-                port.voltageV = nil; port.currentA = nil; port.powerW = nil
-            } else {
-                port.voltageV = voltage; port.currentA = current
-                port.powerW = power.map { ($0 * 100).rounded() / 100 }
-            }
-            state.ports[key] = port
-            changed = true
-        }
-        if let total = number(0xA8) { state.totalOutputPowerW = Double(total); changed = true }
-        if changed { state.updatedAt = now.timeIntervalSince1970 }
-        return changed
-    }
 
     private static func modelKey(_ vendor: UInt16, _ product: UInt16) -> UInt32 {
         UInt32(vendor) << 16 | UInt32(product)
