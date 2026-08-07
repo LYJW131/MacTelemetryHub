@@ -300,7 +300,13 @@ final class ServiceController: ObservableObject {
                     // 播放/暂停、换歌、换前台应用是用户正盯着的事，不值得为它们等满节流窗口。
                     // 这些变化本来也会上报，即时化只是把等待砍掉，不增加请求总数；
                     // 而且同一个 envelope 会把此刻待发的充电器 / ccusage 一起捎走。
+                    // 进度跳变也算紧急。单曲循环时曲目和状态都没变，只有进度
+                    // 从结尾跳回开头 —— 不放行的话网页会把进度条钉在 100%，
+                    // 一直等到下一个节流窗口（实测 postInterval=30 时要等 30 秒）。
+                    // 拖动进度条同理。这不会变吵：seek 只在通知或兜底重读时才
+                    // 被发现，而通知只在换歌/播放状态变化时来。
                     let musicUrgent = musicChanged && (
+                        musicSeeked ||
                         music?.state != lastPostedAppleMusic?.state ||
                         music?.trackID != lastPostedAppleMusic?.trackID
                     )

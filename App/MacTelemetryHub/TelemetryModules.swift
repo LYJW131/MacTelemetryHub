@@ -207,13 +207,48 @@ final class AppleMusicMonitor: ObservableObject {
             }
         }
 
+        reschedulePoll()
+    }
+
+    /**
+     * 下一次兜底重读等多久。
+     *
+     * 曲目该放完的那一刻必须立刻去看：接下来要么循环回开头、要么换了下一首，
+     * 两种都需要新锚点，而 Music.app 这两种情况都不发通知（换歌发，循环不发）。
+     *
+     * 之所以不去判断「是不是单曲循环」：那个问题根本答不了。song repeat 只有
+     * off/one/all，而 all 到底会不会回到同一首取决于播放队列 —— 实测从资料库
+     * 播放时 current playlist 是「音乐」共 730 首，专辑自己有几首完全不相干，
+     * AppleScript 又拿不到队列。与其猜，不如到点了直接去看。
+     */
+    /**
+     * 每次 snapshot 变化后重排下一次兜底重读。
+     *
+     * 不能用「固定间隔的循环」：那样延迟是进入睡眠前算好的，而通知驱动的
+     * refresh 随时会换掉锚点，循环还按旧计划睡，「到点去看」就落空了。
+     */
+    private func reschedulePoll() {
+        pollTask?.cancel()
         pollTask = Task { [weak self] in
-            while !Task.isCancelled {
-                try? await Task.sleep(for: Self.seekPollInterval)
-                if Task.isCancelled { return }
-                await self?.refresh()
-            }
+            let delay = self?.nextPollDelay() ?? Self.seekPollInterval
+            try? await Task.sleep(for: delay)
+            guard !Task.isCancelled else { return }
+            // refresh 结束时会再排下一次
+            await self?.refresh()
         }
+    }
+
+    private func nextPollDelay() -> Duration {
+        guard let snapshot, snapshot.state == "playing", snapshot.durationMs > 0 else {
+            return Self.seekPollInterval
+        }
+        let now = Int64(Date().timeIntervalSince1970 * 1_000)
+        let elapsed = Int(max(0, now - snapshot.observedAt))
+        let remaining = snapshot.durationMs - (snapshot.positionMs + elapsed)
+        // 已经过点了（比如刚从睡眠醒来）就尽快补一次
+        guard remaining > 0 else { return .milliseconds(1_500) }
+        // 结束后再多等 1 秒，让 Music.app 把新状态落定
+        return min(Self.seekPollInterval, .milliseconds(remaining + 1_000))
     }
 
     func stop() {
@@ -250,9 +285,12 @@ final class AppleMusicMonitor: ObservableObject {
                 snapshot = nil
                 lastError = error.localizedDescription
             }
-            // 25 秒兜底轮询多数时候读到的和上次一样，没必要为此叫醒上报循环
+            // 兜底重读多数时候读到的和上次一样，没必要为此叫醒上报循环
             if snapshot != previous { onChange?() }
         } while pendingRefresh
+
+        // 锚点可能变了，下一次该什么时候看也跟着变
+        reschedulePoll()
     }
 
     nonisolated private static func readSnapshot() throws -> AppleMusicSnapshot? {
