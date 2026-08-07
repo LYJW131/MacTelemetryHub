@@ -1,6 +1,7 @@
 @preconcurrency import CoreBluetooth
 import AppKit
 import Foundation
+import IOKit.ps
 
 @MainActor
 final class BluetoothService: NSObject, ObservableObject {
@@ -34,7 +35,7 @@ final class BluetoothService: NSObject, ObservableObject {
     var isConnected: Bool { phase == .connected }
 
     private let settings: AppSettings
-    private var central: CBCentralManager!
+    private var central: CBCentralManager?
     private var peripheral: CBPeripheral?
     private var writeCharacteristic: CBCharacteristic?
     private var notifyCharacteristic: CBCharacteristic?
@@ -43,8 +44,11 @@ final class BluetoothService: NSObject, ObservableObject {
     private var handshakeTask: Task<Void, Never>?
     private var pollingTasks: [Task<Void, Never>] = []
     private var retryTask: Task<Void, Never>?
+    private var attemptTimeoutTask: Task<Void, Never>?
     private var pending: PendingResponse?
-    private var observesWorkspaceWake = false
+    private var observesWorkspacePower = false
+    private var isSystemSleeping = false
+    private var retryAttempt = 0
 
     init(settings: AppSettings) {
         self.settings = settings
@@ -54,73 +58,101 @@ final class BluetoothService: NSObject, ObservableObject {
     func start() {
         guard central == nil else { return }
         desiredConnection = true
-        if !observesWorkspaceWake {
+        if !observesWorkspacePower {
             NSWorkspace.shared.notificationCenter.addObserver(
                 self,
-                selector: #selector(workspaceDidWake(_:)),
-                name: NSWorkspace.didWakeNotification,
+                selector: #selector(workspaceScreensDidWake(_:)),
+                name: NSWorkspace.screensDidWakeNotification,
                 object: nil
             )
-            observesWorkspaceWake = true
+            NSWorkspace.shared.notificationCenter.addObserver(
+                self,
+                selector: #selector(workspaceWillSleep(_:)),
+                name: NSWorkspace.willSleepNotification,
+                object: nil
+            )
+            observesWorkspacePower = true
         }
-        central = CBCentralManager(delegate: self, queue: .main)
+        startCentralIfNeeded()
     }
 
     func disconnect() {
         desiredConnection = false
         lastError = "已手动断开"
-        cancelSessionTasks()
-        central?.stopScan()
-        if let peripheral {
-            central?.cancelPeripheralConnection(peripheral)
-        } else {
-            phase = .disconnected
-        }
+        destroyBluetoothSession()
     }
 
     func reconnect() {
         desiredConnection = true
         lastError = nil
-        cancelSessionTasks()
-        central?.stopScan()
-        writeCharacteristic = nil
-        notifyCharacteristic = nil
-        assembler.reset()
-        if let peripheral, peripheral.state != .disconnected {
-            central?.cancelPeripheralConnection(peripheral)
-            // CoreBluetooth can keep reporting `.connected` across system
-            // sleep even though the GATT session is no longer usable. Do not
-            // depend exclusively on didDisconnectPeripheral arriving.
-            scheduleRetry(after: .seconds(1))
-        } else {
-            self.peripheral = nil
-            beginDiscovery()
-        }
+        retryAttempt = 0
+        destroyBluetoothSession()
+        scheduleRetry(after: .seconds(1))
     }
 
     func shutdown() {
         desiredConnection = false
-        cancelSessionTasks()
-        central?.stopScan()
-        if let peripheral { central?.cancelPeripheralConnection(peripheral) }
-        if observesWorkspaceWake {
+        destroyBluetoothSession()
+        if observesWorkspacePower {
             NSWorkspace.shared.notificationCenter.removeObserver(
                 self,
-                name: NSWorkspace.didWakeNotification,
+                name: NSWorkspace.screensDidWakeNotification,
                 object: nil
             )
-            observesWorkspaceWake = false
+            NSWorkspace.shared.notificationCenter.removeObserver(
+                self,
+                name: NSWorkspace.willSleepNotification,
+                object: nil
+            )
+            observesWorkspacePower = false
         }
     }
 
-    @objc private func workspaceDidWake(_ notification: Notification) {
+    @objc private func workspaceWillSleep(_ notification: Notification) {
+        isSystemSleeping = true
         guard desiredConnection else { return }
-        reconnect()
+        lastError = "Mac 正在睡眠，已释放蓝牙连接"
+        destroyBluetoothSession()
+    }
+
+    @objc private func workspaceScreensDidWake(_ notification: Notification) {
+        guard isSystemSleeping else { return }
+        isSystemSleeping = false
+        guard desiredConnection else { return }
+        retryAttempt = 0
         lastError = "Mac 已唤醒，正在重新建立蓝牙会话"
+        scheduleRetry(after: .seconds(1))
+    }
+
+    private func startCentralIfNeeded() {
+        guard desiredConnection, !isSystemSleeping, central == nil else { return }
+        central = CBCentralManager(delegate: self, queue: .main)
+    }
+
+    private func destroyBluetoothSession() {
+        cancelSessionTasks()
+        let manager = central
+        manager?.stopScan()
+        if let peripheral {
+            peripheral.delegate = nil
+            if peripheral.state != .disconnected {
+                manager?.cancelPeripheralConnection(peripheral)
+            }
+        }
+        self.peripheral = nil
+        writeCharacteristic = nil
+        notifyCharacteristic = nil
+        assembler.reset()
+        manager?.delegate = nil
+        central = nil
+        phase = .disconnected
     }
 
     private func beginDiscovery() {
-        guard desiredConnection, central?.state == .poweredOn else { return }
+        guard desiredConnection,
+              !isSystemSleeping,
+              let central,
+              central.state == .poweredOn else { return }
         do {
             try settings.validate()
         } catch {
@@ -138,23 +170,64 @@ final class BluetoothService: NSObject, ObservableObject {
         }
         phase = .scanning
         central.scanForPeripherals(withServices: nil, options: [CBCentralManagerScanOptionAllowDuplicatesKey: false])
+        scheduleAttemptTimeout()
     }
 
     private func connect(to candidate: CBPeripheral) {
+        guard desiredConnection, !isSystemSleeping, let central else { return }
         central.stopScan()
         peripheral = candidate
         candidate.delegate = self
         phase = .connecting(candidate.name ?? candidate.identifier.uuidString)
         central.connect(candidate, options: [CBConnectPeripheralOptionNotifyOnDisconnectionKey: true])
+        scheduleAttemptTimeout()
+    }
+
+    private func scheduleAttemptTimeout(after delay: Duration = .seconds(15)) {
+        attemptTimeoutTask?.cancel()
+        attemptTimeoutTask = Task { [weak self] in
+            try? await Task.sleep(for: delay)
+            guard !Task.isCancelled, let self else { return }
+            switch phase {
+            case .scanning, .connecting:
+                lastError = "未发现充电器，已暂停蓝牙以节省电量"
+                destroyBluetoothSession()
+                scheduleBackoffRetry()
+            default:
+                break
+            }
+        }
+    }
+
+    private func scheduleBackoffRetry() {
+        let delay: Int64
+        if isUsingBatteryPower {
+            let delays: [Int64] = [60, 120, 240, 300]
+            delay = delays[min(retryAttempt, delays.count - 1)]
+            retryAttempt += 1
+        } else {
+            delay = 15
+        }
+        scheduleRetry(after: .seconds(delay))
+    }
+
+    private var isUsingBatteryPower: Bool {
+        let snapshot = IOPSCopyPowerSourcesInfo().takeRetainedValue()
+        let source = IOPSGetProvidingPowerSourceType(snapshot).takeUnretainedValue() as String
+        return source == kIOPSBatteryPowerValue
     }
 
     private func scheduleRetry(after delay: Duration = .seconds(5)) {
-        guard desiredConnection else { return }
+        guard desiredConnection, !isSystemSleeping else { return }
         retryTask?.cancel()
         retryTask = Task { [weak self] in
             try? await Task.sleep(for: delay)
-            guard !Task.isCancelled else { return }
-            self?.beginDiscovery()
+            guard !Task.isCancelled, let self else { return }
+            if central == nil {
+                startCentralIfNeeded()
+            } else {
+                beginDiscovery()
+            }
         }
     }
 
@@ -165,6 +238,8 @@ final class BluetoothService: NSObject, ObservableObject {
         pollingTasks.removeAll()
         retryTask?.cancel()
         retryTask = nil
+        attemptTimeoutTask?.cancel()
+        attemptTimeoutTask = nil
         if let pending {
             pending.timeout.cancel()
             pending.continuation.resume(throwing: BLEError.disconnected)
@@ -182,6 +257,7 @@ final class BluetoothService: NSObject, ObservableObject {
             do {
                 try await performHandshake()
                 guard !Task.isCancelled else { return }
+                retryAttempt = 0
                 phase = .connected
                 lastError = nil
                 startPolling()
@@ -190,7 +266,7 @@ final class BluetoothService: NSObject, ObservableObject {
             } catch {
                 guard !Task.isCancelled else { return }
                 lastError = error.localizedDescription
-                if let peripheral { central.cancelPeripheralConnection(peripheral) }
+                if let peripheral { central?.cancelPeripheralConnection(peripheral) }
             }
             handshakeTask = nil
         }
@@ -319,6 +395,7 @@ final class BluetoothService: NSObject, ObservableObject {
 
 extension BluetoothService: @preconcurrency CBCentralManagerDelegate {
     func centralManagerDidUpdateState(_ central: CBCentralManager) {
+        guard central === self.central else { return }
         switch central.state {
         case .poweredOn:
             beginDiscovery()
@@ -343,6 +420,7 @@ extension BluetoothService: @preconcurrency CBCentralManagerDelegate {
         advertisementData: [String: Any],
         rssi RSSI: NSNumber
     ) {
+        guard central === self.central else { return }
         let advertisedName = advertisementData[CBAdvertisementDataLocalNameKey] as? String
         let name = peripheral.name ?? advertisedName ?? ""
         let services = advertisementData[CBAdvertisementDataServiceUUIDsKey] as? [CBUUID] ?? []
@@ -351,25 +429,32 @@ extension BluetoothService: @preconcurrency CBCentralManagerDelegate {
     }
 
     func centralManager(_ central: CBCentralManager, didConnect peripheral: CBPeripheral) {
+        guard central === self.central else { return }
+        attemptTimeoutTask?.cancel()
+        attemptTimeoutTask = nil
         self.peripheral = peripheral
         peripheral.delegate = self
         peripheral.discoverServices([CBUUID(string: A2687Protocol.serviceUUID)])
     }
 
     func centralManager(_ central: CBCentralManager, didFailToConnect peripheral: CBPeripheral, error: Error?) {
+        guard central === self.central else { return }
         phase = .disconnected
         lastError = error?.localizedDescription ?? "无法连接充电器"
-        scheduleRetry()
+        scheduleBackoffRetry()
     }
 
     func centralManager(_ central: CBCentralManager, didDisconnectPeripheral peripheral: CBPeripheral, error: Error?) {
+        guard central === self.central else { return }
         cancelSessionTasks()
         writeCharacteristic = nil
         notifyCharacteristic = nil
         phase = .disconnected
-        if desiredConnection {
+        if desiredConnection, !isSystemSleeping {
             lastError = error?.localizedDescription ?? "连接已断开"
-            scheduleRetry()
+            scheduleBackoffRetry()
+        } else if isSystemSleeping {
+            lastError = "Mac 正在睡眠，已释放蓝牙连接"
         } else {
             lastError = "已手动断开"
         }
@@ -378,10 +463,11 @@ extension BluetoothService: @preconcurrency CBCentralManagerDelegate {
 
 extension BluetoothService: @preconcurrency CBPeripheralDelegate {
     func peripheral(_ peripheral: CBPeripheral, didDiscoverServices error: Error?) {
-        if let error { lastError = error.localizedDescription; central.cancelPeripheralConnection(peripheral); return }
+        guard peripheral === self.peripheral else { return }
+        if let error { lastError = error.localizedDescription; central?.cancelPeripheralConnection(peripheral); return }
         guard let service = peripheral.services?.first(where: { $0.uuid == CBUUID(string: A2687Protocol.serviceUUID) }) else {
             lastError = "充电器没有所需 GATT 服务"
-            central.cancelPeripheralConnection(peripheral)
+            central?.cancelPeripheralConnection(peripheral)
             return
         }
         peripheral.discoverCharacteristics(
@@ -391,25 +477,28 @@ extension BluetoothService: @preconcurrency CBPeripheralDelegate {
     }
 
     func peripheral(_ peripheral: CBPeripheral, didDiscoverCharacteristicsFor service: CBService, error: Error?) {
-        if let error { lastError = error.localizedDescription; central.cancelPeripheralConnection(peripheral); return }
+        guard peripheral === self.peripheral else { return }
+        if let error { lastError = error.localizedDescription; central?.cancelPeripheralConnection(peripheral); return }
         writeCharacteristic = service.characteristics?.first { $0.uuid == CBUUID(string: A2687Protocol.writeCharacteristicUUID) }
         notifyCharacteristic = service.characteristics?.first { $0.uuid == CBUUID(string: A2687Protocol.notifyCharacteristicUUID) }
         guard writeCharacteristic != nil, let notifyCharacteristic else {
             lastError = "充电器缺少写入或通知特征"
-            central.cancelPeripheralConnection(peripheral)
+            central?.cancelPeripheralConnection(peripheral)
             return
         }
         peripheral.setNotifyValue(true, for: notifyCharacteristic)
     }
 
     func peripheral(_ peripheral: CBPeripheral, didUpdateNotificationStateFor characteristic: CBCharacteristic, error: Error?) {
-        if let error { lastError = error.localizedDescription; central.cancelPeripheralConnection(peripheral); return }
+        guard peripheral === self.peripheral else { return }
+        if let error { lastError = error.localizedDescription; central?.cancelPeripheralConnection(peripheral); return }
         if characteristic.uuid == CBUUID(string: A2687Protocol.notifyCharacteristicUUID), characteristic.isNotifying {
             startHandshake()
         }
     }
 
     func peripheral(_ peripheral: CBPeripheral, didUpdateValueFor characteristic: CBCharacteristic, error: Error?) {
+        guard peripheral === self.peripheral else { return }
         guard error == nil, let value = characteristic.value else { return }
         handleNotification(value)
     }
