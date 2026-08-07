@@ -7,6 +7,7 @@ struct DashboardView: View {
     @ObservedObject private var httpServer: LocalHTTPServer
     @ObservedObject private var appleMusic: AppleMusicMonitor
     @ObservedObject private var ccusage: CcusageMonitor
+    @ObservedObject private var agentLimits: AgentLimitsMonitor
     @State private var showingSettings = false
 
     init(service: ServiceController) {
@@ -15,6 +16,7 @@ struct DashboardView: View {
         httpServer = service.httpServer
         appleMusic = service.appleMusic
         ccusage = service.ccusage
+        agentLimits = service.agentLimits
     }
 
     var body: some View {
@@ -43,7 +45,8 @@ struct DashboardView: View {
                                 VibeCodingUsageView(
                                     payload: ccusage.payload,
                                     updatedAt: ccusage.lastSuccess,
-                                    error: ccusage.lastError
+                                    error: ccusage.lastError,
+                                    plans: agentLimits.plans
                                 )
                             }
                             if service.settings.chargerModuleEnabled {

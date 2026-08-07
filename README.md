@@ -19,6 +19,7 @@ usage, rather than the identity of the whole application.
 - direct local Music.app state via Apple Events (separate from Apple Music Web API)
 - foreground application reporting, limited to the app's name, bundle ID, and icon
 - ccusage aggregation that never uploads session IDs, project paths, prompts, or replies
+- subscription plan tier and server-side rate-limit windows for Claude Code and Codex
 - login launch using `SMAppService.mainApp`
 
 Each module can be disabled without stopping the others. Disabling the charger
@@ -51,6 +52,36 @@ module is sent again only after ccusage refreshes, while the smaller live
 modules are also sent only when their display content changes. A heartbeat-only
 envelope is sent every 30 seconds so the site can detect an offline reporter
 without receiving duplicate charger, desktop, music, or ccusage snapshots.
+
+## Plan tier and rate-limit windows
+
+ccusage counts tokens found in local JSONL files; it knows nothing about the
+subscription behind them. Plan tier and remaining quota are server-side facts,
+so they are collected separately and merged into the `vibe_coding` module as a
+`plan` object and a `limits` array on each agent.
+
+- Codex: `codex app-server` over stdio JSON-RPC, `account/rateLimits/read`. The
+  reply is read from `rateLimitsByLimitId`, so per-model buckets (for example
+  the Spark bucket) appear alongside the main one. Each bucket reports its
+  window length in minutes.
+- Claude Code: the plan tier comes from `oauthAccount.organizationRateLimitTier`
+  in `~/.claude.json`. Window usage comes from `GET /api/oauth/usage` on
+  `api.anthropic.com`, authenticated with the OAuth token that Claude Code
+  already stores in the login keychain under `Claude Code-credentials`. The
+  token is read, never written, and never refreshed — rotating it would knock
+  the user's own Claude Code session offline. It is not logged and does not
+  leave the Mac.
+
+**This endpoint is not public API.** It is what Claude Code's own `/usage`
+panel calls, and Anthropic can change or withdraw it without notice. When it
+fails, the plan tier still renders and the limits section simply disappears.
+
+The two sources disagree about what they can describe, and the payload keeps
+both rather than inventing the missing half: Codex reports a window length but
+no grouping, Claude reports a grouping (`session`, `weekly`) but no length.
+Consumers render whichever is present. Window counts and durations are never
+assumed — OpenAI dropped the five-hour window from some plans and may restore
+it, so `limits` is a plain array with no fixed slots.
 
 `position_ms` in the music module is an anchor, not a stream. Paired with
 `observed_at` and `state` it lets the site interpolate the playhead on its own,
@@ -102,6 +133,12 @@ The app also exposes local debugging snapshots at `GET /activity` and
 - Apple Music asks once for permission to communicate with Music.app.
 - ccusage requires paths to the local Node executable and
   `node_modules/ccusage/src/cli.js`; its minimum refresh interval is 60 seconds.
+- Codex limits require the path to the `codex` executable. Leaving it blank
+  skips that half; the Claude side is unaffected.
+- Claude limits ask for access to the `Claude Code-credentials` keychain item.
+  Choose **Always Allow**; **Allow** grants a single read and macOS re-prompts
+  on every refresh. Declining leaves the plan tier — which is read from a plain
+  file — and drops only the usage windows.
 
 ## Open and run in Xcode
 

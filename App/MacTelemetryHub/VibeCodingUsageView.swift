@@ -5,6 +5,9 @@ struct VibeCodingUsageView: View {
     let payload: JSONValue?
     let updatedAt: Date?
     let error: String?
+    /// 键是 "claude" / "codex"。套餐和限额跟 ccusage 无关 —— ccusage 只数本地
+    /// JSONL 里的 token，服务端的额度它一无所知，所以走单独的采集器单独传进来。
+    var plans: [String: AgentPlanSnapshot] = [:]
 
     @State private var selectedAgent: UsageAgentFilter = .all
 
@@ -214,28 +217,54 @@ struct VibeCodingUsageView: View {
     }
 
     private func providerRows(_ report: VibeUsageReport) -> some View {
-        HStack(spacing: 10) {
+        HStack(alignment: .top, spacing: 10) {
             ForEach(report.providers) { provider in
                 let window = provider.selection
-                HStack(spacing: 10) {
-                    Image(systemName: provider.agent == .claude ? "sparkles" : "chevron.left.forwardslash.chevron.right")
-                        .foregroundStyle(provider.agent.color)
-                        .frame(width: 18)
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text(provider.agent.label)
-                            .font(.caption.weight(.semibold))
-                        Text(provider.currentModel ?? "Model unavailable")
-                            .font(.caption2)
-                            .foregroundStyle(.secondary)
-                            .lineLimit(1)
+                let plan = plans[provider.agent.rawValue]
+                VStack(alignment: .leading, spacing: 0) {
+                    HStack(spacing: 10) {
+                        Image(systemName: provider.agent == .claude ? "sparkles" : "chevron.left.forwardslash.chevron.right")
+                            .foregroundStyle(provider.agent.color)
+                            .frame(width: 18)
+                        VStack(alignment: .leading, spacing: 2) {
+                            HStack(spacing: 5) {
+                                Text(provider.agent.label)
+                                    .font(.caption.weight(.semibold))
+                                if let plan {
+                                    Text("·")
+                                        .font(.caption2)
+                                        .foregroundStyle(.secondary)
+                                    Text(plan.label)
+                                        .font(.caption2)
+                                        .foregroundStyle(.secondary)
+                                }
+                            }
+                            Text(provider.currentModel ?? "Model unavailable")
+                                .font(.caption2)
+                                .foregroundStyle(.secondary)
+                                .lineLimit(1)
+                        }
+                        Spacer()
+                        VStack(alignment: .trailing, spacing: 2) {
+                            Text(formatTokens(window.today.totalTokens))
+                                .font(.callout.monospacedDigit().weight(.semibold))
+                            Text("today · \(formatUSD(window.today.costUSD))")
+                                .font(.caption2)
+                                .foregroundStyle(.secondary)
+                        }
                     }
-                    Spacer()
-                    VStack(alignment: .trailing, spacing: 2) {
-                        Text(formatTokens(window.today.totalTokens))
-                            .font(.callout.monospacedDigit().weight(.semibold))
-                        Text("today · \(formatUSD(window.today.costUSD))")
-                            .font(.caption2)
-                            .foregroundStyle(.secondary)
+
+                    if let limits = plan?.limits, !limits.isEmpty {
+                        Divider().padding(.vertical, 9)
+                        // 倒计时只到分钟级，60 秒一跳就够了；整个卡片跟着面板那个
+                        // 每秒 TimelineView 重绘的话，下面那张 30 天图会白重画 60 倍。
+                        TimelineView(.periodic(from: .now, by: 60)) { context in
+                            VStack(spacing: 7) {
+                                ForEach(limits, id: \.key) { limit in
+                                    UsageLimitMeter(limit: limit, tint: provider.agent.color, now: context.date)
+                                }
+                            }
+                        }
                     }
                 }
                 .padding(11)
@@ -279,6 +308,89 @@ private struct UsageMetricCard: View {
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(RoundedRectangle(cornerRadius: 15).fill(tint.opacity(0.055)))
         .overlay(RoundedRectangle(cornerRadius: 15).stroke(tint.opacity(0.14)))
+    }
+}
+
+private struct UsageLimitMeter: View {
+    let limit: AgentLimitWindow
+    let tint: Color
+    let now: Date
+
+    /// 变红的阈值，只在这一处定义
+    private static let alertPercent = 90.0
+
+    private var barColor: Color { limit.usedPercent >= Self.alertPercent ? .red : tint }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 3) {
+            HStack(spacing: 6) {
+                Text(title)
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                Spacer()
+                Text("\(Int(limit.usedPercent.rounded()))%")
+                    .font(.caption2.monospacedDigit().weight(.semibold))
+                    .foregroundStyle(barColor)
+            }
+            GeometryReader { proxy in
+                ZStack(alignment: .leading) {
+                    Capsule().fill(.primary.opacity(0.08))
+                    Capsule()
+                        .fill(barColor)
+                        .frame(width: max(2, proxy.size.width * min(1, max(0, limit.usedPercent / 100))))
+                }
+            }
+            .frame(height: 5)
+            if let resetText {
+                Text(resetText)
+                    .font(.caption2)
+                    .foregroundStyle(.tertiary)
+            }
+        }
+    }
+
+    /**
+     * 窗口名。
+     *
+     * 两个来源给的东西不一样：Codex 给分钟数不给分组，Claude 给分组不给分钟数
+     * （它那个端点根本没有时长字段）。所以这里按「有什么用什么」，
+     * 不由分组反推分钟数 —— "session 就是 5 小时" 是猜的，官方没给过这个数。
+     */
+    private var title: String {
+        var parts: [String] = []
+        if let minutes = limit.windowMinutes {
+            parts.append(Self.windowName(minutes))
+        } else if let group = limit.group {
+            parts.append(Self.groupName(group))
+        }
+        if let label = limit.label { parts.append(label) }
+        return parts.isEmpty ? limit.key : parts.joined(separator: " · ")
+    }
+
+    private var resetText: String? {
+        guard let resetsAt = limit.resetsAt else { return nil }
+        let remaining = Double(resetsAt) - now.timeIntervalSince1970
+        guard remaining > 0 else { return "resetting" }
+        if remaining < 3_600 { return "resets in \(Int(remaining / 60))m" }
+        if remaining < 86_400 { return "resets in \(Int(remaining / 3_600))h" }
+        let days = Int(remaining / 86_400)
+        let hours = Int(remaining.truncatingRemainder(dividingBy: 86_400) / 3_600)
+        return hours == 0 ? "resets in \(days)d" : "resets in \(days)d \(hours)h"
+    }
+
+    private static func windowName(_ minutes: Int) -> String {
+        if minutes < 60 { return "\(minutes)m window" }
+        if minutes < 1_440 || minutes % 1_440 != 0 { return "\(minutes / 60)h window" }
+        return "\(minutes / 1_440)d window"
+    }
+
+    private static func groupName(_ group: String) -> String {
+        switch group {
+        case "session": "Session"
+        case "weekly": "Weekly"
+        default: group.capitalized
+        }
     }
 }
 

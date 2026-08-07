@@ -19,6 +19,8 @@ final class AppSettings: ObservableObject {
         static let nodePath = "ccusageNodePath"
         static let ccusageCLIPath = "ccusageCLIPath"
         static let ccusageRefreshInterval = "ccusageRefreshInterval"
+        static let codexCLIPath = "codexCLIPath"
+        static let agentLimitsRefreshInterval = "agentLimitsRefreshInterval"
         static let userIDAccount = "anker-user-id"
         static let telemetrySecretAccount = "telemetry-ingest-secret"
     }
@@ -39,6 +41,8 @@ final class AppSettings: ObservableObject {
     @Published var nodePath: String
     @Published var ccusageCLIPath: String
     @Published var ccusageRefreshInterval: Double
+    @Published var codexCLIPath: String
+    @Published var agentLimitsRefreshInterval: Double
     @Published var launchAtLoginEnabled = false
 
     private let defaults: UserDefaults
@@ -82,6 +86,12 @@ final class AppSettings: ObservableObject {
             ?? ""
         let storedCcusageInterval = defaults.double(forKey: Key.ccusageRefreshInterval)
         ccusageRefreshInterval = storedCcusageInterval == 0 ? 60 : storedCcusageInterval
+        codexCLIPath = defaults.string(forKey: Key.codexCLIPath)
+            ?? environment["CODEX_CLI_PATH"]
+            ?? Self.firstExistingPath(["/Users/\(NSUserName())/.local/bin/codex", "/opt/homebrew/bin/codex", "/usr/local/bin/codex"])
+            ?? ""
+        let storedAgentLimitsInterval = defaults.double(forKey: Key.agentLimitsRefreshInterval)
+        agentLimitsRefreshInterval = storedAgentLimitsInterval == 0 ? 300 : storedAgentLimitsInterval
         launchAtLoginEnabled = SMAppService.mainApp.status == .enabled
 
         // Explicitly saving Settings is the point where an environment-provided ID
@@ -119,6 +129,13 @@ final class AppSettings: ObservableObject {
                 throw SettingsError.invalidCcusagePath
             }
             guard ccusageRefreshInterval >= 60 else { throw SettingsError.invalidCcusageInterval }
+            // 没装 Codex 的机器留空即可，此时只出 Claude 套餐等级，不该因此拦住保存
+            if !codexCLIPath.isEmpty {
+                guard FileManager.default.isExecutableFile(atPath: codexCLIPath) else {
+                    throw SettingsError.invalidCodexPath
+                }
+            }
+            guard agentLimitsRefreshInterval >= 60 else { throw SettingsError.invalidAgentLimitsInterval }
         }
     }
 
@@ -130,6 +147,7 @@ final class AppSettings: ObservableObject {
         telemetrySecret = telemetrySecret.trimmingCharacters(in: .whitespacesAndNewlines)
         nodePath = (nodePath as NSString).expandingTildeInPath
         ccusageCLIPath = (ccusageCLIPath as NSString).expandingTildeInPath
+        codexCLIPath = (codexCLIPath as NSString).expandingTildeInPath
         try keychain.write(userID, account: Key.userIDAccount)
         try keychain.write(telemetrySecret, account: Key.telemetrySecretAccount)
         defaults.set(peripheralID, forKey: Key.peripheralID)
@@ -146,6 +164,8 @@ final class AppSettings: ObservableObject {
         defaults.set(nodePath, forKey: Key.nodePath)
         defaults.set(ccusageCLIPath, forKey: Key.ccusageCLIPath)
         defaults.set(ccusageRefreshInterval, forKey: Key.ccusageRefreshInterval)
+        defaults.set(codexCLIPath, forKey: Key.codexCLIPath)
+        defaults.set(agentLimitsRefreshInterval, forKey: Key.agentLimitsRefreshInterval)
     }
 
     func setLaunchAtLogin(_ enabled: Bool) throws {
@@ -165,6 +185,7 @@ final class AppSettings: ObservableObject {
 enum SettingsError: LocalizedError {
     case invalidUserID, invalidPeripheralID, invalidPort, invalidTiming, invalidPostURL
     case invalidNodePath, invalidCcusagePath, invalidCcusageInterval
+    case invalidCodexPath, invalidAgentLimitsInterval
 
     var errorDescription: String? {
         switch self {
@@ -176,6 +197,8 @@ enum SettingsError: LocalizedError {
         case .invalidNodePath: "启用 ccusage 时，Node 路径必须指向可执行文件。"
         case .invalidCcusagePath: "启用 ccusage 时，CLI 路径必须指向 ccusage/src/cli.js。"
         case .invalidCcusageInterval: "ccusage 刷新间隔不能低于 60 秒。"
+        case .invalidCodexPath: "Codex 路径填写后必须指向可执行文件；留空则不采集 Codex 限额。"
+        case .invalidAgentLimitsInterval: "限额刷新间隔不能低于 60 秒。"
         }
     }
 }

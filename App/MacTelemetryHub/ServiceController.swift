@@ -15,6 +15,48 @@ private struct ChargerUploadSignature: Equatable {
     }
 }
 
+/**
+ * 只包含「插拔 / 换设备」这类结构性变化的指纹，用来决定要不要即时上报。
+ *
+ * 刻意读 `PortState` 而不是上报载荷：载荷里那几个看着像结构信息的字段其实都
+ * 是功率派生的 —— `mode` 是 `power > 0.2` 算出来的，`cable` 和 `chargingInfo`
+ * 又都挂在同样功率派生的 `PortState.connected` 上。拿它们当判据的话，涓流充电
+ * 在 0.2W 上下摆一摆就会每 6 秒翻一次，即时上报退化成 5 秒一次的风暴。
+ *
+ * 这里这几个字段全部直接来自 12 秒的 status 探针，不经过任何功率阈值：
+ * 身份槽用哨兵值表示空口，拔掉时会被清成 nil，插上时才有值。
+ *
+ * 载荷里的 `model` / `vendor` 也不够用：它们是查表查出来的显示名，遇到表里
+ * 没有的设备就是 nil，跟空口分不出来。`vendorID` / `productID` 是原始值，没这个问题。
+ */
+private struct ChargerStructuralSignature: Equatable {
+    private struct Port: Equatable {
+        let vendorID: UInt16?
+        let productID: UInt16?
+        let brandCode: UInt8?
+        let modelCode: UInt16?
+        let cableCode: String?
+
+        init(_ port: PortState) {
+            vendorID = port.vendorID
+            productID = port.productID
+            brandCode = port.brandCode
+            modelCode = port.modelCode
+            cableCode = port.cableCode
+        }
+    }
+
+    private let connected: Bool
+    private let device: DeviceInfo
+    private let ports: [String: Port]
+
+    init(connected: Bool, state: ChargerState) {
+        self.connected = connected
+        device = state.device
+        ports = state.ports.mapValues(Port.init)
+    }
+}
+
 private struct DesktopUploadSignature: Equatable {
     let applicationName: String
     let bundleIdentifier: String?
@@ -80,6 +122,7 @@ final class ServiceController: ObservableObject {
     let desktopActivity = DesktopActivityMonitor()
     let appleMusic = AppleMusicMonitor()
     let ccusage = CcusageMonitor()
+    let agentLimits = AgentLimitsMonitor()
     lazy private(set) var httpServer = LocalHTTPServer { [weak self] request in
         guard let self else { return .text("Unavailable\n", status: 503, reason: "Service Unavailable") }
         return await self.route(request)
@@ -91,11 +134,14 @@ final class ServiceController: ObservableObject {
     private var reporterTask: Task<Void, Never>?
     private var lastPostedCcusageAt: Date?
     private var lastPostedCharger: ChargerUploadSignature?
+    /// 只跟结构性变化比，管的是「要不要即时发」，不管「要不要带 charger 模块」
+    private var lastPostedChargerStructural: ChargerStructuralSignature?
     private var lastPostedDesktop: DesktopUploadSignature?
     private var lastPostedAppleMusic: AppleMusicUploadSignature?
     private var lastPostedMusicAnchor: AppleMusicPositionAnchor?
     private var lastHeartbeatAt: Date?
     private var started = false
+    private var observesPower = false
 
     /// 事件驱动的模块用它把上报循环提前叫醒，不必干等到下一个周期
     private var wakeContinuation: CheckedContinuation<Void, Never>?
@@ -137,9 +183,13 @@ final class ServiceController: ObservableObject {
         configureModules()
         httpServer.start(port: settings.httpPort)
         restartReporter()
+        observePowerTransitions()
+        sendPresence("online")
     }
 
     func stop() {
+        // 抢在拆掉一切之前声明离线。同步发 —— 调用方紧接着就要退出进程了。
+        sendPresence("offline", blocking: true)
         reporterTask?.cancel()
         // 循环可能正挂在 waitForNextTick 上，叫醒它才能立刻看到 cancel 并退出
         wakeReporter()
@@ -149,8 +199,40 @@ final class ServiceController: ObservableObject {
         desktopActivity.stop()
         appleMusic.stop()
         ccusage.stop()
+        agentLimits.stop()
         httpServer.stop()
         bluetooth.shutdown()
+    }
+
+    /**
+     * 睡眠 / 唤醒时声明在离线。
+     *
+     * 挂在 ServiceController 而不是 BluetoothService 上：那边那两个观察者只在
+     * 充电器模块开着时才注册，而在线状态跟开了哪些模块无关。
+     */
+    private func observePowerTransitions() {
+        guard !observesPower else { return }
+        observesPower = true
+        let center = NSWorkspace.shared.notificationCenter
+        center.addObserver(forName: NSWorkspace.willSleepNotification, object: nil, queue: .main) { [weak self] _ in
+            // 必须同步：观察者一返回系统就接着睡了
+            MainActor.assumeIsolated { self?.sendPresence("offline", blocking: true) }
+        }
+        center.addObserver(forName: NSWorkspace.didWakeNotification, object: nil, queue: .main) { [weak self] _ in
+            MainActor.assumeIsolated { self?.sendPresence("online") }
+        }
+        /**
+         * 菜单里的「退出」会先调 stop()，但 Cmd-Q、Dock 退出、注销都不走那条路，
+         * 只有这个通知能盖住全部优雅退出。stop() 里那次是重复发，无所谓 ——
+         * 漏发才有代价，多发一条只是让网页把同一个状态再确认一遍。
+         */
+        NotificationCenter.default.addObserver(
+            forName: NSApplication.willTerminateNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            MainActor.assumeIsolated { self?.sendPresence("offline", blocking: true) }
+        }
     }
 
     func applySettings() throws {
@@ -227,7 +309,10 @@ final class ServiceController: ObservableObject {
             appleMusic.onChange = nil
             appleMusic.stop()
         }
-        if !settings.ccusageModuleEnabled { ccusage.stop() }
+        if !settings.ccusageModuleEnabled {
+            ccusage.stop()
+            agentLimits.stop()
+        }
     }
 
     private func restartReporter() {
@@ -240,6 +325,7 @@ final class ServiceController: ObservableObject {
         reporterLastError = nil
         lastPostedCcusageAt = nil
         lastPostedCharger = nil
+        lastPostedChargerStructural = nil
         lastPostedDesktop = nil
         lastPostedAppleMusic = nil
         lastPostedMusicAnchor = nil
@@ -258,10 +344,17 @@ final class ServiceController: ObservableObject {
                     // 的激活通知驱动，后者由 Music.app 的 playerInfo 跨进程通知驱动，
                     // 各自带一个兜底轮询。循环只管每 2 秒采样一次它们留下的 snapshot。
                     if settings.ccusageModuleEnabled {
+                        // 先刷限额：ccusage 的上传载荷要把 plan/limits 并进去，
+                        // 顺序反了这一轮发出去的就是上一轮的套餐快照。
+                        await agentLimits.refreshIfNeeded(
+                            codexPath: settings.codexCLIPath,
+                            interval: settings.agentLimitsRefreshInterval
+                        )
                         await ccusage.refreshIfNeeded(
                             nodePath: settings.nodePath,
                             cliPath: settings.ccusageCLIPath,
-                            interval: settings.ccusageRefreshInterval
+                            interval: settings.ccusageRefreshInterval,
+                            plans: agentLimits.plans
                         )
                     }
 
@@ -270,6 +363,12 @@ final class ServiceController: ObservableObject {
                         ? statusPayload
                         : nil
                     let chargerSignature = charger.map(ChargerUploadSignature.init)
+                    let chargerStructural = charger.map { _ in
+                        ChargerStructuralSignature(
+                            connected: bluetooth.isConnected,
+                            state: bluetooth.state
+                        )
+                    }
                     let desktop = settings.desktopModuleEnabled ? desktopActivity.snapshot : nil
                     let desktopSignature = desktop.map(DesktopUploadSignature.init)
                     let music = settings.appleMusicModuleEnabled ? appleMusic.snapshot : nil
@@ -294,8 +393,23 @@ final class ServiceController: ObservableObject {
                         ccusageChanged = false
                     }
                     let heartbeatDue = lastHeartbeatAt.map { Date().timeIntervalSince($0) >= 30 } ?? true
-                    let anythingChanged =
-                        chargerChanged || desktopChanged || musicChanged || ccusageChanged || heartbeatDue
+                    let dataChanged =
+                        chargerChanged || desktopChanged || musicChanged || ccusageChanged
+                    /**
+                     * 心跳不再借数据端点发。
+                     *
+                     * 从前没有数据变化时会发一个空模块的信封，接收端得先解析完整
+                     * 信封才能看出「这只是一次心跳」。现在心跳走 presence 端点，
+                     * 数据端点就变成纯粹的「有变化才发」。
+                     *
+                     * 只在没有数据要发的时候才走这条 —— 有数据时那个包本身就证明
+                     * 活着，再补一条心跳是白发。
+                     */
+                    if heartbeatDue, !dataChanged {
+                        sendPresence("online")
+                        lastHeartbeatAt = Date()
+                    }
+                    let anythingChanged = dataChanged
 
                     // 播放/暂停、换歌、换前台应用是用户正盯着的事，不值得为它们等满节流窗口。
                     // 这些变化本来也会上报，即时化只是把等待砍掉，不增加请求总数；
@@ -318,9 +432,14 @@ final class ServiceController: ObservableObject {
                         desktop?.bundleIdentifier != lastPostedDesktop?.bundleIdentifier ||
                         desktop?.applicationName != lastPostedDesktop?.applicationName
                     )
+                    // 插拔和换设备也是用户正盯着的事，跟播放/前台应用同一档。
+                    // 只认结构性指纹：功率、电压、电流的滚动照旧等节流窗口，
+                    // 否则充电中每一轮都「有变化」，即时上报就退化成 5 秒一次的轮询。
+                    let chargerUrgent = chargerStructural != nil &&
+                        chargerStructural != lastPostedChargerStructural
                     // 退避期内一律不放行。否则服务端挂掉时，未推进的 lastPosted 会让
                     // urgent 一直为真，即时上报就变成 2 秒一次的重试风暴。
-                    let urgent = (musicUrgent || desktopUrgent) && Date() >= backoffUntil
+                    let urgent = (musicUrgent || desktopUrgent || chargerUrgent) && Date() >= backoffUntil
 
                     if let url, anythingChanged, urgent || Date() >= nextPostAt {
                         let desktopPayload = desktop.map {
@@ -362,6 +481,9 @@ final class ServiceController: ObservableObject {
                         reporterLastError = nil
                         lastHeartbeatAt = Date()
                         if chargerChanged { lastPostedCharger = chargerSignature }
+                        // 结构指纹跟着每次成功发送推进，跟 chargerChanged 无关：
+                        // 结构变了完整指纹必然也变，反过来不成立。
+                        if let chargerStructural { lastPostedChargerStructural = chargerStructural }
                         if desktopChanged { lastPostedDesktop = desktopSignature }
                         if musicChanged {
                             lastPostedAppleMusic = musicSignature
@@ -404,7 +526,8 @@ final class ServiceController: ObservableObject {
         appleMusic: AppleMusicSnapshot?,
         vibeCoding: JSONValue?,
         includeDesktop: Bool,
-        includeAppleMusic: Bool
+        includeAppleMusic: Bool,
+        presence: String = "online"
     ) -> TelemetryEnvelope {
         return TelemetryEnvelope(
             heartbeatAt: Int64(Date().timeIntervalSince1970 * 1_000),
@@ -416,8 +539,60 @@ final class ServiceController: ObservableObject {
                 vibeCoding: vibeCoding,
                 includeDesktop: includeDesktop,
                 includeAppleMusic: includeAppleMusic
-            )
+            ),
+            presence: presence
         )
+    }
+
+    /**
+     * 发一条只声明在线状态的空信封。
+     *
+     * 不带任何模块：这条是状态声明，不是数据上报，混进模块会让接收端把它
+     * 当成一次正常上报、白白刷新那些模块的时间戳。
+     *
+     * 超时给得很短：睡眠前系统只留很窄的一个窗口，宁可这条发丢，也不能把
+     * 睡眠拖住。发丢了还有心跳超时兜底，那条路本来就没拆。
+     */
+    /**
+     * 存活声明走自己的端点，从遥测 URL 上换掉最后一段推出来。
+     *
+     * 跟已有的「旧版 /api/ingest/charger 自动迁移到 /telemetry」是同一种做法：
+     * 用户只配一个地址，其余路由由它派生，不再多加一项设置。
+     */
+    private var presenceURL: URL? {
+        guard let url = URL(string: settings.postURL) else { return nil }
+        return url.deletingLastPathComponent().appendingPathComponent("presence")
+    }
+
+    private func sendPresence(_ presence: String, blocking: Bool = false) {
+        guard settings.postEnabled, let url = presenceURL else { return }
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.httpBody = try? JSONSerialization.data(withJSONObject: [
+            "state": presence,
+            "active_modules": activeModuleNames,
+        ])
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.setValue("mac-telemetry-hub/2", forHTTPHeaderField: "User-Agent")
+        if !settings.telemetrySecret.isEmpty {
+            request.setValue("Bearer \(settings.telemetrySecret)", forHTTPHeaderField: "Authorization")
+        }
+        request.timeoutInterval = 3
+
+        guard blocking else {
+            URLSession.shared.dataTask(with: request).resume()
+            return
+        }
+        /**
+         * 睡眠和退出这两条路必须同步等。
+         *
+         * `willSleepNotification` 的观察者返回后系统就接着睡了，异步任务根本
+         * 来不及跑完；退出同理，进程先没了。所以这里用信号量把主线程挡住 ——
+         * 上限 3 秒，且 URLSession 的回调在后台队列，不会和主线程互锁。
+         */
+        let done = DispatchSemaphore(value: 0)
+        URLSession.shared.dataTask(with: request) { _, _, _ in done.signal() }.resume()
+        _ = done.wait(timeout: .now() + 3)
     }
 
     private var activeModuleNames: [String] {
