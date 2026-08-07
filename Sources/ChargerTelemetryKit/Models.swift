@@ -48,6 +48,10 @@ public struct ChargerState: Codable, Equatable, Sendable {
     public var totalOutputPowerW: Double?
     public var rawStatus: [String: String] = [:]
     public var updatedAt: TimeInterval?
+    /// `rawStatus` is not on a timer — it holds whatever the last 0x0200 reply
+    /// carried, normally the one the handshake asked for. Ports refresh ~1 Hz
+    /// from the pushed stream, so the two ages are not interchangeable.
+    public var rawStatusUpdatedAt: TimeInterval?
 
     public init() {}
 }

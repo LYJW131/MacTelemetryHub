@@ -39,10 +39,21 @@ final class BluetoothService: NSObject, ObservableObject {
     private var peripheral: CBPeripheral?
     private var writeCharacteristic: CBCharacteristic?
     private var notifyCharacteristic: CBCharacteristic?
+    /// Silence that means the pushed stream needs a nudge. The charger pushes
+    /// at ~1 Hz with a measured worst-case gap of 1.24 s, so this sits far
+    /// outside normal jitter.
+    private static let streamIdleTimeout = Duration.seconds(10)
+    /// Silence that means the session is not coming back on its own.
+    private static let streamStallTimeout = Duration.seconds(20)
+
     private var crypto = A2687CryptoContext()
     private var assembler = FrameAssembler()
     private var handshakeTask: Task<Void, Never>?
-    private var pollingTasks: [Task<Void, Never>] = []
+    private var streamWatchdogTask: Task<Void, Never>?
+    /// Monotonic stamp of the last decoded frame — the only liveness signal
+    /// once nothing is polled. `ContinuousClock` so that a system clock change
+    /// cannot make a healthy stream look stalled.
+    private var lastFrameAt = ContinuousClock.now
     private var retryTask: Task<Void, Never>?
     private var attemptTimeoutTask: Task<Void, Never>?
     private var pending: PendingResponse?
@@ -234,8 +245,8 @@ final class BluetoothService: NSObject, ObservableObject {
     private func cancelSessionTasks() {
         handshakeTask?.cancel()
         handshakeTask = nil
-        pollingTasks.forEach { $0.cancel() }
-        pollingTasks.removeAll()
+        streamWatchdogTask?.cancel()
+        streamWatchdogTask = nil
         retryTask?.cancel()
         retryTask = nil
         attemptTimeoutTask?.cancel()
@@ -260,7 +271,7 @@ final class BluetoothService: NSObject, ObservableObject {
                 retryAttempt = 0
                 phase = .connected
                 lastError = nil
-                startPolling()
+                startStreamWatchdog()
             } catch is CancellationError {
                 return
             } catch {
@@ -306,6 +317,17 @@ final class BluetoothService: NSObject, ObservableObject {
             try send(group: A2687Protocol.groupSession, command: step.command, fields: step.fields)
             try await Task.sleep(for: .milliseconds(120))
         }
+        try armTelemetry()
+    }
+
+    /// Ask for one snapshot and one realtime frame.
+    ///
+    /// Sent once at the end of the handshake, and again only if the watchdog
+    /// finds the stream quiet — never on a repeating timer. The charger keeps
+    /// pushing `0x0300` at ~1 Hz on its own once `0x0022`/`0x0027` have armed
+    /// it, so nothing has to be requested to keep telemetry flowing.
+    private func armTelemetry() throws {
+        let userID = settings.userID.trimmingCharacters(in: .whitespacesAndNewlines)
         try send(group: A2687Protocol.groupTelemetry, command: A2687Protocol.commandStatus, fields: A2687Protocol.statusProbe())
         try send(
             group: A2687Protocol.groupTelemetry,
@@ -314,27 +336,37 @@ final class BluetoothService: NSObject, ObservableObject {
         )
     }
 
-    private func startPolling() {
-        pollingTasks.forEach { $0.cancel() }
-        pollingTasks = [
-            Task { [weak self] in
-                while !Task.isCancelled {
-                    try? await Task.sleep(for: .seconds(12))
-                    guard let self, !Task.isCancelled else { return }
-                    try? send(group: A2687Protocol.groupTelemetry, command: A2687Protocol.commandStatus, fields: A2687Protocol.statusProbe())
+    /// Watch for the pushed stream going quiet.
+    ///
+    /// Nothing is polled, so nothing fails loudly when the charger stops
+    /// answering: the BLE link can stay connected while the stream is dead,
+    /// which would leave the dashboard and the uploader on a frozen snapshot.
+    /// This timer is local and sends no BLE traffic unless the stream is
+    /// already silent.
+    private func startStreamWatchdog() {
+        streamWatchdogTask?.cancel()
+        lastFrameAt = .now
+        streamWatchdogTask = Task { [weak self] in
+            var rearmed = false
+            while !Task.isCancelled {
+                try? await Task.sleep(for: .seconds(1))
+                guard !Task.isCancelled, let self else { return }
+                let idle = ContinuousClock.now - lastFrameAt
+
+                if idle < Self.streamIdleTimeout {
+                    rearmed = false
+                    continue
                 }
-            },
-            Task { [weak self] in
-                while !Task.isCancelled {
-                    try? await Task.sleep(for: .seconds(6))
-                    guard let self, !Task.isCancelled else { return }
-                    let fields = try? A2687Protocol.realtimeProbe(userID: settings.userID)
-                    if let fields {
-                        try? send(group: A2687Protocol.groupTelemetry, command: A2687Protocol.commandRealtime, fields: fields)
-                    }
+                if idle >= Self.streamStallTimeout {
+                    lastError = "充电器已停止推送，正在重建蓝牙会话"
+                    if let peripheral { central?.cancelPeripheralConnection(peripheral) }
+                    return
                 }
-            },
-        ]
+                guard !rearmed else { continue }  // one attempt per quiet period
+                rearmed = true
+                try? armTelemetry()
+            }
+        }
     }
 
     private func send(group: UInt8, command: UInt16, fields: [TLVField]) throws {
@@ -372,6 +404,10 @@ final class BluetoothService: NSObject, ObservableObject {
             guard let frame = A2687Protocol.parseFrame(raw), frame.encrypted else { continue }
             do {
                 let payload = try crypto.decrypt(frame.body)
+                // Any frame that decrypts proves the session is alive, including
+                // handshake replies and the bare 0x020A ack that carries no
+                // port data.
+                lastFrameAt = .now
                 if frame.command == 0x0200 || frame.command == 0x0A00 {
                     A2687Protocol.parseStatusSnapshot(payload, state: &state)
                     _ = A2687Protocol.parseRealtime(payload, command: frame.command, state: &state)

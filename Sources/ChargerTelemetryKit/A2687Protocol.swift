@@ -296,6 +296,7 @@ public enum A2687Protocol {
             }
         }
         state.rawStatus = snapshot
+        state.rawStatusUpdatedAt = now.timeIntervalSince1970
         state.updatedAt = now.timeIntervalSince1970
     }
 
