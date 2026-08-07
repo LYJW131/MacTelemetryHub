@@ -1097,13 +1097,23 @@ private enum CcusageCollector {
         ]
     }
 
+    /**
+     * 按模型累计 token，喂给「历史主力模型」和全局排行。
+     *
+     * 和 `summarize` 里取当前模型一样过滤掉隐藏模型：自动 review 是独立会话，
+     * 它用的模型对使用者没有意义，fallback 同理。两处口径必须一致 —— 否则会
+     * 出现「当前模型」里被滤掉的东西反而排进了历史榜。
+     *
+     * 只影响「用了哪些模型」这类排名，不影响 token 与费用总计 —— 那些走
+     * `normalizeTotals`，是另一条路，隐藏模型烧掉的量仍然照实计入。
+     */
     private static func addModelUsage(
         _ row: [String: Any],
         to totals: inout [String: Double]
     ) {
         if let models = row["models"] as? [String: Any] {
             for (name, value) in models {
-                guard let detail = value as? [String: Any] else { continue }
+                guard let detail = value as? [String: Any], !isHiddenModel(name, detail) else { continue }
                 let explicit = number(detail["totalTokens"])
                 let tokens = explicit > 0 ? explicit :
                     number(detail["inputTokens"]) + number(detail["outputTokens"]) +
@@ -1113,7 +1123,7 @@ private enum CcusageCollector {
             return
         }
         for detail in row["modelBreakdowns"] as? [[String: Any]] ?? [] {
-            guard let name = detail["modelName"] as? String else { continue }
+            guard let name = detail["modelName"] as? String, !isHiddenModel(name, detail) else { continue }
             totals[name, default: 0] +=
                 number(detail["inputTokens"]) + number(detail["outputTokens"]) +
                 number(detail["cacheReadTokens"]) + number(detail["cacheCreationTokens"])
