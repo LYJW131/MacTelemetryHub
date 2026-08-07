@@ -116,9 +116,15 @@ An activation reschedules a 400 ms settle timer, so a burst of Cmd-Tab switches
 uploads only the application it lands on — the ones passed through never outlive
 the window. Playback needs no such timer; the confirmation read already absorbs
 the race. The loop's own five-second tick is left to the parts with no event
-source of their own: the 30 second heartbeat and the ccusage interval check,
-plus charger sampling — the charger does push (below), but at ~1 Hz, which is
-far finer than anything worth uploading.
+source of their own: the 30 second heartbeat and the ccusage interval check.
+
+The charger wakes it too, but selectively. Its stream arrives at ~1 Hz (below),
+and waking on every frame would turn a five-second loop into a one-second one
+to watch numbers that were always going to wait for the throttle window. So the
+callback compares a structural fingerprint first — ports, cables, device
+identity — and only a plug, unplug, or device swap gets through. Those then take
+the same urgent path as a track change, so they upload about a second after they
+happen instead of up to five seconds later.
 
 The charger is event-driven at the acquisition layer as well. Nothing is polled
 over BLE: the handshake — specifically `0x0022`/`0x0027` — arms an unprompted

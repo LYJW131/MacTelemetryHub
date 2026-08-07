@@ -276,9 +276,27 @@ final class ServiceController: ObservableObject {
 
     private func configureModules() {
         if settings.chargerModuleEnabled {
+            /**
+             * 只有结构性变化才叫醒循环。
+             *
+             * 采集层是设备主动推流，约 1 Hz —— 每帧都叫醒的话循环就从 5 秒一转
+             * 变成 1 秒一转，而其中绝大多数帧只是功率在滚动，本来就该等节流窗口。
+             * 这里先拿结构指纹比一次，插拔和换设备才放行；比对是纯本地的，
+             * 1 Hz 跑它的代价远小于白转一圈循环。
+             */
+            bluetooth.onStateChange = { [weak self] in
+                guard let self else { return }
+                let signature = ChargerStructuralSignature(
+                    connected: bluetooth.isConnected,
+                    state: bluetooth.state
+                )
+                guard signature != lastPostedChargerStructural else { return }
+                wakeReporter()
+            }
             bluetooth.start()
             bluetooth.reconnect()
         } else {
+            bluetooth.onStateChange = nil
             bluetooth.disconnect()
         }
 

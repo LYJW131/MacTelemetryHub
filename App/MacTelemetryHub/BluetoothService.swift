@@ -28,7 +28,31 @@ final class BluetoothService: NSObject, ObservableObject {
     }
 
     @Published private(set) var state = ChargerState()
-    @Published private(set) var phase: Phase = .stopped
+    /**
+     * 解出新的端口数据时通知上报循环。
+     *
+     * 采集层已经是设备主动推流（约 1 Hz），但上报循环自己只有 5 秒一转的 tick，
+     * 不叫醒它的话插拔要白等最多 5 秒才被看见。跟前台应用和播放同一个做法。
+     *
+     * 这里不做「变没变」的判断 —— 那是上报侧的事，它有结构指纹能分清插拔和
+     * 功率滚动；这边只负责说「有新帧了」。1 Hz 唤醒一个本来就在转的循环，
+     * 代价可以忽略，而且循环里那些判断全是本地比对。
+     */
+    var onStateChange: (() -> Void)?
+    /**
+     * 连接状态变化也要叫醒上报循环。
+     *
+     * 唤醒钩子挂在解帧上，但断开之后根本没有帧再来 —— 只靠那条路的话，掉线要
+     * 等循环自己的 5 秒 tick 才被发现。连接与否本身就在结构指纹里，和插拔同一档，
+     * 所以在这里补一次。只认「是不是 connected」的翻转，中间那些扫描、握手阶段
+     * 不必惊动上报。
+     */
+    @Published private(set) var phase: Phase = .stopped {
+        didSet {
+            guard (oldValue == .connected) != (phase == .connected) else { return }
+            onStateChange?()
+        }
+    }
     @Published private(set) var lastError: String?
     @Published private(set) var desiredConnection = true
 
@@ -412,9 +436,11 @@ final class BluetoothService: NSObject, ObservableObject {
                     A2687Protocol.parseStatusSnapshot(payload, state: &state)
                     _ = A2687Protocol.parseRealtime(payload, command: frame.command, state: &state)
                     objectWillChange.send()
+                    onStateChange?()
                 } else if [0x020A, 0x0207, 0x0206, 0x4300, 0x0300, 0x0303, 0x0410].contains(frame.command) {
                     if A2687Protocol.parseRealtime(payload, command: frame.command, state: &state) {
                         objectWillChange.send()
+                        onStateChange?()
                     }
                 }
                 if let pending, pending.command == frame.command {
