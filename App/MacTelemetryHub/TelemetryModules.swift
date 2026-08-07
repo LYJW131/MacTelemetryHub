@@ -48,6 +48,15 @@ struct AppleMusicSnapshot: Codable, Equatable, Sendable {
     let artworkData: Data?
     let positionMs: Int
     let durationMs: Int
+    /**
+     * 单曲循环。
+     *
+     * Music.app 在循环绕回时**不发** playerInfo 通知（实测跳到距结尾 4 秒，
+     * 16 秒观测窗口里绕回那一刻一条都没有），上报器因此不知道进度归零了。
+     * 把循环状态告诉网页，让它按 elapsed % duration 自己绕，而不是钉在 100%
+     * 干等 25 秒兜底轮询把它当成 seek 才纠正。
+     */
+    let repeatOne: Bool
     let observedAt: Int64
 }
 
@@ -259,6 +268,7 @@ final class AppleMusicMonitor: ObservableObject {
                 artworkData: nil,
                 positionMs: 0,
                 durationMs: 0,
+                repeatOne: false,
                 observedAt: Int64(Date().timeIntervalSince1970 * 1_000)
             )
         }
@@ -292,7 +302,11 @@ final class AppleMusicMonitor: ObservableObject {
             try
                 if (count of artworks of currentSong) > 0 then set songArtwork to raw data of artwork 1 of currentSong
             end try
-            return {stateText, songName, songArtist, songAlbum, songID, (player position as text), (songDuration as text), songArtwork}
+            set repeatMode to "off"
+        try
+            set repeatMode to (song repeat as text)
+        end try
+        return {stateText, songName, songArtist, songAlbum, songID, (player position as text), (songDuration as text), songArtwork, repeatMode}
         end tell
         """
         var errorInfo: NSDictionary?
@@ -315,6 +329,8 @@ final class AppleMusicMonitor: ObservableObject {
             artworkData: optimizedArtworkData(result.atIndex(8)?.data),
             positionMs: Int((Double(item(6)) ?? 0) * 1_000),
             durationMs: Int((Double(item(7)) ?? 0) * 1_000),
+            // 封面是二进制，占 8；循环状态接在它后面
+            repeatOne: item(9) == "one",
             observedAt: Int64(Date().timeIntervalSince1970 * 1_000)
         )
     }
@@ -352,6 +368,7 @@ extension AppleMusicSnapshot {
             artworkData: artworkData,
             positionMs: positionMs,
             durationMs: durationMs,
+            repeatOne: repeatOne,
             observedAt: observedAt
         )
     }

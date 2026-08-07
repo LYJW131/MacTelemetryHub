@@ -38,6 +38,8 @@ private struct AppleMusicUploadSignature: Equatable {
     let trackID: String?
     let artworkData: Data?
     let durationMs: Int
+    /// 切换循环模式要让网页知道，所以它进签名
+    let repeatOne: Bool
 
     init(_ snapshot: AppleMusicSnapshot) {
         state = snapshot.state
@@ -47,6 +49,7 @@ private struct AppleMusicUploadSignature: Equatable {
         trackID = snapshot.trackID
         artworkData = snapshot.artworkData
         durationMs = snapshot.durationMs
+        repeatOne = snapshot.repeatOne
     }
 }
 
