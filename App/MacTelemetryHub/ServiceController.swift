@@ -1,6 +1,22 @@
 import AppKit
 import Foundation
 
+enum TelemetryModule: String, CaseIterable, Hashable, Sendable {
+    case desktop
+    case appleMusic = "apple_music"
+    case charger
+    case vibeCoding = "vibe_coding"
+
+    var displayName: String {
+        switch self {
+        case .desktop: "前台应用"
+        case .appleMusic: "Apple Music"
+        case .charger: "充电设备"
+        case .vibeCoding: "Vibe Coding"
+        }
+    }
+}
+
 private struct ChargerUploadSignature: Equatable {
     let connected: Bool
     let totalOutputPowerW: Double?
@@ -129,6 +145,11 @@ final class ServiceController: ObservableObject {
 
     @Published private(set) var reporterLastSuccess: Date?
     @Published private(set) var reporterLastError: String?
+    @Published private(set) var isRefreshingVibeCoding = false
+    @Published private(set) var vibeCodingRefreshError: String?
+    @Published private(set) var pendingManualReports: Set<TelemetryModule> = []
+    @Published private(set) var lastManualReportError: [TelemetryModule: String] = [:]
+    @Published private(set) var lastManualReportAt: [TelemetryModule: Date] = [:]
 
     private var reporterTask: Task<Void, Never>?
     private var lastPostedCcusageAt: Date?
@@ -243,6 +264,84 @@ final class ServiceController: ObservableObject {
         restartReporter()
     }
 
+    /// Queues one module for an immediate, module-scoped envelope.
+    /// The normal reporter remains the only code path that performs the network request.
+    @discardableResult
+    func requestImmediateReport(_ module: TelemetryModule) -> Bool {
+        guard canRequestImmediateReport(module) else { return false }
+
+        pendingManualReports.insert(module)
+        lastManualReportError[module] = nil
+        wakeReporter()
+        return true
+    }
+
+    func canRequestImmediateReport(_ module: TelemetryModule) -> Bool {
+        guard settings.postEnabled,
+              let url = URL(string: settings.postURL),
+              ["http", "https"].contains(url.scheme?.lowercased() ?? ""),
+              url.host != nil,
+              moduleIsEnabled(module),
+              moduleHasData(module),
+              !pendingManualReports.contains(module) else { return false }
+        return true
+    }
+
+    func isManualReportInFlight(_ module: TelemetryModule) -> Bool {
+        pendingManualReports.contains(module)
+    }
+
+    func manualReportMessage(for module: TelemetryModule) -> String? {
+        if pendingManualReports.contains(module) { return "正在上报…" }
+        if let error = lastManualReportError[module] { return "上报失败：\(error)" }
+        if let date = lastManualReportAt[module] {
+            return "已于 \(date.formatted(date: .omitted, time: .shortened)) 上报"
+        }
+        return nil
+    }
+
+    func manualReportFailed(_ module: TelemetryModule) -> Bool {
+        lastManualReportError[module] != nil
+    }
+
+    /// Refreshes both local usage aggregation and server-side agent limits once.
+    /// Each monitor owns its own non-reentrancy guard; this method only coordinates order.
+    func refreshVibeCodingNow() async {
+        guard settings.ccusageModuleEnabled, !isRefreshingVibeCoding else { return }
+        isRefreshingVibeCoding = true
+        vibeCodingRefreshError = nil
+        defer { isRefreshingVibeCoding = false }
+
+        await agentLimits.refreshNow(codexPath: settings.codexCLIPath)
+        await ccusage.refreshNow(
+            nodePath: settings.nodePath,
+            cliPath: settings.ccusageCLIPath,
+            plans: agentLimits.plans,
+            limitErrors: agentLimits.limitErrors
+        )
+        let errors = [agentLimits.lastError, ccusage.lastError].compactMap { $0 }
+        vibeCodingRefreshError = errors.isEmpty ? nil : errors.joined(separator: "；")
+        wakeReporter()
+    }
+
+    private func moduleIsEnabled(_ module: TelemetryModule) -> Bool {
+        switch module {
+        case .desktop: settings.desktopModuleEnabled
+        case .appleMusic: settings.appleMusicModuleEnabled
+        case .charger: settings.chargerModuleEnabled
+        case .vibeCoding: settings.ccusageModuleEnabled
+        }
+    }
+
+    private func moduleHasData(_ module: TelemetryModule) -> Bool {
+        switch module {
+        case .desktop: desktopActivity.snapshot != nil
+        case .appleMusic: appleMusic.snapshot != nil
+        case .charger: statusPayload.updatedAt != nil
+        case .vibeCoding: ccusage.uploadPayload != nil
+        }
+    }
+
     var statusPayload: StatusPayload {
         StatusPayload(connected: bluetooth.isConnected, state: bluetooth.state)
     }
@@ -348,6 +447,8 @@ final class ServiceController: ObservableObject {
         lastPostedAppleMusic = nil
         lastPostedMusicAnchor = nil
         lastHeartbeatAt = nil
+        pendingManualReports.removeAll()
+        lastManualReportError.removeAll()
         let url = settings.postEnabled ? URL(string: settings.postURL) : nil
         let interval = settings.postInterval
         let timeout = settings.postTimeout
@@ -357,6 +458,7 @@ final class ServiceController: ObservableObject {
             /// 上报失败后的退避截止时刻，只用来挡住即时上报的绕行
             var backoffUntil = Date.distantPast
             while !Task.isCancelled {
+                var manualModulesForAttempt: Set<TelemetryModule> = []
                 do {
                     // 前台应用和 Apple Music 都不在这里采集：前者完全由 NSWorkspace
                     // 的激活通知驱动，后者由 Music.app 的 playerInfo 跨进程通知驱动、
@@ -412,9 +514,26 @@ final class ServiceController: ObservableObject {
                     } else {
                         ccusageChanged = false
                     }
+                    let manualModules = pendingManualReports
+                    manualModulesForAttempt = manualModules
+                    let manualMode = !manualModules.isEmpty
+                    // A manual request is intentionally module-scoped. Automatic changes are
+                    // left pending for the next regular reporter pass instead of hitching a
+                    // ride on the user's selected module.
+                    let chargerToSend = manualMode
+                        ? manualModules.contains(.charger) && charger != nil
+                        : chargerChanged
+                    let desktopToSend = manualMode
+                        ? manualModules.contains(.desktop) && desktop != nil
+                        : desktopChanged
+                    let musicToSend = manualMode
+                        ? manualModules.contains(.appleMusic) && music != nil
+                        : musicChanged
+                    let ccusageToSend = manualMode
+                        ? manualModules.contains(.vibeCoding) && ccusage.uploadPayload != nil
+                        : ccusageChanged
                     let heartbeatDue = lastHeartbeatAt.map { Date().timeIntervalSince($0) >= 30 } ?? true
-                    let dataChanged =
-                        chargerChanged || desktopChanged || musicChanged || ccusageChanged
+                    let dataChanged = chargerToSend || desktopToSend || musicToSend || ccusageToSend
                     /**
                      * 心跳不再借数据端点发。
                      *
@@ -439,7 +558,7 @@ final class ServiceController: ObservableObject {
                     // 一直等到下一个节流窗口（实测 postInterval=30 时要等 30 秒）。
                     // 拖动进度条同理。这不会变吵：seek 只在通知或兜底重读时才
                     // 被发现，而通知只在换歌/播放状态变化时来。
-                    let musicUrgent = musicChanged && (
+                    let musicUrgent = !manualMode && musicChanged && (
                         musicSeeked ||
                         music?.state != lastPostedAppleMusic?.state ||
                         music?.trackID != lastPostedAppleMusic?.trackID
@@ -450,20 +569,21 @@ final class ServiceController: ObservableObject {
                     // 400ms 的 desktopSettleDelay，只有最后停下的那个才放行。
                     // 但那只防住「叫醒」这条路：tick 恰好落在切换途中时照样会采到中间
                     // 那个应用。真要根治得在这里再比一次，眼下不值当。
-                    let desktopUrgent = desktopChanged && (
+                    let desktopUrgent = !manualMode && desktopChanged && (
                         desktop?.bundleIdentifier != lastPostedDesktop?.bundleIdentifier ||
                         desktop?.applicationName != lastPostedDesktop?.applicationName
                     )
                     // 插拔和换设备也是用户正盯着的事，跟播放/前台应用同一档。
                     // 只认结构性指纹：功率、电压、电流的滚动照旧等节流窗口，
                     // 否则充电中每一轮都「有变化」，即时上报就退化成 5 秒一次的轮询。
-                    let chargerUrgent = chargerStructural != nil &&
+                    let chargerUrgent = !manualMode && chargerStructural != nil &&
                         chargerStructural != lastPostedChargerStructural
                     // 退避期内一律不放行。否则服务端挂掉时，未推进的 lastPosted 会让
                     // urgent 一直为真，即时上报就变成每圈一次的重试风暴。
-                    let urgent = (musicUrgent || desktopUrgent || chargerUrgent) && Date() >= backoffUntil
+                    let urgent = (manualMode || musicUrgent || desktopUrgent || chargerUrgent) && Date() >= backoffUntil
+                    let shouldPost = Date() >= backoffUntil && (manualMode || urgent || Date() >= nextPostAt)
 
-                    if let url, anythingChanged, urgent || Date() >= nextPostAt {
+                    if let url, anythingChanged, shouldPost {
                         let desktopPayload = desktop.map {
                             let shouldSendIcon =
                                 $0.bundleIdentifier != lastPostedDesktop?.bundleIdentifier ||
@@ -474,12 +594,12 @@ final class ServiceController: ObservableObject {
                         // Apple Music 目录，那次查询的结果自带封面 URL。
                         let musicPayload = music
                         let envelope = makeTelemetryEnvelope(
-                            charger: chargerChanged ? charger : nil,
-                            desktop: desktopChanged ? desktopPayload : nil,
-                            appleMusic: musicChanged ? musicPayload : nil,
-                            vibeCoding: ccusageChanged ? ccusage.uploadPayload : nil,
-                            includeDesktop: desktopChanged,
-                            includeAppleMusic: musicChanged
+                            charger: chargerToSend ? charger : nil,
+                            desktop: desktopToSend ? desktopPayload : nil,
+                            appleMusic: musicToSend ? musicPayload : nil,
+                            vibeCoding: ccusageToSend ? ccusage.uploadPayload : nil,
+                            includeDesktop: desktopToSend,
+                            includeAppleMusic: musicToSend
                         )
                         var request = URLRequest(url: url)
                         request.httpMethod = "POST"
@@ -497,16 +617,24 @@ final class ServiceController: ObservableObject {
                         reporterLastSuccess = Date()
                         reporterLastError = nil
                         lastHeartbeatAt = Date()
-                        if chargerChanged { lastPostedCharger = chargerSignature }
+                        if chargerToSend { lastPostedCharger = chargerSignature }
                         // 结构指纹跟着每次成功发送推进，跟 chargerChanged 无关：
                         // 结构变了完整指纹必然也变，反过来不成立。
                         if let chargerStructural { lastPostedChargerStructural = chargerStructural }
-                        if desktopChanged { lastPostedDesktop = desktopSignature }
-                        if musicChanged {
+                        if desktopToSend { lastPostedDesktop = desktopSignature }
+                        if musicToSend {
                             lastPostedAppleMusic = musicSignature
                             lastPostedMusicAnchor = music.map(AppleMusicPositionAnchor.init)
                         }
-                        if ccusageChanged { lastPostedCcusageAt = ccusage.lastSuccess }
+                        if ccusageToSend { lastPostedCcusageAt = ccusage.lastSuccess }
+                        if !manualModulesForAttempt.isEmpty {
+                            pendingManualReports.subtract(manualModulesForAttempt)
+                            let now = Date()
+                            for module in manualModulesForAttempt {
+                                lastManualReportAt[module] = now
+                                lastManualReportError[module] = nil
+                            }
+                        }
                         backoffUntil = .distantPast
                         // 即时上报同样重置整个窗口，免得「刚提前发过一次、转头又到点发一次」
                         nextPostAt = Date().addingTimeInterval(interval)
@@ -515,6 +643,12 @@ final class ServiceController: ObservableObject {
                     return
                 } catch {
                     reporterLastError = error.localizedDescription
+                    if !manualModulesForAttempt.isEmpty {
+                        pendingManualReports.subtract(manualModulesForAttempt)
+                        for module in manualModulesForAttempt {
+                            lastManualReportError[module] = error.localizedDescription
+                        }
+                    }
                     backoffUntil = Date().addingTimeInterval(min(interval, 10))
                     nextPostAt = backoffUntil
                 }

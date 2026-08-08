@@ -507,6 +507,13 @@ final class AgentLimitsMonitor: ObservableObject {
     func refreshIfNeeded(codexPath: String, interval: Double) async {
         guard !refreshing else { return }
         if let lastAttempt, Date().timeIntervalSince(lastAttempt) < interval { return }
+        await refreshNow(codexPath: codexPath)
+    }
+
+    /// Bypasses the interval gate for an explicit user refresh, while preserving
+    /// the monitor's single-flight guard.
+    func refreshNow(codexPath: String) async {
+        guard !refreshing else { return }
         refreshing = true
         lastAttempt = Date()
         defer { refreshing = false }
@@ -887,6 +894,18 @@ final class CcusageMonitor: ObservableObject {
         // 换套餐 / 额度跳档最长会被压 60 秒才发出去。
         if let lastSuccess, Date().timeIntervalSince(lastSuccess) < interval,
            plans == lastPlans { return }
+        await refreshNow(nodePath: nodePath, cliPath: cliPath, plans: plans, limitErrors: limitErrors)
+    }
+
+    /// Bypasses the interval gate for an explicit user refresh, while preserving
+    /// the monitor's single-flight guard.
+    func refreshNow(
+        nodePath: String,
+        cliPath: String,
+        plans: [String: AgentPlanSnapshot],
+        limitErrors: [String: String]
+    ) async {
+        guard !refreshing else { return }
         refreshing = true
         defer { refreshing = false }
         do {

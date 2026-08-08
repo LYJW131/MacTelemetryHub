@@ -11,6 +11,12 @@ struct MacTelemetryHubApp: App {
         }
         .defaultSize(width: 940, height: 640)
 
+        Settings {
+            SettingsView(service: service)
+        }
+        .defaultSize(width: 860, height: 600)
+        .windowResizability(.contentSize)
+
         MenuBarExtra {
             MenuBarView(service: service)
         } label: {
@@ -36,13 +42,17 @@ private struct MenuBarView: View {
             Text(String(format: "总输出 %.2f W", power))
         }
         Divider()
-        Button("打开控制面板") {
+        Button("打开控制面板", systemImage: "rectangle.inset.filled") {
             openWindow(id: "dashboard")
             NSApplication.shared.activate(ignoringOtherApps: true)
         }
+        SettingsLink {
+            Label("设置", systemImage: "gearshape")
+        }
         if service.settings.chargerModuleEnabled {
-            Button("断开充电器") { bluetooth.disconnect() }.disabled(!bluetooth.isConnected)
-            Button("重连充电器") { bluetooth.reconnect() }
+            Button("断开充电器", systemImage: "bolt.slash") { bluetooth.disconnect() }
+                .disabled(!bluetooth.isConnected)
+            Button("重连充电器", systemImage: "arrow.clockwise") { bluetooth.reconnect() }
         }
         Divider()
         Button("退出") {

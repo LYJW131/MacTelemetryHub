@@ -1,6 +1,38 @@
 import AppKit
 import SwiftUI
 
+private enum DashboardSection: String, CaseIterable, Identifiable {
+    case overview
+    case usage
+    case charger
+
+    var id: Self { self }
+
+    var title: String {
+        switch self {
+        case .overview: "总览"
+        case .usage: "Vibe Coding"
+        case .charger: "充电设备"
+        }
+    }
+
+    var subtitle: String {
+        switch self {
+        case .overview: "查看所有已启用的数据源"
+        case .usage: "本机 Claude 与 Codex 用量"
+        case .charger: "端口、电流与设备状态"
+        }
+    }
+
+    var icon: String {
+        switch self {
+        case .overview: "rectangle.grid.2x2"
+        case .usage: "terminal"
+        case .charger: "bolt.horizontal"
+        }
+    }
+}
+
 struct DashboardView: View {
     @ObservedObject var service: ServiceController
     @ObservedObject private var bluetooth: BluetoothService
@@ -8,7 +40,7 @@ struct DashboardView: View {
     @ObservedObject private var appleMusic: AppleMusicMonitor
     @ObservedObject private var ccusage: CcusageMonitor
     @ObservedObject private var agentLimits: AgentLimitsMonitor
-    @State private var showingSettings = false
+    @State private var selection: DashboardSection = .overview
 
     init(service: ServiceController) {
         self.service = service
@@ -21,168 +53,304 @@ struct DashboardView: View {
 
     var body: some View {
         TimelineView(.periodic(from: .now, by: 1)) { context in
-            ZStack {
-                LinearGradient(
-                    colors: [
-                        Color(nsColor: .windowBackgroundColor),
-                        Color.blue.opacity(0.045),
-                        Color(nsColor: .windowBackgroundColor),
-                    ],
-                    startPoint: .topLeading,
-                    endPoint: .bottomTrailing
-                )
-                .ignoresSafeArea()
-
-                GeometryReader { proxy in
-                    ScrollView {
-                        VStack(spacing: 16) {
-                            header(now: context.date)
-                            if let error = bluetooth.lastError, !bluetooth.isConnected {
-                                errorBanner(error)
-                            }
-                            moduleStrip
-                            if service.settings.ccusageModuleEnabled {
-                                VibeCodingUsageView(
-                                    payload: ccusage.payload,
-                                    updatedAt: ccusage.lastSuccess,
-                                    error: ccusage.lastError,
-                                    plans: agentLimits.plans
-                                )
-                            }
-                            if service.settings.chargerModuleEnabled {
-                                overviewCard(now: context.date)
-                                HStack(alignment: .top, spacing: 12) {
-                                    ForEach(["C1", "C2", "C3"], id: \.self) { key in
-                                        PortCard(key: key, port: bluetooth.state.ports[key] ?? PortState())
-                                            .frame(maxWidth: .infinity)
-                                    }
-                                }
-                                .frame(height: 244)
-                            }
-                            Spacer(minLength: 12)
-                            footer(now: context.date)
-                        }
-                        .frame(minHeight: max(0, proxy.size.height - 40), alignment: .top)
-                        .padding(.horizontal, 22)
-                        .padding(.vertical, 20)
-                    }
-                }
+            NavigationSplitView {
+                sidebar(now: context.date)
+            } detail: {
+                detail(now: context.date)
             }
+            .navigationSplitViewStyle(.balanced)
         }
         .frame(minWidth: 880, minHeight: 620)
-        .sheet(isPresented: $showingSettings) {
-            SettingsView(service: service)
+    }
+
+    private func sidebar(now: Date) -> some View {
+        List(selection: $selection) {
+            Section("监测") {
+                ForEach(DashboardSection.allCases) { section in
+                    Label {
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(section.title)
+                            Text(section.subtitle)
+                                .font(.caption2)
+                                .foregroundStyle(.secondary)
+                        }
+                    } icon: {
+                        Image(systemName: section.icon)
+                            .frame(width: 18)
+                    }
+                    .tag(section)
+                    .disabled(section == .usage && !service.settings.ccusageModuleEnabled)
+                }
+            }
+
+            Section("连接") {
+                HStack(spacing: 8) {
+                    Circle()
+                        .fill(serviceStatusColor(now: now))
+                        .frame(width: 7, height: 7)
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(statusText(now: now))
+                            .font(.callout.weight(.medium))
+                        Text(service.settings.chargerModuleEnabled ? "充电设备" : "充电模块已关闭")
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+                .padding(.vertical, 3)
+
+                HStack(spacing: 8) {
+                    Circle()
+                        .fill(httpServer.listeningURL == nil ? .orange : .green)
+                        .frame(width: 7, height: 7)
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(httpServer.listeningURL == nil ? "本地 API 未监听" : "本地 API 在线")
+                            .font(.callout.weight(.medium))
+                        Text(httpServer.listeningURL?.absoluteString ?? "在设置中检查端口")
+                            .font(.caption2.monospaced())
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                    }
+                }
+                .padding(.vertical, 3)
+            }
+        }
+        .listStyle(.sidebar)
+        .navigationTitle("遥测中心")
+        .safeAreaInset(edge: .bottom) {
+            VStack(alignment: .leading, spacing: 8) {
+                Divider()
+                HStack(spacing: 8) {
+                    Image(systemName: service.settings.postEnabled ? "paperplane.fill" : "paperplane")
+                        .foregroundStyle(service.settings.postEnabled ? .blue : .secondary)
+                    Text(service.settings.postEnabled ? "远端上报已启用" : "远端上报未启用")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    Spacer()
+                }
+            }
+            .padding(.horizontal, 12)
+            .padding(.bottom, 10)
+            .background(.bar)
         }
     }
 
-    @ViewBuilder
-    private func header(now: Date) -> some View {
-        HStack(spacing: 12) {
-            ZStack {
-                RoundedRectangle(cornerRadius: 11, style: .continuous)
-                    .fill(LinearGradient(colors: [.blue, .cyan], startPoint: .topLeading, endPoint: .bottomTrailing))
-                Image(systemName: "wave.3.right")
-                    .font(.system(size: 20, weight: .bold))
-                    .foregroundStyle(.white)
-            }
-            .frame(width: 42, height: 42)
-            .shadow(color: .blue.opacity(0.22), radius: 8, y: 3)
+    private func detail(now: Date) -> some View {
+        VStack(spacing: 0) {
+            detailHeader(now: now)
+            Divider()
 
-            VStack(alignment: .leading, spacing: 2) {
-                Text("Mac Telemetry Hub")
-                    .font(.system(.title2, design: .rounded, weight: .bold))
-                Text("本机活动、媒体、Vibe Coding 与充电头遥测")
+            ScrollView {
+                Group {
+                    switch selection {
+                    case .overview:
+                        overviewContent
+                    case .usage:
+                        usageContent
+                    case .charger:
+                        chargerContent(now: now)
+                    }
+                }
+                .frame(maxWidth: 980, alignment: .topLeading)
+                .frame(maxWidth: .infinity, alignment: .top)
+                .padding(22)
+            }
+            .background(Color(nsColor: .windowBackgroundColor))
+        }
+    }
+
+    private func detailHeader(now: Date) -> some View {
+        HStack(spacing: 12) {
+            VStack(alignment: .leading, spacing: 3) {
+                Text(selection.title)
+                    .font(.title2.weight(.semibold))
+                Text(selection == .overview ? "Mac Telemetry Hub · \(now.formatted(date: .abbreviated, time: .shortened))" : selection.subtitle)
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
 
-            Spacer(minLength: 18)
+            Spacer(minLength: 16)
+
             StatusBadge(
                 text: service.reporterLastError == nil ? "遥测运行中" : "上报异常",
                 style: service.reporterLastError == nil ? .success : .warning
             )
 
-            HStack(spacing: 8) {
-                if service.settings.chargerModuleEnabled {
-                    Button("断开", systemImage: "bolt.slash") { bluetooth.disconnect() }
-                        .disabled(!bluetooth.isConnected)
-                    Button("重连", systemImage: "arrow.clockwise") { bluetooth.reconnect() }
-                        .disabled(bluetooth.phase == .handshaking)
-                }
-                Button { showingSettings = true } label: {
-                    Image(systemName: "gearshape")
-                        .frame(width: 16, height: 16)
-                }
-                .help("设置")
+            SettingsLink {
+                Image(systemName: "gearshape")
+                    .frame(width: 16, height: 16)
             }
-            .buttonStyle(.bordered)
-            .controlSize(.regular)
+            .help("打开设置")
+        }
+        .buttonStyle(.bordered)
+        .controlSize(.regular)
+        .padding(.horizontal, 22)
+        .padding(.vertical, 14)
+    }
+
+    private var overviewContent: some View {
+        VStack(alignment: .leading, spacing: 18) {
+            if let error = bluetooth.lastError, !bluetooth.isConnected {
+                errorBanner(error)
+            }
+
+            sectionHeading("数据源", detail: "每个模块独立运行，状态变化会在这里反映")
+            moduleGrid
+
+            if service.settings.chargerModuleEnabled {
+                sectionHeading("充电摘要", detail: "当前连接设备的实时输出")
+                overviewCard(now: Date())
+            }
+
+            footer(now: Date())
         }
     }
 
-    private var moduleStrip: some View {
-        HStack(spacing: 12) {
+    private var usageContent: some View {
+        VStack(alignment: .leading, spacing: 18) {
+            if service.settings.ccusageModuleEnabled {
+                VibeCodingUsageView(
+                    payload: ccusage.payload,
+                    updatedAt: ccusage.lastSuccess,
+                    error: ccusage.lastError,
+                    plans: agentLimits.plans,
+                    onRefresh: { Task { await service.refreshVibeCodingNow() } },
+                    isRefreshing: service.isRefreshingVibeCoding,
+                    refreshMessage: service.vibeCodingRefreshError.map { "刷新失败：\($0)" }
+                )
+            } else {
+                EmptyModuleView(
+                    title: "Vibe Coding 未启用",
+                    detail: "在设置的“数据源”中开启 ccusage，并填写本机 Node 与 CLI 路径。",
+                    icon: "terminal"
+                )
+            }
+        }
+    }
+
+    private func chargerContent(now: Date) -> some View {
+        VStack(alignment: .leading, spacing: 18) {
+            if service.settings.chargerModuleEnabled {
+                if let error = bluetooth.lastError, !bluetooth.isConnected {
+                    errorBanner(error)
+                }
+
+                HStack(spacing: 8) {
+                    Button("断开充电头", systemImage: "bolt.slash") {
+                        bluetooth.disconnect()
+                    }
+                    .disabled(!bluetooth.isConnected)
+                    .help("断开当前充电设备")
+
+                    Button("重连充电头", systemImage: "arrow.clockwise") {
+                        bluetooth.reconnect()
+                    }
+                    .disabled(bluetooth.phase == .handshaking)
+                    .help("重新连接当前充电设备")
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+
+                overviewCard(now: now)
+
+                sectionHeading("端口", detail: "实时电压、电流、功率与识别到的设备")
+                LazyVGrid(columns: [GridItem(.flexible(), spacing: 12), GridItem(.flexible(), spacing: 12), GridItem(.flexible(), spacing: 12)], spacing: 12) {
+                    ForEach(["C1", "C2", "C3"], id: \.self) { key in
+                        PortCard(key: key, port: bluetooth.state.ports[key] ?? PortState())
+                            .frame(minHeight: 248)
+                    }
+                }
+            } else {
+                EmptyModuleView(
+                    title: "充电模块未启用",
+                    detail: "在设置的“充电设备”中启用模块并完成一次配对。",
+                    icon: "bolt.horizontal"
+                )
+            }
+        }
+    }
+
+    private var moduleGrid: some View {
+        LazyVGrid(columns: [GridItem(.flexible(), spacing: 12), GridItem(.flexible(), spacing: 12)], spacing: 12) {
             ModuleStatusCard(
                 title: "前台应用",
                 icon: "macwindow",
                 enabled: service.settings.desktopModuleEnabled,
                 value: service.desktopActivity.snapshot?.applicationName ?? "等待活动",
-                detail: service.desktopActivity.snapshot?.bundleIdentifier
+                detail: service.desktopActivity.snapshot?.bundleIdentifier,
+                action: { _ = service.requestImmediateReport(.desktop) },
+                actionEnabled: service.canRequestImmediateReport(.desktop),
+                isReporting: service.isManualReportInFlight(.desktop),
+                feedback: service.manualReportMessage(for: .desktop),
+                feedbackIsError: service.manualReportFailed(.desktop)
             )
             ModuleStatusCard(
                 title: "Apple Music",
                 icon: "music.note",
                 enabled: service.settings.appleMusicModuleEnabled,
                 value: appleMusicStateText,
-                detail: appleMusicDetailText
+                detail: appleMusicDetailText,
+                action: { _ = service.requestImmediateReport(.appleMusic) },
+                actionEnabled: service.canRequestImmediateReport(.appleMusic),
+                isReporting: service.isManualReportInFlight(.appleMusic),
+                feedback: service.manualReportMessage(for: .appleMusic),
+                feedbackIsError: service.manualReportFailed(.appleMusic)
             )
             ModuleStatusCard(
                 title: "ccusage",
                 icon: "terminal",
                 enabled: service.settings.ccusageModuleEnabled,
-                value: service.ccusage.lastSuccess == nil ? "等待统计" : "聚合完成",
-                detail: service.ccusage.lastError
-                    ?? service.ccusage.lastSuccess?.formatted(date: .omitted, time: .standard)
+                value: ccusage.lastSuccess == nil ? "等待统计" : "聚合完成",
+                detail: ccusage.lastError ?? ccusage.lastSuccess?.formatted(date: .omitted, time: .standard),
+                action: { _ = service.requestImmediateReport(.vibeCoding) },
+                actionEnabled: service.canRequestImmediateReport(.vibeCoding),
+                isReporting: service.isManualReportInFlight(.vibeCoding),
+                feedback: service.manualReportMessage(for: .vibeCoding),
+                feedbackIsError: service.manualReportFailed(.vibeCoding)
             )
             ModuleStatusCard(
-                title: "充电头",
+                title: "充电设备",
                 icon: "bolt.fill",
                 enabled: service.settings.chargerModuleEnabled,
                 value: service.settings.chargerModuleEnabled ? bluetooth.phase.label : "已关闭",
-                detail: bluetooth.state.totalOutputPowerW.map { String(format: "%.2f W", $0) }
+                detail: bluetooth.state.totalOutputPowerW.map { String(format: "%.2f W", $0) },
+                action: { _ = service.requestImmediateReport(.charger) },
+                actionEnabled: service.canRequestImmediateReport(.charger),
+                isReporting: service.isManualReportInFlight(.charger),
+                feedback: service.manualReportMessage(for: .charger),
+                feedbackIsError: service.manualReportFailed(.charger)
             )
+        }
+    }
+
+    private func sectionHeading(_ title: String, detail: String) -> some View {
+        VStack(alignment: .leading, spacing: 3) {
+            Text(title)
+                .font(.headline)
+            Text(detail)
+                .font(.caption)
+                .foregroundStyle(.secondary)
         }
     }
 
     private var appleMusicStateText: String {
         switch appleMusic.snapshot?.state {
-        case "playing":
-            return "正在播放"
-        case "paused":
-            return "已暂停"
-        default:
-            return "当前未播放"
+        case "playing": "正在播放"
+        case "paused": "已暂停"
+        default: "当前未播放"
         }
     }
 
     private var appleMusicDetailText: String? {
-        guard let snapshot = appleMusic.snapshot else {
-            return appleMusic.lastError
-        }
-
+        guard let snapshot = appleMusic.snapshot else { return appleMusic.lastError }
         let track = [snapshot.title, snapshot.artist]
             .compactMap { $0?.trimmingCharacters(in: .whitespacesAndNewlines) }
             .filter { !$0.isEmpty }
             .joined(separator: " · ")
-
-        if !track.isEmpty {
-            return track
-        }
-        return appleMusic.lastError ?? "Music.app 已停止"
+        return track.isEmpty ? (appleMusic.lastError ?? "Music.app 已停止") : track
     }
 
     private func overviewCard(now: Date) -> some View {
-        HStack(spacing: 24) {
+        HStack(spacing: 22) {
             VStack(alignment: .leading, spacing: 10) {
                 Label("实时总输出", systemImage: "bolt.fill")
                     .font(.caption.weight(.semibold))
@@ -190,8 +358,7 @@ struct DashboardView: View {
 
                 HStack(alignment: .firstTextBaseline, spacing: 6) {
                     Text(number(bluetooth.state.totalOutputPowerW, digits: 2))
-                        .font(.system(size: 48, weight: .semibold, design: .rounded))
-                        .foregroundStyle(.primary)
+                        .font(.system(size: 44, weight: .semibold, design: .rounded))
                         .contentTransition(.numericText())
                     Text("W")
                         .font(.title3.weight(.medium))
@@ -209,14 +376,9 @@ struct DashboardView: View {
             }
             .frame(maxWidth: .infinity, alignment: .leading)
 
-            Divider()
-                .frame(height: 104)
+            Divider().frame(height: 100)
 
-            LazyVGrid(
-                columns: [GridItem(.flexible(), spacing: 22), GridItem(.flexible(), spacing: 22)],
-                alignment: .leading,
-                spacing: 16
-            ) {
+            LazyVGrid(columns: [GridItem(.flexible(), spacing: 18), GridItem(.flexible(), spacing: 18)], alignment: .leading, spacing: 14) {
                 DeviceFact(title: "序列号", value: bluetooth.state.device.serialNumber, icon: "number")
                 DeviceFact(title: "MAC 地址", value: bluetooth.state.device.macAddress, icon: "antenna.radiowaves.left.and.right")
                 DeviceFact(title: "固件版本", value: bluetooth.state.device.firmwareVersion, icon: "cpu")
@@ -224,20 +386,21 @@ struct DashboardView: View {
             }
             .frame(maxWidth: .infinity)
         }
-        .padding(.horizontal, 20)
-        .padding(.vertical, 18)
-        .dashboardPanel(cornerRadius: 20)
+        .padding(18)
+        .background(Color(nsColor: .controlBackgroundColor))
+        .overlay(RoundedRectangle(cornerRadius: 8).stroke(.primary.opacity(0.08), lineWidth: 1))
+        .clipShape(RoundedRectangle(cornerRadius: 8))
     }
 
     private func footer(now: Date) -> some View {
         HStack(spacing: 10) {
             if let url = httpServer.listeningURL {
                 Circle().fill(.green).frame(width: 7, height: 7)
-                Text("API 在线")
-                    .font(.caption.weight(.semibold))
+                Text("API 在线").font(.caption.weight(.semibold))
                 Text(url.absoluteString)
                     .font(.caption.monospaced())
                     .foregroundStyle(.secondary)
+                    .lineLimit(1)
                 Button("打开") { NSWorkspace.shared.open(url) }
                     .buttonStyle(.link)
                     .font(.caption)
@@ -246,9 +409,10 @@ struct DashboardView: View {
                 Text(httpServer.lastError ?? "HTTP 服务未启动")
                     .font(.caption)
                     .foregroundStyle(.secondary)
+                    .lineLimit(1)
             }
 
-            Spacer()
+            Spacer(minLength: 12)
 
             if service.settings.postEnabled {
                 if let error = service.reporterLastError {
@@ -268,21 +432,19 @@ struct DashboardView: View {
         }
         .font(.caption)
         .lineLimit(1)
-        .padding(.horizontal, 14)
-        .frame(height: 38)
-        .background(Capsule().fill(.primary.opacity(0.045)))
-        .overlay(Capsule().stroke(.primary.opacity(0.06), lineWidth: 1))
+        .padding(.vertical, 8)
     }
 
     private func errorBanner(_ message: String) -> some View {
         HStack(spacing: 10) {
             Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(.orange)
-            Text(message).font(.callout)
+            Text(message).font(.callout).lineLimit(2)
             Spacer()
         }
-        .padding(12)
-        .background(RoundedRectangle(cornerRadius: 12).fill(.orange.opacity(0.11)))
-        .overlay(RoundedRectangle(cornerRadius: 12).stroke(.orange.opacity(0.18)))
+        .padding(10)
+        .background(.orange.opacity(0.09))
+        .overlay(RoundedRectangle(cornerRadius: 8).stroke(.orange.opacity(0.18), lineWidth: 1))
+        .clipShape(RoundedRectangle(cornerRadius: 8))
     }
 
     private func statusText(now: Date) -> String {
@@ -290,13 +452,13 @@ struct DashboardView: View {
         return bluetooth.phase.label
     }
 
-    private func statusStyle(now: Date) -> StatusBadgeStyle {
-        if bluetooth.isConnected { return isStale(now: now) ? .warning : .success }
+    private func serviceStatusColor(now: Date) -> Color {
+        if bluetooth.isConnected { return isStale(now: now) ? .orange : .green }
         switch bluetooth.phase {
-        case .connecting, .handshaking: return .info
-        case .awaitingPairing: return .warning
-        case .bluetoothUnavailable: return .error
-        default: return .neutral
+        case .connecting, .handshaking: return .blue
+        case .awaitingPairing: return .orange
+        case .bluetoothUnavailable: return .red
+        default: return .secondary
         }
     }
 
@@ -310,12 +472,41 @@ struct DashboardView: View {
     }
 }
 
+private struct EmptyModuleView: View {
+    let title: String
+    let detail: String
+    let icon: String
+
+    var body: some View {
+        VStack(spacing: 10) {
+            Image(systemName: icon)
+                .font(.system(size: 24, weight: .medium))
+                .foregroundStyle(.secondary)
+            Text(title).font(.headline)
+            Text(detail)
+                .font(.callout)
+                .foregroundStyle(.secondary)
+                .multilineTextAlignment(.center)
+                .frame(maxWidth: 420)
+        }
+        .frame(maxWidth: .infinity, minHeight: 220)
+        .background(Color(nsColor: .controlBackgroundColor))
+        .overlay(RoundedRectangle(cornerRadius: 8).stroke(.primary.opacity(0.08), lineWidth: 1))
+        .clipShape(RoundedRectangle(cornerRadius: 8))
+    }
+}
+
 private struct ModuleStatusCard: View {
     let title: String
     let icon: String
     let enabled: Bool
     let value: String
     let detail: String?
+    let action: (() -> Void)?
+    let actionEnabled: Bool
+    let isReporting: Bool
+    let feedback: String?
+    let feedbackIsError: Bool
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
@@ -324,6 +515,24 @@ private struct ModuleStatusCard: View {
                     .font(.caption.weight(.semibold))
                     .foregroundStyle(enabled ? .primary : .secondary)
                 Spacer()
+                if let action {
+                    Button {
+                        action()
+                    } label: {
+                        Group {
+                            if isReporting {
+                                ProgressView()
+                                    .controlSize(.small)
+                            } else {
+                                Image(systemName: "paperplane")
+                            }
+                        }
+                        .frame(width: 14, height: 14)
+                    }
+                    .buttonStyle(.borderless)
+                    .disabled(!actionEnabled || isReporting)
+                    .help("立即上报\(title)")
+                }
                 Circle()
                     .fill(enabled ? Color.green : Color.secondary.opacity(0.35))
                     .frame(width: 7, height: 7)
@@ -335,10 +544,18 @@ private struct ModuleStatusCard: View {
                 .font(.caption2)
                 .foregroundStyle(.secondary)
                 .lineLimit(1)
+            if let feedback {
+                Text(feedback)
+                    .font(.caption2)
+                    .foregroundStyle(feedbackIsError ? .red : .secondary)
+                    .lineLimit(1)
+            }
         }
         .padding(13)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .dashboardPanel(cornerRadius: 14)
+        .frame(maxWidth: .infinity, minHeight: 88, alignment: .leading)
+        .background(Color(nsColor: .controlBackgroundColor))
+        .overlay(RoundedRectangle(cornerRadius: 8).stroke(.primary.opacity(0.08), lineWidth: 1))
+        .clipShape(RoundedRectangle(cornerRadius: 8))
     }
 }
 
@@ -350,17 +567,12 @@ private struct PortCard: View {
     private var displayModel: String? { port.deviceModel ?? port.vendor }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 13) {
-            HStack(spacing: 10) {
-                ZStack {
-                    RoundedRectangle(cornerRadius: 9, style: .continuous)
-                        .fill(active ? Color.blue.opacity(0.12) : Color.secondary.opacity(0.09))
-                    Image(systemName: "cable.connector.horizontal")
-                        .font(.system(size: 14, weight: .semibold))
-                        .foregroundStyle(active ? .blue : .secondary)
-                }
-                .frame(width: 34, height: 34)
-
+        VStack(alignment: .leading, spacing: 12) {
+            HStack(spacing: 8) {
+                Image(systemName: "cable.connector.horizontal")
+                    .font(.system(size: 14, weight: .semibold))
+                    .foregroundStyle(active ? .blue : .secondary)
+                    .frame(width: 24, height: 24)
                 VStack(alignment: .leading, spacing: 1) {
                     Text("USB-C \(key.dropFirst())")
                         .font(.headline)
@@ -374,25 +586,23 @@ private struct PortCard: View {
 
             HStack(alignment: .firstTextBaseline, spacing: 5) {
                 Text(number(port.powerW, digits: 2))
-                    .font(.system(size: 32, weight: .semibold, design: .rounded))
+                    .font(.system(size: 30, weight: .semibold, design: .rounded))
                     .contentTransition(.numericText())
                 Text("W")
                     .font(.callout.weight(.medium))
                     .foregroundStyle(.tertiary)
-                Spacer()
             }
 
             HStack(spacing: 0) {
                 CompactMetric(title: "电压", value: number(port.voltageV, digits: 2), unit: "V", icon: "waveform.path", tint: .blue)
-                Divider().frame(height: 34)
+                Divider().frame(height: 30)
                 CompactMetric(title: "电流", value: number(port.currentA, digits: 2), unit: "A", icon: "gauge.with.dots.needle.33percent", tint: .purple)
             }
-            .padding(.vertical, 9)
-            .background(RoundedRectangle(cornerRadius: 11).fill(.primary.opacity(0.035)))
+            .padding(.vertical, 8)
+            .background(.primary.opacity(0.035))
 
             VStack(alignment: .leading, spacing: 3) {
                 Label(port.cable == "N/A" ? "未检测到线缆" : port.cable, systemImage: "cable.connector")
-                    .foregroundStyle(.primary)
                 Text(port.chargingInfo == "N/A" ? "未识别充电协议" : port.chargingInfo)
                     .foregroundStyle(.secondary)
                 Text(displayModel ?? "未识别设备")
@@ -403,9 +613,11 @@ private struct PortCard: View {
             .lineLimit(1)
             .frame(maxWidth: .infinity, alignment: .leading)
         }
-        .padding(15)
+        .padding(13)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-        .dashboardPanel(cornerRadius: 18)
+        .background(Color(nsColor: .controlBackgroundColor))
+        .overlay(RoundedRectangle(cornerRadius: 8).stroke(.primary.opacity(0.08), lineWidth: 1))
+        .clipShape(RoundedRectangle(cornerRadius: 8))
     }
 }
 
@@ -432,7 +644,7 @@ private struct CompactMetric: View {
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
-        .padding(.horizontal, 10)
+        .padding(.horizontal, 8)
     }
 }
 
@@ -442,11 +654,11 @@ private struct DeviceFact: View {
     let icon: String
 
     var body: some View {
-        HStack(spacing: 9) {
+        HStack(spacing: 8) {
             Image(systemName: icon)
-                .font(.system(size: 13, weight: .medium))
+                .font(.system(size: 12, weight: .medium))
                 .foregroundStyle(.blue)
-                .frame(width: 18)
+                .frame(width: 17)
             VStack(alignment: .leading, spacing: 2) {
                 Text(title)
                     .font(.caption2)
@@ -461,16 +673,13 @@ private struct DeviceFact: View {
 }
 
 extension View {
-    func dashboardPanel(cornerRadius: CGFloat) -> some View {
-        background(
-            RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
-                .fill(Color(nsColor: .controlBackgroundColor))
-        )
-        .overlay(
-            RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
-                .stroke(.primary.opacity(0.075), lineWidth: 1)
-        )
-        .shadow(color: .black.opacity(0.055), radius: 10, y: 4)
+    func dashboardPanel(cornerRadius: CGFloat = 8) -> some View {
+        background(Color(nsColor: .controlBackgroundColor))
+            .overlay(
+                RoundedRectangle(cornerRadius: min(cornerRadius, 8), style: .continuous)
+                    .stroke(.primary.opacity(0.075), lineWidth: 1)
+            )
+            .clipShape(RoundedRectangle(cornerRadius: min(cornerRadius, 8), style: .continuous))
     }
 }
 
