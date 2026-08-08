@@ -1,10 +1,51 @@
 import SwiftUI
 
+private enum SettingsCategory: String, CaseIterable, Identifiable {
+    case general
+    case sources
+    case charger
+    case local
+    case reporting
+
+    var id: Self { self }
+
+    var title: String {
+        switch self {
+        case .general: "通用"
+        case .sources: "数据源"
+        case .charger: "充电设备"
+        case .local: "本地服务"
+        case .reporting: "远端上报"
+        }
+    }
+
+    var detail: String {
+        switch self {
+        case .general: "后台运行与应用标识"
+        case .sources: "前台应用、音乐与用量统计"
+        case .charger: "Anker Prime 配对与端口遥测"
+        case .local: "本机 HTTP API 与调试端点"
+        case .reporting: "版本化遥测入口与发送策略"
+        }
+    }
+
+    var icon: String {
+        switch self {
+        case .general: "slider.horizontal.3"
+        case .sources: "square.stack.3d.up"
+        case .charger: "bolt.horizontal"
+        case .local: "network"
+        case .reporting: "paperplane"
+        }
+    }
+}
+
 struct SettingsView: View {
     @ObservedObject var service: ServiceController
     @ObservedObject private var settings: AppSettings
     @ObservedObject private var bluetooth: BluetoothService
     @Environment(\.dismiss) private var dismiss
+    @State private var selection: SettingsCategory = .general
     @State private var revealUserID = false
     @State private var message: String?
     @State private var isError = false
@@ -16,126 +57,351 @@ struct SettingsView: View {
     }
 
     var body: some View {
-        VStack(spacing: 0) {
-            sheetHeader
-            Divider()
-
-            ScrollView {
-                VStack(spacing: 12) {
-                    connectionSection
-
-                    HStack(alignment: .top, spacing: 12) {
-                        apiSection
-                        backgroundSection
-                    }
-
-                    modulesSection
-                    postSection
-
-                    if let message {
-                        Label(message, systemImage: isError ? "xmark.circle.fill" : "checkmark.circle.fill")
-                            .font(.callout)
-                            .foregroundStyle(isError ? .red : .green)
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                            .padding(12)
-                            .background(
-                                RoundedRectangle(cornerRadius: 12)
-                                    .fill((isError ? Color.red : Color.green).opacity(0.09))
-                            )
+        NavigationSplitView {
+            List(selection: $selection) {
+                Section("设置") {
+                    ForEach(SettingsCategory.allCases) { category in
+                        Label(category.title, systemImage: category.icon)
+                            .tag(category)
                     }
                 }
-                .padding(16)
-            }
-            .background(
-                LinearGradient(
-                    colors: [Color(nsColor: .windowBackgroundColor), Color.blue.opacity(0.035)],
-                    startPoint: .topLeading,
-                    endPoint: .bottomTrailing
-                )
-            )
 
-            Divider()
-            footer
+                Section("应用") {
+                    LabeledContent("版本", value: appVersion)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    Text(settings.deviceID)
+                        .font(.caption2.monospaced())
+                        .foregroundStyle(.tertiary)
+                        .textSelection(.enabled)
+                        .lineLimit(1)
+                        .help("遥测设备标识")
+                }
+            }
+            .listStyle(.sidebar)
+            .navigationTitle("设置")
+        } detail: {
+            VStack(spacing: 0) {
+                detailHeader
+                Divider()
+
+                ScrollView {
+                    settingsContent
+                        .frame(maxWidth: 700, alignment: .topLeading)
+                        .frame(maxWidth: .infinity, alignment: .top)
+                        .padding(24)
+                }
+                .background(Color(nsColor: .windowBackgroundColor))
+
+                Divider()
+                footer
+            }
         }
-        .frame(width: 640, height: 680)
-        // 关掉面板就别让电台白扫完剩下的窗口
+        .navigationSplitViewStyle(.balanced)
+        .frame(minWidth: 780, minHeight: 500)
         .onDisappear { bluetooth.stopPairingScan() }
     }
 
-    private var sheetHeader: some View {
+    private var appVersion: String {
+        let version = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "1.0.0"
+        let build = Bundle.main.infoDictionary?["CFBundleVersion"] as? String ?? "1"
+        return "v\(version) (\(build))"
+    }
+
+    private var detailHeader: some View {
         HStack(spacing: 12) {
-            ZStack {
-                RoundedRectangle(cornerRadius: 10, style: .continuous)
-                    .fill(LinearGradient(colors: [.blue, .cyan], startPoint: .topLeading, endPoint: .bottomTrailing))
-                Image(systemName: "gearshape.fill")
-                    .font(.system(size: 18, weight: .semibold))
-                    .foregroundStyle(.white)
-            }
-            .frame(width: 40, height: 40)
+            Image(systemName: selection.icon)
+                .font(.system(size: 18, weight: .semibold))
+                .foregroundStyle(.blue)
+                .frame(width: 28)
 
-            VStack(alignment: .leading, spacing: 2) {
-                Text("遥测中心设置")
-                    .font(.title2.bold())
-                Text("模块、API 与统一上报")
+            VStack(alignment: .leading, spacing: 3) {
+                Text(selection.title)
+                    .font(.title2.weight(.semibold))
+                Text(selection.detail)
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
+
             Spacer()
-            StatusBadge(text: service.bluetooth.phase.label, style: service.bluetooth.isConnected ? .success : .neutral)
+
+            StatusBadge(
+                text: bluetooth.isConnected ? "设备已连接" : bluetooth.phase.label,
+                style: bluetooth.isConnected ? .success : .neutral
+            )
         }
-        .padding(.horizontal, 16)
-        .padding(.vertical, 12)
+        .padding(.horizontal, 24)
+        .padding(.vertical, 16)
     }
 
-    private var connectionSection: some View {
-        SettingsCard(title: "充电头模块", subtitle: "启用后连接 Anker Prime 并采集端口遥测", icon: "bolt.fill", tint: .blue) {
-            Toggle("启用充电头遥测", isOn: $settings.chargerModuleEnabled)
-                .toggleStyle(.switch)
+    @ViewBuilder
+    private var settingsContent: some View {
+        switch selection {
+        case .general:
+            generalSettings
+        case .sources:
+            sourceSettings
+        case .charger:
+            chargerSettings
+        case .local:
+            localSettings
+        case .reporting:
+            reportingSettings
+        }
+    }
 
-            if settings.chargerModuleEnabled {
-            VStack(alignment: .leading, spacing: 8) {
-                FieldTitle(title: "Anker 用户 ID", detail: "40 位")
-                HStack(spacing: 8) {
-                    Group {
-                        if revealUserID {
-                            TextField("40 位 Anker 用户 ID", text: $settings.userID)
-                        } else {
-                            SecureField("40 位 Anker 用户 ID", text: $settings.userID)
-                        }
+    private var generalSettings: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            settingSection("后台运行", detail: "关闭控制面板后，菜单栏服务仍会继续运行。", icon: "menubar.rectangle") {
+                Toggle("登录后自动启动", isOn: $settings.launchAtLoginEnabled)
+                    .toggleStyle(.switch)
+                    .onChange(of: settings.launchAtLoginEnabled) { _, enabled in
+                        updateLaunchAtLogin(enabled)
                     }
-                    .font(.body.monospaced())
-                    .textFieldStyle(.roundedBorder)
-
-                    Button { revealUserID.toggle() } label: {
-                        Image(systemName: revealUserID ? "eye.slash" : "eye")
-                            .frame(width: 18, height: 18)
-                    }
-                    .buttonStyle(.bordered)
-                    .help(revealUserID ? "隐藏用户 ID" : "显示用户 ID")
-                }
-                Text("这个 uid 同时决定屏保个性化状态；使用其他账户的值会导致锁屏图片消失。")
+                Text("需要完成签名并将应用放入“应用程序”文件夹。")
                     .font(.caption)
                     .foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
             }
 
-            Divider()
-
-            VStack(alignment: .leading, spacing: 8) {
-                FieldTitle(title: "配对的充电头", detail: settings.normalizedPeripheralID == nil ? "未配对" : "已配对")
-                if settings.normalizedPeripheralID == nil {
-                    pairingPicker
-                } else {
-                    pairedRow
+            settingSection("遥测设备", detail: "此标识用于区分同一账户下的不同 Mac。", icon: "desktopcomputer") {
+                LabeledContent("设备 ID") {
+                    Text(settings.deviceID)
+                        .font(.caption.monospaced())
+                        .foregroundStyle(.secondary)
+                        .textSelection(.enabled)
+                        .lineLimit(1)
                 }
             }
+
+            if let message {
+                feedbackMessage(message)
             }
         }
     }
 
-    /// 没配对过：按一下扫 15 秒，挑一台就把 UUID 存下来，之后再也不扫。
+    private var sourceSettings: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            settingSection("前台应用", detail: "仅采集应用名、Bundle ID 和图标，不读取窗口标题或窗口内容。", icon: "macwindow") {
+                Toggle("启用前台应用采集", isOn: $settings.desktopModuleEnabled)
+                    .toggleStyle(.switch)
+            }
+
+            settingSection("Apple Music", detail: "直接读取本机 Music.app 的播放状态、曲目与进度。", icon: "music.note") {
+                Toggle("启用本机 Apple Music", isOn: $settings.appleMusicModuleEnabled)
+                    .toggleStyle(.switch)
+            }
+
+            settingSection("Vibe Coding 用量", detail: "ccusage 聚合本机 JSONL；session ID、项目路径、提示词与回复不会离开电脑。", icon: "terminal") {
+                Toggle("启用 ccusage", isOn: $settings.ccusageModuleEnabled)
+                    .toggleStyle(.switch)
+
+                if settings.ccusageModuleEnabled {
+                    VStack(alignment: .leading, spacing: 12) {
+                        pathField(title: "Node 可执行文件", detail: "本机路径", text: $settings.nodePath, placeholder: "/opt/homebrew/bin/node")
+                        pathField(title: "ccusage CLI", detail: "node_modules/ccusage/src/cli.js", text: $settings.ccusageCLIPath, placeholder: "/path/to/node_modules/ccusage/src/cli.js")
+                        NumericField(title: "统计刷新", unit: "秒（最少 60）", placeholder: "60", value: $settings.ccusageRefreshInterval)
+                        pathField(title: "Codex 可执行文件", detail: "留空则不采集 Codex 限额", text: $settings.codexCLIPath, placeholder: "/opt/homebrew/bin/codex")
+                        NumericField(title: "限额刷新", unit: "秒（最少 60）", placeholder: "300", value: $settings.agentLimitsRefreshInterval)
+                    }
+                    .padding(.top, 5)
+                }
+            }
+
+            if let message {
+                feedbackMessage(message)
+            }
+        }
+    }
+
+    private var chargerSettings: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            settingSection("充电头遥测", detail: "启用后连接 Anker Prime，并接收端口级实时数据。", icon: "bolt.horizontal") {
+                Toggle("启用充电头模块", isOn: $settings.chargerModuleEnabled)
+                    .toggleStyle(.switch)
+
+                if settings.chargerModuleEnabled {
+                    VStack(alignment: .leading, spacing: 12) {
+                        fieldTitle("Anker 用户 ID", detail: "40 个 ASCII 字符")
+                        HStack(spacing: 8) {
+                            Group {
+                                if revealUserID {
+                                    TextField("40 位 Anker 用户 ID", text: $settings.userID)
+                                } else {
+                                    SecureField("40 位 Anker 用户 ID", text: $settings.userID)
+                                }
+                            }
+                            .font(.body.monospaced())
+                            .textFieldStyle(.roundedBorder)
+
+                            Button {
+                                revealUserID.toggle()
+                            } label: {
+                                Image(systemName: revealUserID ? "eye.slash" : "eye")
+                                    .frame(width: 16, height: 16)
+                            }
+                            .buttonStyle(.bordered)
+                            .help(revealUserID ? "隐藏用户 ID" : "显示用户 ID")
+                        }
+                        Text("该 ID 同时决定屏保个性化状态；使用其他账户的值会导致锁屏图片消失。")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                    .padding(.top, 4)
+
+                    Divider().padding(.vertical, 3)
+
+                    fieldTitle("配对的充电头", detail: settings.normalizedPeripheralID == nil ? "未配对" : "已配对")
+                    if settings.normalizedPeripheralID == nil {
+                        pairingPicker
+                    } else {
+                        pairedRow
+                    }
+                }
+            }
+
+            if let message {
+                feedbackMessage(message)
+            }
+        }
+    }
+
+    private var localSettings: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            settingSection("本地 HTTP API", detail: "监听所有本机网络接口，供调试与局域网客户端读取。", icon: "network") {
+                HStack(spacing: 16) {
+                    VStack(alignment: .leading, spacing: 3) {
+                        Text("监听端口")
+                            .font(.callout.weight(.medium))
+                        Text("端点会在保存后重新监听。")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                    Spacer()
+                    TextField("8787", value: $settings.httpPort, format: .number.grouping(.never))
+                        .font(.body.monospacedDigit())
+                        .textFieldStyle(.roundedBorder)
+                        .multilineTextAlignment(.trailing)
+                        .frame(width: 100)
+                }
+
+                VStack(alignment: .leading, spacing: 5) {
+                    Label("可用端点", systemImage: "point.3.connected.trianglepath.dotted")
+                        .font(.callout.weight(.medium))
+                    Text("/status  ·  /activity  ·  /telemetry  ·  /health")
+                    Text("/ports  ·  /metrics  ·  /disconnect  ·  /reconnect")
+                }
+                .font(.caption2.monospaced())
+                .foregroundStyle(.secondary)
+            }
+
+            settingSection("后台状态", detail: "服务在菜单栏保持可见，关闭主窗口不会停止采集。", icon: "menubar.rectangle") {
+                HStack(spacing: 8) {
+                    Circle()
+                        .fill(service.httpServer.listeningURL == nil ? .orange : .green)
+                        .frame(width: 7, height: 7)
+                    Text(service.httpServer.listeningURL == nil ? "HTTP 服务未启动" : "HTTP 服务正在监听")
+                        .font(.callout.weight(.medium))
+                    Spacer()
+                    if let url = service.httpServer.listeningURL {
+                        Button("打开端点") { NSWorkspace.shared.open(url) }
+                            .buttonStyle(.link)
+                    }
+                }
+            }
+
+            if let message {
+                feedbackMessage(message)
+            }
+        }
+    }
+
+    private var reportingSettings: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            settingSection("统一上报", detail: "所有已启用模块使用同一个版本化遥测入口。", icon: "paperplane") {
+                Toggle("启用远端上报", isOn: $settings.postEnabled)
+                    .toggleStyle(.switch)
+
+                if settings.postEnabled {
+                    VStack(alignment: .leading, spacing: 12) {
+                        fieldTitle("上报端点", detail: "HTTP / HTTPS")
+                        TextField("https://example.com/api/ingest/telemetry", text: $settings.postURL)
+                            .textFieldStyle(.roundedBorder)
+
+                        fieldTitle("Bearer 密钥", detail: "保存在钥匙串")
+                        SecureField("与网站 TELEMETRY_INGEST_SECRET 一致", text: $settings.telemetrySecret)
+                            .font(.body.monospaced())
+                            .textFieldStyle(.roundedBorder)
+
+                        HStack(spacing: 14) {
+                            NumericField(title: "发送间隔", unit: "秒", placeholder: "60", value: $settings.postInterval)
+                            NumericField(title: "请求超时", unit: "秒", placeholder: "10", value: $settings.postTimeout)
+                        }
+
+                        Label("模块按字段部分更新；上报失败不会中断本地采集。", systemImage: "shield.checkered")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                    .padding(.top, 5)
+                } else {
+                    Label("开启后可配置上报地址、发送间隔和请求超时。", systemImage: "info.circle")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+            }
+
+            if let message {
+                feedbackMessage(message)
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func settingSection<Content: View>(_ title: String, detail: String, icon: String, @ViewBuilder content: () -> Content) -> some View {
+        VStack(alignment: .leading, spacing: 13) {
+            HStack(spacing: 9) {
+                Image(systemName: icon)
+                    .font(.system(size: 14, weight: .semibold))
+                    .foregroundStyle(.blue)
+                    .frame(width: 20)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(title)
+                        .font(.headline)
+                    Text(detail)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                Spacer()
+            }
+
+            content()
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(.bottom, 20)
+        .overlay(alignment: .bottom) { Divider() }
+        .padding(.bottom, 20)
+    }
+
+    private func fieldTitle(_ title: String, detail: String) -> some View {
+        HStack {
+            Text(title).font(.callout.weight(.medium))
+            Spacer()
+            Text(detail).font(.caption).foregroundStyle(.tertiary)
+        }
+    }
+
+    private func pathField(title: String, detail: String, text: Binding<String>, placeholder: String) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            fieldTitle(title, detail: detail)
+            TextField(placeholder, text: text)
+                .font(.caption.monospaced())
+                .textFieldStyle(.roundedBorder)
+        }
+    }
+
     private var pairingPicker: some View {
-        VStack(alignment: .leading, spacing: 8) {
+        VStack(alignment: .leading, spacing: 9) {
             HStack(spacing: 8) {
                 Button {
                     bluetooth.startPairingScan()
@@ -147,7 +413,7 @@ struct SettingsView: View {
 
                 if bluetooth.isPairingScan {
                     ProgressView().controlSize(.small)
-                    Button("停止") { bluetooth.stopPairingScan() }
+                    Button("停止", systemImage: "stop.fill") { bluetooth.stopPairingScan() }
                         .buttonStyle(.borderless)
                 }
             }
@@ -160,7 +426,7 @@ struct SettingsView: View {
                 } label: {
                     HStack(spacing: 8) {
                         Image(systemName: "bolt.fill").foregroundStyle(.blue)
-                        VStack(alignment: .leading, spacing: 1) {
+                        VStack(alignment: .leading, spacing: 2) {
                             Text(charger.name).font(.callout.weight(.medium))
                             Text(charger.id.uuidString)
                                 .font(.caption.monospaced())
@@ -171,9 +437,11 @@ struct SettingsView: View {
                             .font(.caption.monospacedDigit())
                             .foregroundStyle(.tertiary)
                     }
-                    .padding(8)
+                    .padding(9)
                     .frame(maxWidth: .infinity, alignment: .leading)
-                    .background(RoundedRectangle(cornerRadius: 8).fill(.primary.opacity(0.045)))
+                    .background(.primary.opacity(0.045))
+                    .overlay(RoundedRectangle(cornerRadius: 8).stroke(.primary.opacity(0.07), lineWidth: 1))
+                    .clipShape(RoundedRectangle(cornerRadius: 8))
                     .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
@@ -181,8 +449,8 @@ struct SettingsView: View {
 
             if bluetooth.discovered.isEmpty {
                 Text(bluetooth.isPairingScan
-                     ? "正在找附近的 A2687，让充电头保持通电。"
-                     : "还没配对充电头。扫描一次选中之后就会记住，以后只连这一台，不再扫描。")
+                    ? "正在找附近的 A2687，让充电头保持通电。"
+                    : "扫描一次并选择设备后，应用会记住它，以后只连接这一台。")
                     .font(.caption)
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
@@ -190,7 +458,6 @@ struct SettingsView: View {
         }
     }
 
-    /// 已配对：只显示存下的 UUID，和一个「重新配对」的出口。
     private var pairedRow: some View {
         VStack(alignment: .leading, spacing: 8) {
             HStack(spacing: 8) {
@@ -198,164 +465,51 @@ struct SettingsView: View {
                     .font(.caption.monospaced())
                     .textSelection(.enabled)
                     .foregroundStyle(.secondary)
+                    .lineLimit(1)
                 Spacer()
-                Button("重新配对") {
+                Button("重新配对", systemImage: "arrow.triangle.2.circlepath") {
                     settings.peripheralID = ""
                     save()
                 }
                 .buttonStyle(.bordered)
                 .controlSize(.small)
             }
-            Text("只会尝试连这一台，连接请求一直挂着，充电头上电就自动接上，全程不扫描。")
+            Text("只会尝试连接这一台设备；请求会保持等待，充电头上电后自动接入。")
                 .font(.caption)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
         }
     }
 
-    private var apiSection: some View {
-        SettingsCard(title: "本地 API", subtitle: "监听所有本机网络接口", icon: "network", tint: .purple) {
-            HStack {
-                VStack(alignment: .leading, spacing: 3) {
-                    Text("监听端口")
-                        .font(.callout.weight(.medium))
-                    Text("本机调试端点共用")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
-                Spacer()
-                TextField("8787", value: $settings.httpPort, format: .number.grouping(.never))
-                    .font(.body.monospacedDigit())
-                    .textFieldStyle(.roundedBorder)
-                    .multilineTextAlignment(.trailing)
-                    .frame(width: 92)
-            }
-            HStack(alignment: .top, spacing: 7) {
-                Image(systemName: "point.3.connected.trianglepath.dotted")
-                    .foregroundStyle(.secondary)
-                VStack(alignment: .leading, spacing: 2) {
-                    Text("/status  ·  /activity  ·  /telemetry")
-                    Text("/disconnect  ·  /reconnect")
-                }
-                .font(.caption2.monospaced())
-                .foregroundStyle(.secondary)
-            }
-        }
-        .frame(maxWidth: .infinity)
-    }
-
-    private var modulesSection: some View {
-        SettingsCard(title: "采集模块", subtitle: "每个模块独立开关，失败不会影响其他模块", icon: "square.grid.2x2.fill", tint: .indigo) {
-            Toggle("前台应用", isOn: $settings.desktopModuleEnabled)
-                .toggleStyle(.switch)
-            if settings.desktopModuleEnabled {
-                Text("只上报应用名、Bundle ID 和图标，不读取窗口标题或任何窗口内容。")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-            }
-
-            Divider()
-
-            Toggle("本机 Apple Music", isOn: $settings.appleMusicModuleEnabled)
-                .toggleStyle(.switch)
-            Text("直接读取 Music.app 的播放状态、歌曲和进度，与网站现有 Apple Music API 独立。")
-                .font(.caption)
-                .foregroundStyle(.secondary)
-
-            Divider()
-
-            Toggle("ccusage", isOn: $settings.ccusageModuleEnabled)
-                .toggleStyle(.switch)
-            if settings.ccusageModuleEnabled {
-                VStack(alignment: .leading, spacing: 8) {
-                    FieldTitle(title: "Node 可执行文件", detail: "本机路径")
-                    TextField("/opt/homebrew/bin/node", text: $settings.nodePath)
-                        .font(.caption.monospaced())
-                        .textFieldStyle(.roundedBorder)
-                    FieldTitle(title: "ccusage CLI", detail: "node_modules/ccusage/src/cli.js")
-                    TextField("/path/to/node_modules/ccusage/src/cli.js", text: $settings.ccusageCLIPath)
-                        .font(.caption.monospaced())
-                        .textFieldStyle(.roundedBorder)
-                    NumericField(title: "统计刷新", unit: "秒", placeholder: "60", value: $settings.ccusageRefreshInterval)
-                    FieldTitle(title: "Codex 可执行文件", detail: "留空则不采集 Codex 限额")
-                    TextField("/opt/homebrew/bin/codex", text: $settings.codexCLIPath)
-                        .font(.caption.monospaced())
-                        .textFieldStyle(.roundedBorder)
-                    NumericField(title: "限额刷新", unit: "秒", placeholder: "300", value: $settings.agentLimitsRefreshInterval)
-                    Text("限额刷新最小 60 秒。Claude 套餐等级直接读本地配置，不受这里的路径影响。")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
-                Text("只上传聚合统计；sessionId、项目路径、提示词和回复不会离开电脑。")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-            }
-        }
-    }
-
-    private var backgroundSection: some View {
-        SettingsCard(title: "后台运行", subtitle: "关闭窗口后菜单栏仍保持服务", icon: "menubar.rectangle", tint: .orange) {
-            Toggle("登录后自动启动", isOn: $settings.launchAtLoginEnabled)
-                .toggleStyle(.switch)
-                .onChange(of: settings.launchAtLoginEnabled) { _, enabled in
-                    updateLaunchAtLogin(enabled)
-                }
-            Text("签名完成并放入“应用程序”文件夹后启用。")
-                .font(.caption)
-                .foregroundStyle(.secondary)
-                .fixedSize(horizontal: false, vertical: true)
-        }
-        .frame(maxWidth: .infinity)
-    }
-
-    private var postSection: some View {
-        SettingsCard(title: "统一上报", subtitle: "所有已启用模块写入同一个版本化入口", icon: "paperplane.fill", tint: .green) {
-            Toggle("启用远端上报", isOn: $settings.postEnabled)
-                .toggleStyle(.switch)
-
-            if settings.postEnabled {
-                VStack(alignment: .leading, spacing: 8) {
-                    FieldTitle(title: "上报端点", detail: "HTTP / HTTPS")
-                    TextField("https://example.com/api/ingest/telemetry", text: $settings.postURL)
-                        .textFieldStyle(.roundedBorder)
-                }
-
-                VStack(alignment: .leading, spacing: 8) {
-                    FieldTitle(title: "Bearer 密钥", detail: "保存在钥匙串")
-                    SecureField("与网站 TELEMETRY_INGEST_SECRET 一致", text: $settings.telemetrySecret)
-                        .font(.body.monospaced())
-                        .textFieldStyle(.roundedBorder)
-                }
-
-                HStack(spacing: 14) {
-                    NumericField(title: "发送间隔", unit: "秒", placeholder: "60", value: $settings.postInterval)
-                    NumericField(title: "请求超时", unit: "秒", placeholder: "10", value: $settings.postTimeout)
-                }
-
-                Label("模块按字段部分更新；上报失败不会中断本地采集。", systemImage: "shield.checkered")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-            } else {
-                Label("开启后可配置上报地址、发送间隔和请求超时。", systemImage: "info.circle")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-            }
-        }
+    private func feedbackMessage(_ text: String) -> some View {
+        Label(text, systemImage: isError ? "xmark.circle.fill" : "checkmark.circle.fill")
+            .font(.callout)
+            .foregroundStyle(isError ? .red : .green)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.top, 4)
+            .lineLimit(2)
     }
 
     private var footer: some View {
         HStack(spacing: 10) {
-            Text("保存后会重载模块，并在需要时请求系统权限")
-                .font(.caption)
-                .foregroundStyle(.secondary)
-            Spacer()
+            if let message {
+                Label(message, systemImage: isError ? "xmark.circle.fill" : "checkmark.circle.fill")
+                    .font(.caption)
+                    .foregroundStyle(isError ? .red : .green)
+                    .lineLimit(1)
+            } else {
+                Text("更改会在保存后应用到采集模块。")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            Spacer(minLength: 12)
             Button("取消") { dismiss() }
                 .keyboardShortcut(.cancelAction)
-            Button("保存并重连") { save() }
+            Button("保存并重连", systemImage: "checkmark") { save() }
                 .buttonStyle(.borderedProminent)
                 .keyboardShortcut(.defaultAction)
         }
-        .padding(.horizontal, 16)
+        .padding(.horizontal, 24)
         .padding(.vertical, 11)
         .background(.bar)
     }
@@ -383,62 +537,6 @@ struct SettingsView: View {
     }
 }
 
-private struct SettingsCard<Content: View>: View {
-    let title: String
-    let subtitle: String
-    let icon: String
-    let tint: Color
-    @ViewBuilder let content: () -> Content
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 11) {
-            HStack(spacing: 10) {
-                ZStack {
-                    RoundedRectangle(cornerRadius: 8, style: .continuous)
-                        .fill(tint.opacity(0.11))
-                    Image(systemName: icon)
-                        .font(.system(size: 14, weight: .semibold))
-                        .foregroundStyle(tint)
-                }
-                .frame(width: 32, height: 32)
-                VStack(alignment: .leading, spacing: 1) {
-                    Text(title).font(.headline)
-                    Text(subtitle)
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                        .lineLimit(1)
-                }
-                Spacer()
-            }
-            content()
-        }
-        .padding(13)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(
-            RoundedRectangle(cornerRadius: 16, style: .continuous)
-                .fill(Color(nsColor: .controlBackgroundColor))
-        )
-        .overlay(
-            RoundedRectangle(cornerRadius: 16, style: .continuous)
-                .stroke(.primary.opacity(0.075), lineWidth: 1)
-        )
-        .shadow(color: .black.opacity(0.045), radius: 8, y: 3)
-    }
-}
-
-private struct FieldTitle: View {
-    let title: String
-    let detail: String
-
-    var body: some View {
-        HStack {
-            Text(title).font(.callout.weight(.medium))
-            Spacer()
-            Text(detail).font(.caption).foregroundStyle(.tertiary)
-        }
-    }
-}
-
 private struct NumericField: View {
     let title: String
     let unit: String
@@ -446,7 +544,7 @@ private struct NumericField: View {
     @Binding var value: Double
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 7) {
+        VStack(alignment: .leading, spacing: 6) {
             Text(title).font(.callout.weight(.medium))
             HStack(spacing: 6) {
                 TextField(placeholder, value: $value, format: .number)
@@ -456,6 +554,7 @@ private struct NumericField: View {
                 Text(unit)
                     .font(.caption)
                     .foregroundStyle(.secondary)
+                    .fixedSize()
             }
         }
         .frame(maxWidth: .infinity)

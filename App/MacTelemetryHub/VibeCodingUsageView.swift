@@ -5,11 +5,32 @@ struct VibeCodingUsageView: View {
     let payload: JSONValue?
     let updatedAt: Date?
     let error: String?
+    let onRefresh: (() -> Void)?
+    let isRefreshing: Bool
+    let refreshMessage: String?
     /// 键是 "claude" / "codex"。套餐和限额跟 ccusage 无关 —— ccusage 只数本地
     /// JSONL 里的 token，服务端的额度它一无所知，所以走单独的采集器单独传进来。
     var plans: [String: AgentPlanSnapshot] = [:]
 
     @State private var selectedAgent: UsageAgentFilter = .all
+
+    init(
+        payload: JSONValue?,
+        updatedAt: Date?,
+        error: String?,
+        plans: [String: AgentPlanSnapshot] = [:],
+        onRefresh: (() -> Void)? = nil,
+        isRefreshing: Bool = false,
+        refreshMessage: String? = nil
+    ) {
+        self.payload = payload
+        self.updatedAt = updatedAt
+        self.error = error
+        self.plans = plans
+        self.onRefresh = onRefresh
+        self.isRefreshing = isRefreshing
+        self.refreshMessage = refreshMessage
+    }
 
     private var report: VibeUsageReport? {
         payload.flatMap(VibeUsageReport.init(payload:))
@@ -39,17 +60,17 @@ struct VibeCodingUsageView: View {
             }
         }
         .padding(18)
-        .dashboardPanel(cornerRadius: 20)
+        .dashboardPanel(cornerRadius: 8)
     }
 
     private var header: some View {
         HStack(alignment: .center, spacing: 12) {
             ZStack {
-                RoundedRectangle(cornerRadius: 10, style: .continuous)
-                    .fill(LinearGradient(colors: [.indigo, .cyan], startPoint: .topLeading, endPoint: .bottomTrailing))
+                RoundedRectangle(cornerRadius: 8, style: .continuous)
+                    .fill(Color.indigo.opacity(0.13))
                 Image(systemName: "terminal.fill")
                     .font(.system(size: 17, weight: .bold))
-                    .foregroundStyle(.white)
+                    .foregroundStyle(.indigo)
             }
             .frame(width: 38, height: 38)
 
@@ -70,6 +91,32 @@ struct VibeCodingUsageView: View {
             .labelsHidden()
             .pickerStyle(.segmented)
             .frame(width: 230)
+
+            if let onRefresh {
+                Button {
+                    onRefresh()
+                } label: {
+                    Group {
+                        if isRefreshing {
+                            ProgressView()
+                                .controlSize(.small)
+                        } else {
+                            Image(systemName: "arrow.clockwise")
+                        }
+                    }
+                    .frame(width: 16, height: 16)
+                }
+                .buttonStyle(.bordered)
+                .disabled(isRefreshing)
+                .help("立即刷新 Token 用量与限额")
+            }
+
+            if let refreshMessage {
+                Text(refreshMessage)
+                    .font(.caption2)
+                    .foregroundStyle(refreshMessage.hasPrefix("刷新失败") ? .red : .secondary)
+                    .lineLimit(1)
+            }
         }
     }
 
@@ -158,8 +205,8 @@ struct VibeCodingUsageView: View {
             .frame(height: 210)
         }
         .padding(14)
-        .background(RoundedRectangle(cornerRadius: 16).fill(.primary.opacity(0.025)))
-        .overlay(RoundedRectangle(cornerRadius: 16).stroke(.primary.opacity(0.065)))
+        .background(RoundedRectangle(cornerRadius: 8).fill(.primary.opacity(0.025)))
+        .overlay(RoundedRectangle(cornerRadius: 8).stroke(.primary.opacity(0.065)))
     }
 
     private func breakdown(_ selection: VibeUsageSelection) -> some View {
@@ -212,8 +259,8 @@ struct VibeCodingUsageView: View {
         }
         .padding(14)
         .frame(minHeight: 248, alignment: .top)
-        .background(RoundedRectangle(cornerRadius: 16).fill(.primary.opacity(0.025)))
-        .overlay(RoundedRectangle(cornerRadius: 16).stroke(.primary.opacity(0.065)))
+        .background(RoundedRectangle(cornerRadius: 8).fill(.primary.opacity(0.025)))
+        .overlay(RoundedRectangle(cornerRadius: 8).stroke(.primary.opacity(0.065)))
     }
 
     private func providerRows(_ report: VibeUsageReport) -> some View {
@@ -269,8 +316,8 @@ struct VibeCodingUsageView: View {
                 }
                 .padding(11)
                 .frame(maxWidth: .infinity)
-                .background(RoundedRectangle(cornerRadius: 13).fill(provider.agent.color.opacity(0.055)))
-                .overlay(RoundedRectangle(cornerRadius: 13).stroke(provider.agent.color.opacity(0.13)))
+                .background(RoundedRectangle(cornerRadius: 8).fill(provider.agent.color.opacity(0.055)))
+                .overlay(RoundedRectangle(cornerRadius: 8).stroke(provider.agent.color.opacity(0.13)))
             }
         }
     }
@@ -306,8 +353,8 @@ private struct UsageMetricCard: View {
         }
         .padding(13)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(RoundedRectangle(cornerRadius: 15).fill(tint.opacity(0.055)))
-        .overlay(RoundedRectangle(cornerRadius: 15).stroke(tint.opacity(0.14)))
+        .background(RoundedRectangle(cornerRadius: 8).fill(tint.opacity(0.055)))
+        .overlay(RoundedRectangle(cornerRadius: 8).stroke(tint.opacity(0.14)))
     }
 }
 
