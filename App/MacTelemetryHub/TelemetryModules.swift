@@ -53,8 +53,9 @@ struct AppleMusicSnapshot: Codable, Equatable, Sendable {
      *
      * Music.app 在循环绕回时**不发** playerInfo 通知（实测跳到距结尾 4 秒，
      * 16 秒观测窗口里绕回那一刻一条都没有），上报器因此不知道进度归零了。
-     * 把循环状态告诉网页，让它按 elapsed % duration 自己绕，而不是钉在 100%
-     * 干等 25 秒兜底轮询把它当成 seek 才纠正。
+     * 兜底重读已经会掐着曲目结束的点去看（见 `nextPollDelay`），但那也要等上
+     * 一秒多；把循环状态告诉网页，它就能按 elapsed % duration 自己绕回开头，
+     * 那一秒里进度条不会先钉在 100%。
      */
     let repeatOne: Bool
     let observedAt: Int64
@@ -106,9 +107,10 @@ final class DesktopActivityMonitor: ObservableObject {
     private var observer: NSObjectProtocol?
     private var iconCache: [String: Data] = [:]
 
-    /// 前台应用完全由 `didActivateApplicationNotification` 驱动，不参与 2 秒轮询。
-    /// 上报侧仍然是每 2 秒采样一次 snapshot，所以 Cmd-Tab 途经的应用只会在
-    /// 这里被覆盖掉、不会被采到，防抖是采样天然带来的，不需要额外机制。
+    /// 前台应用完全由 `didActivateApplicationNotification` 驱动，没有兜底轮询 ——
+    /// 前台是谁这件事不存在「不发通知的变化」，不像音乐的进度还要防着 seek。
+    /// Cmd-Tab 途经的应用照样会在这里被采成 snapshot，防抖不在这一层：
+    /// 上报侧收到 onChange 后压一个 400ms 的窗口，只有最后停下的那个才发得出去。
     func start() {
         capture()
         guard observer == nil else { return }
@@ -186,10 +188,12 @@ final class AppleMusicMonitor: ObservableObject {
     private var pendingRefresh = false
 
     /**
-     * 兜底轮询间隔。
+     * 兜底重读的间隔上限。
      *
-     * 拖动进度条**不发**通知，是唯一漏网的状态变化，只能靠定时重读把进度锚点
-     * 校回来。换歌、播放、暂停都有通知，所以这里可以给得很松。
+     * 不发通知的状态变化有两种：拖动进度条，以及单曲循环绕回开头。前者没有任何
+     * 可预测的时刻，只能靠定时重读把进度锚点校回来；后者掐得准，由 `nextPollDelay`
+     * 单独排到曲目结束那一刻，所以这个数只是「什么都没发生时最久多久看一次」，
+     * 可以给得很松。换歌、播放、暂停都有通知，不靠这条路。
      */
     private static let seekPollInterval = Duration.seconds(25)
 
@@ -226,17 +230,6 @@ final class AppleMusicMonitor: ObservableObject {
     }
 
     /**
-     * 下一次兜底重读等多久。
-     *
-     * 曲目该放完的那一刻必须立刻去看：接下来要么循环回开头、要么换了下一首，
-     * 两种都需要新锚点，而 Music.app 这两种情况都不发通知（换歌发，循环不发）。
-     *
-     * 之所以不去判断「是不是单曲循环」：那个问题根本答不了。song repeat 只有
-     * off/one/all，而 all 到底会不会回到同一首取决于播放队列 —— 实测从资料库
-     * 播放时 current playlist 是「音乐」共 730 首，专辑自己有几首完全不相干，
-     * AppleScript 又拿不到队列。与其猜，不如到点了直接去看。
-     */
-    /**
      * 每次 snapshot 变化后重排下一次兜底重读。
      *
      * 不能用「固定间隔的循环」：那样延迟是进入睡眠前算好的，而通知驱动的
@@ -253,6 +246,17 @@ final class AppleMusicMonitor: ObservableObject {
         }
     }
 
+    /**
+     * 下一次兜底重读等多久。
+     *
+     * 曲目该放完的那一刻必须立刻去看：接下来要么循环回开头、要么换了下一首，
+     * 两种都需要新锚点，而循环那种 Music.app 不发通知（换歌才发）。
+     *
+     * 之所以不去判断「是不是单曲循环」：那个问题根本答不了。song repeat 只有
+     * off/one/all，而 all 到底会不会回到同一首取决于播放队列 —— 实测从资料库
+     * 播放时 current playlist 是「音乐」共 730 首，专辑自己有几首完全不相干，
+     * AppleScript 又拿不到队列。与其猜，不如到点了直接去看。
+     */
     private func nextPollDelay() -> Duration {
         guard let snapshot, snapshot.state == "playing", snapshot.durationMs > 0 else {
             return Self.seekPollInterval

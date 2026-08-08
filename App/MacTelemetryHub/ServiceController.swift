@@ -148,8 +148,9 @@ final class ServiceController: ObservableObject {
     private var pendingWake = false
     private var desktopSettleTask: Task<Void, Never>?
 
-    /// 循环的常规周期。前台应用和音乐都会提前叫醒它，所以这个只用来照顾
-    /// 没有事件源的活：充电器采样、30 秒心跳、ccusage 的刷新间隔检查。
+    /// 循环的常规周期。前台应用、音乐、充电器插拔都会提前叫醒它，所以这个只
+    /// 用来照顾没有事件放行的活：充电器功率滚动这类按节流窗口发的变化、
+    /// 30 秒心跳、ccusage 的刷新间隔检查。
     private static let tickInterval = Duration.seconds(5)
 
     /**
@@ -357,9 +358,10 @@ final class ServiceController: ObservableObject {
             var backoffUntil = Date.distantPast
             while !Task.isCancelled {
                 do {
-                    // 前台应用和 Apple Music 都不在这里采集：前者由 NSWorkspace
-                    // 的激活通知驱动，后者由 Music.app 的 playerInfo 跨进程通知驱动，
-                    // 各自带一个兜底轮询。循环只管每 2 秒采样一次它们留下的 snapshot。
+                    // 前台应用和 Apple Music 都不在这里采集：前者完全由 NSWorkspace
+                    // 的激活通知驱动，后者由 Music.app 的 playerInfo 跨进程通知驱动、
+                    // 另带一个兜底重读补上不发通知的 seek。循环只管读它们留下的
+                    // snapshot —— 变化时它们会把循环叫醒，没事件时按 tickInterval 转。
                     if settings.ccusageModuleEnabled {
                         // 先刷限额：ccusage 的上传载荷要把 plan/limits 并进去，
                         // 顺序反了这一轮发出去的就是上一轮的套餐快照。
@@ -442,10 +444,12 @@ final class ServiceController: ObservableObject {
                         music?.state != lastPostedAppleMusic?.state ||
                         music?.trackID != lastPostedAppleMusic?.trackID
                     )
-                    // 只有换 App 才算紧急。窗口标题不算 —— 终端和浏览器的标题可能一直在动，
-                    // 放它绕过闸门会把上报频率顶回 2 秒一次。
-                    // 换 App 也不从 NSWorkspace 通知触发，而是等这圈自己采到：
-                    // 2 秒采样天然滤掉 Cmd-Tab 路过的中间应用，不用另做防抖。
+                    // 只认应用身份：图标变了（同一个 App 换了图标）也算 desktopChanged，
+                    // 但不值得为它绕过节流窗口。
+                    // Cmd-Tab 路过的中间应用一般不会把循环叫醒 —— 激活通知那侧压了
+                    // 400ms 的 desktopSettleDelay，只有最后停下的那个才放行。
+                    // 但那只防住「叫醒」这条路：tick 恰好落在切换途中时照样会采到中间
+                    // 那个应用。真要根治得在这里再比一次，眼下不值当。
                     let desktopUrgent = desktopChanged && (
                         desktop?.bundleIdentifier != lastPostedDesktop?.bundleIdentifier ||
                         desktop?.applicationName != lastPostedDesktop?.applicationName
@@ -456,7 +460,7 @@ final class ServiceController: ObservableObject {
                     let chargerUrgent = chargerStructural != nil &&
                         chargerStructural != lastPostedChargerStructural
                     // 退避期内一律不放行。否则服务端挂掉时，未推进的 lastPosted 会让
-                    // urgent 一直为真，即时上报就变成 2 秒一次的重试风暴。
+                    // urgent 一直为真，即时上报就变成每圈一次的重试风暴。
                     let urgent = (musicUrgent || desktopUrgent || chargerUrgent) && Date() >= backoffUntil
 
                     if let url, anythingChanged, urgent || Date() >= nextPostAt {
@@ -558,15 +562,6 @@ final class ServiceController: ObservableObject {
     }
 
     /**
-     * 发一条只声明在线状态的空信封。
-     *
-     * 不带任何模块：这条是状态声明，不是数据上报，混进模块会让接收端把它
-     * 当成一次正常上报、白白刷新那些模块的时间戳。
-     *
-     * 超时给得很短：睡眠前系统只留很窄的一个窗口，宁可这条发丢，也不能把
-     * 睡眠拖住。发丢了还有心跳超时兜底，那条路本来就没拆。
-     */
-    /**
      * 存活声明走自己的端点，从遥测 URL 上换掉最后一段推出来。
      *
      * 跟已有的「旧版 /api/ingest/charger 自动迁移到 /telemetry」是同一种做法：
@@ -577,6 +572,15 @@ final class ServiceController: ObservableObject {
         return url.deletingLastPathComponent().appendingPathComponent("presence")
     }
 
+    /**
+     * 发一条只声明在线状态的请求：`{state, active_modules}`，不带任何模块数据。
+     *
+     * 这条是状态声明，不是数据上报，所以既不走遥测端点也不带模块 —— 混进模块
+     * 会让接收端把它当成一次正常上报、白白刷新那些模块的时间戳。
+     *
+     * `blocking` 那条路的超时给得很短：睡眠前系统只留很窄的一个窗口，宁可这条
+     * 发丢，也不能把睡眠拖住。发丢了还有心跳超时兜底，那条路本来就没拆。
+     */
     private func sendPresence(_ presence: String, blocking: Bool = false) {
         guard settings.postEnabled, let url = presenceURL else { return }
         var request = URLRequest(url: url)

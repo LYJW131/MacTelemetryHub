@@ -234,8 +234,8 @@ public enum A2687Protocol {
         let fields = Dictionary(uniqueKeysWithValues: parseTLV(payload, offset: tlvOffset(payload)).map { ($0.type, TypedValue($0.value)) })
         let portTypes: [(UInt8, String)] = [(0xA5, "C1"), (0xA6, "C2"), (0xA7, "C3")]
         let cableTypes: [(UInt8, String)] = [(0xAC, "C1"), (0xAD, "C2"), (0xAE, "C3")]
-        /// 0xA5/0xA6/0xA7 是 8 字节结构体：第 1 字节是端口开关位，其后依次是
-        /// 电压、电流、功率各两字节小端。没有这个结构就是这帧不带端口数据。
+        // 0xA5/0xA6/0xA7 是端口结构体，用到的是前 7 字节：第 1 字节是端口开关位，
+        // 其后依次是电压、电流、功率各两字节小端。没有这个结构就是这帧不带端口数据。
         let hasPortStruct = portTypes.contains { type, _ in
             guard let value = fields[type] else { return false }
             return value.tag == 0x04 && value.payload.count >= 7
