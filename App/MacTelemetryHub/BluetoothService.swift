@@ -1,14 +1,14 @@
 @preconcurrency import CoreBluetooth
 import AppKit
 import Foundation
-import IOKit.ps
 
 @MainActor
 final class BluetoothService: NSObject, ObservableObject {
     enum Phase: Equatable {
         case stopped
         case bluetoothUnavailable(String)
-        case scanning
+        /// 没有存下充电头 UUID，或者系统不认识存下的那个。要用户去设置里配对一次。
+        case awaitingPairing
         case connecting(String)
         case handshaking
         case connected
@@ -18,13 +18,20 @@ final class BluetoothService: NSObject, ObservableObject {
             switch self {
             case .stopped: "已停止"
             case let .bluetoothUnavailable(reason): reason
-            case .scanning: "正在扫描"
+            case .awaitingPairing: "未配对充电头"
             case .connecting: "正在连接"
             case .handshaking: "正在认证"
             case .connected: "已连接"
             case .disconnected: "未连接"
             }
         }
+    }
+
+    /// 配对扫描里看到的一台候选充电头。
+    struct DiscoveredCharger: Identifiable, Equatable {
+        let id: UUID
+        let name: String
+        var rssi: Int
     }
 
     @Published private(set) var state = ChargerState()
@@ -55,6 +62,9 @@ final class BluetoothService: NSObject, ObservableObject {
     }
     @Published private(set) var lastError: String?
     @Published private(set) var desiredConnection = true
+    /// 配对扫描的结果，只在设置面板里用。平时是空的。
+    @Published private(set) var discovered: [DiscoveredCharger] = []
+    @Published private(set) var isPairingScan = false
 
     var isConnected: Bool { phase == .connected }
 
@@ -79,11 +89,15 @@ final class BluetoothService: NSObject, ObservableObject {
     /// cannot make a healthy stream look stalled.
     private var lastFrameAt = ContinuousClock.now
     private var retryTask: Task<Void, Never>?
-    private var attemptTimeoutTask: Task<Void, Never>?
+    private var pairingScanTask: Task<Void, Never>?
     private var pending: PendingResponse?
     private var observesWorkspacePower = false
     private var isSystemSleeping = false
-    private var retryAttempt = 0
+    /// 配对扫描开着的时长。够走完一轮广播间隔，又不至于让用户对着列表干等。
+    private static let pairingScanWindow = Duration.seconds(15)
+    /// 掉线后重新挂起定向连接前的喘息。定向连接本身不花电，这个间隔只是防止
+    /// 充电头反复接上又立刻断开时打转。
+    private static let reconnectDelay = Duration.seconds(5)
 
     init(settings: AppSettings) {
         self.settings = settings
@@ -120,7 +134,6 @@ final class BluetoothService: NSObject, ObservableObject {
     func reconnect() {
         desiredConnection = true
         lastError = nil
-        retryAttempt = 0
         destroyBluetoothSession()
         scheduleRetry(after: .seconds(1))
     }
@@ -143,6 +156,46 @@ final class BluetoothService: NSObject, ObservableObject {
         }
     }
 
+    /**
+     * 配对扫描：唯一还会开扫描的地方。
+     *
+     * 平时一律按存下的 UUID 定向连接，从不扫描。只有还没配对过（或者存的 UUID
+     * 系统已经不认识）时，用户在设置里按一下才扫这 15 秒，挑一台存下 UUID，
+     * 之后再也不扫。
+     */
+    func startPairingScan() {
+        guard !isSystemSleeping else {
+            lastError = "Mac 正在睡眠，无法扫描"
+            return
+        }
+        discovered = []
+        isPairingScan = true
+        // 想配对就是想连，刚点过「断开」也一样
+        desiredConnection = true
+        startCentralIfNeeded()
+        // 蓝牙还没就绪时先立旗，等 poweredOn 回调接手
+        guard let central, central.state == .poweredOn else { return }
+        runPairingScan(on: central)
+    }
+
+    private func runPairingScan(on central: CBCentralManager) {
+        central.scanForPeripherals(withServices: nil, options: [CBCentralManagerScanOptionAllowDuplicatesKey: false])
+        pairingScanTask?.cancel()
+        pairingScanTask = Task { [weak self] in
+            try? await Task.sleep(for: Self.pairingScanWindow)
+            guard !Task.isCancelled, let self else { return }
+            stopPairingScan()
+        }
+    }
+
+    func stopPairingScan() {
+        pairingScanTask?.cancel()
+        pairingScanTask = nil
+        guard isPairingScan else { return }
+        isPairingScan = false
+        central?.stopScan()
+    }
+
     @objc private func workspaceWillSleep(_ notification: Notification) {
         isSystemSleeping = true
         guard desiredConnection else { return }
@@ -154,7 +207,6 @@ final class BluetoothService: NSObject, ObservableObject {
         guard isSystemSleeping else { return }
         isSystemSleeping = false
         guard desiredConnection else { return }
-        retryAttempt = 0
         lastError = "Mac 已唤醒，正在重新建立蓝牙会话"
         scheduleRetry(after: .seconds(1))
     }
@@ -166,6 +218,8 @@ final class BluetoothService: NSObject, ObservableObject {
 
     private func destroyBluetoothSession() {
         cancelSessionTasks()
+        stopPairingScan()
+        discovered = []
         let manager = central
         manager?.stopScan()
         if let peripheral {
@@ -183,7 +237,17 @@ final class BluetoothService: NSObject, ObservableObject {
         phase = .disconnected
     }
 
-    private func beginDiscovery() {
+    /**
+     * 挂一个指向存下那台充电头的定向连接，然后就不管了。
+     *
+     * CoreBluetooth 的 connect 没有超时：请求挂在那里，交给蓝牙控制器去等，充电头
+     * 一上电就连上。这比「扫 15 秒 → 拆掉会话 → 退避 → 再扫」省得多，也不会漏掉
+     * 两次尝试之间那段空窗 —— 本进程根本不收广播，等待是控制器那一层的事。
+     *
+     * 代价是必须先有 UUID。没有就停在 .awaitingPairing 等用户去设置里配对一次，
+     * 绝不自己开扫描。
+     */
+    private func beginConnect() {
         guard desiredConnection,
               !isSystemSleeping,
               let central,
@@ -198,58 +262,25 @@ final class BluetoothService: NSObject, ObservableObject {
 
         retryTask?.cancel()
         retryTask = nil
-        if let identifier = settings.normalizedPeripheralID,
-           let known = central.retrievePeripherals(withIdentifiers: [identifier]).first {
-            connect(to: known)
+        guard let identifier = settings.normalizedPeripheralID else {
+            phase = .awaitingPairing  // 还没配对过，这是正常状态，不算错误
             return
         }
-        phase = .scanning
-        central.scanForPeripherals(withServices: nil, options: [CBCentralManagerScanOptionAllowDuplicatesKey: false])
-        scheduleAttemptTimeout()
+        guard let known = central.retrievePeripherals(withIdentifiers: [identifier]).first else {
+            phase = .awaitingPairing
+            lastError = "系统里没有这台充电头的记录，请在设置里重新扫描配对"
+            return
+        }
+        connect(to: known)
     }
 
     private func connect(to candidate: CBPeripheral) {
         guard desiredConnection, !isSystemSleeping, let central else { return }
-        central.stopScan()
+        stopPairingScan()
         peripheral = candidate
         candidate.delegate = self
         phase = .connecting(candidate.name ?? candidate.identifier.uuidString)
         central.connect(candidate, options: [CBConnectPeripheralOptionNotifyOnDisconnectionKey: true])
-        scheduleAttemptTimeout()
-    }
-
-    private func scheduleAttemptTimeout(after delay: Duration = .seconds(15)) {
-        attemptTimeoutTask?.cancel()
-        attemptTimeoutTask = Task { [weak self] in
-            try? await Task.sleep(for: delay)
-            guard !Task.isCancelled, let self else { return }
-            switch phase {
-            case .scanning, .connecting:
-                lastError = "未发现充电器，已暂停蓝牙以节省电量"
-                destroyBluetoothSession()
-                scheduleBackoffRetry()
-            default:
-                break
-            }
-        }
-    }
-
-    private func scheduleBackoffRetry() {
-        let delay: Int64
-        if isUsingBatteryPower {
-            let delays: [Int64] = [60, 120, 240, 300]
-            delay = delays[min(retryAttempt, delays.count - 1)]
-            retryAttempt += 1
-        } else {
-            delay = 15
-        }
-        scheduleRetry(after: .seconds(delay))
-    }
-
-    private var isUsingBatteryPower: Bool {
-        let snapshot = IOPSCopyPowerSourcesInfo().takeRetainedValue()
-        let source = IOPSGetProvidingPowerSourceType(snapshot).takeUnretainedValue() as String
-        return source == kIOPSBatteryPowerValue
     }
 
     private func scheduleRetry(after delay: Duration = .seconds(5)) {
@@ -261,7 +292,7 @@ final class BluetoothService: NSObject, ObservableObject {
             if central == nil {
                 startCentralIfNeeded()
             } else {
-                beginDiscovery()
+                beginConnect()
             }
         }
     }
@@ -273,8 +304,6 @@ final class BluetoothService: NSObject, ObservableObject {
         streamWatchdogTask = nil
         retryTask?.cancel()
         retryTask = nil
-        attemptTimeoutTask?.cancel()
-        attemptTimeoutTask = nil
         if let pending {
             pending.timeout.cancel()
             pending.continuation.resume(throwing: BLEError.disconnected)
@@ -292,7 +321,6 @@ final class BluetoothService: NSObject, ObservableObject {
             do {
                 try await performHandshake()
                 guard !Task.isCancelled else { return }
-                retryAttempt = 0
                 phase = .connected
                 lastError = nil
                 startStreamWatchdog()
@@ -460,18 +488,25 @@ extension BluetoothService: @preconcurrency CBCentralManagerDelegate {
         guard central === self.central else { return }
         switch central.state {
         case .poweredOn:
-            beginDiscovery()
+            beginConnect()
+            // 蓝牙没就绪时按下的扫描在这里接上
+            if isPairingScan { runPairingScan(on: central) }
         case .poweredOff:
+            stopPairingScan()
             phase = .bluetoothUnavailable("蓝牙已关闭")
         case .unauthorized:
+            stopPairingScan()
             phase = .bluetoothUnavailable("没有蓝牙权限")
         case .unsupported:
+            stopPairingScan()
             phase = .bluetoothUnavailable("本机不支持蓝牙")
         case .resetting:
+            stopPairingScan()
             phase = .bluetoothUnavailable("蓝牙正在重置")
         case .unknown:
             phase = .bluetoothUnavailable("正在检查蓝牙")
         @unknown default:
+            stopPairingScan()
             phase = .bluetoothUnavailable("蓝牙状态未知")
         }
     }
@@ -482,18 +517,22 @@ extension BluetoothService: @preconcurrency CBCentralManagerDelegate {
         advertisementData: [String: Any],
         rssi RSSI: NSNumber
     ) {
-        guard central === self.central else { return }
+        guard central === self.central, isPairingScan else { return }
         let advertisedName = advertisementData[CBAdvertisementDataLocalNameKey] as? String
         let name = peripheral.name ?? advertisedName ?? ""
         let services = advertisementData[CBAdvertisementDataServiceUUIDsKey] as? [CBUUID] ?? []
         guard name.hasPrefix(A2687Protocol.deviceNamePrefix) || services.contains(CBUUID(string: A2687Protocol.advertisedServiceUUID)) else { return }
-        connect(to: peripheral)
+        // 只列出来给用户挑，不自己连。allowDuplicates 关着也可能重复送达，按 UUID 去重。
+        let entry = DiscoveredCharger(id: peripheral.identifier, name: name.isEmpty ? peripheral.identifier.uuidString : name, rssi: RSSI.intValue)
+        if let index = discovered.firstIndex(where: { $0.id == entry.id }) {
+            discovered[index].rssi = entry.rssi
+        } else {
+            discovered.append(entry)
+        }
     }
 
     func centralManager(_ central: CBCentralManager, didConnect peripheral: CBPeripheral) {
         guard central === self.central else { return }
-        attemptTimeoutTask?.cancel()
-        attemptTimeoutTask = nil
         self.peripheral = peripheral
         peripheral.delegate = self
         peripheral.discoverServices([CBUUID(string: A2687Protocol.serviceUUID)])
@@ -503,7 +542,7 @@ extension BluetoothService: @preconcurrency CBCentralManagerDelegate {
         guard central === self.central else { return }
         phase = .disconnected
         lastError = error?.localizedDescription ?? "无法连接充电器"
-        scheduleBackoffRetry()
+        scheduleRetry(after: Self.reconnectDelay)
     }
 
     func centralManager(_ central: CBCentralManager, didDisconnectPeripheral peripheral: CBPeripheral, error: Error?) {
@@ -514,7 +553,7 @@ extension BluetoothService: @preconcurrency CBCentralManagerDelegate {
         phase = .disconnected
         if desiredConnection, !isSystemSleeping {
             lastError = error?.localizedDescription ?? "连接已断开"
-            scheduleBackoffRetry()
+            scheduleRetry(after: Self.reconnectDelay)
         } else if isSystemSleeping {
             lastError = "Mac 正在睡眠，已释放蓝牙连接"
         } else {

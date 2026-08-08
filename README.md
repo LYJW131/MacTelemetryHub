@@ -178,12 +178,17 @@ The app also exposes local debugging snapshots at `GET /activity` and
 3. Select your Apple Developer team and keep **Automatically manage signing**
    enabled.
 4. Run on **My Mac** and approve the Bluetooth prompt once.
-5. Open Settings in the app, enter the Anker user ID and optional CoreBluetooth
-   device UUID, then choose **保存并重连**.
+5. Open Settings in the app, enter the Anker user ID, then press **扫描充电头**
+   and pick the charger from the list. Choosing one stores its CoreBluetooth
+   UUID and saves.
+
+Pairing is the only time the app scans. Once a UUID is stored, it only ever
+issues a directed connect to that one charger — the request stays pending until
+the charger powers on, so there is no scanning, no timeout, and no retry loop.
+**重新配对** clears the UUID and brings the scan button back.
 
 The current charger's CoreBluetooth identifier is
-`102DC514-2EB9-DAC9-C11A-4A0781776A73`. Leaving it blank enables scanning for an
-`ASHDJW*` device instead.
+`102DC514-2EB9-DAC9-C11A-4A0781776A73`.
 
 ## Build a local app bundle
 

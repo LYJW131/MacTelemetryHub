@@ -107,7 +107,7 @@ struct DashboardView: View {
                     Button("断开", systemImage: "bolt.slash") { bluetooth.disconnect() }
                         .disabled(!bluetooth.isConnected)
                     Button("重连", systemImage: "arrow.clockwise") { bluetooth.reconnect() }
-                        .disabled(bluetooth.phase == .scanning || bluetooth.phase == .handshaking)
+                        .disabled(bluetooth.phase == .handshaking)
                 }
                 Button { showingSettings = true } label: {
                     Image(systemName: "gearshape")
@@ -293,7 +293,8 @@ struct DashboardView: View {
     private func statusStyle(now: Date) -> StatusBadgeStyle {
         if bluetooth.isConnected { return isStale(now: now) ? .warning : .success }
         switch bluetooth.phase {
-        case .scanning, .connecting, .handshaking: return .info
+        case .connecting, .handshaking: return .info
+        case .awaitingPairing: return .warning
         case .bluetoothUnavailable: return .error
         default: return .neutral
         }

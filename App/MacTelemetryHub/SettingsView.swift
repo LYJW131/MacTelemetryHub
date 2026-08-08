@@ -3,6 +3,7 @@ import SwiftUI
 struct SettingsView: View {
     @ObservedObject var service: ServiceController
     @ObservedObject private var settings: AppSettings
+    @ObservedObject private var bluetooth: BluetoothService
     @Environment(\.dismiss) private var dismiss
     @State private var revealUserID = false
     @State private var message: String?
@@ -11,6 +12,7 @@ struct SettingsView: View {
     init(service: ServiceController) {
         self.service = service
         settings = service.settings
+        bluetooth = service.bluetooth
     }
 
     var body: some View {
@@ -56,6 +58,8 @@ struct SettingsView: View {
             footer
         }
         .frame(width: 640, height: 680)
+        // 关掉面板就别让电台白扫完剩下的窗口
+        .onDisappear { bluetooth.stopPairingScan() }
     }
 
     private var sheetHeader: some View {
@@ -118,15 +122,94 @@ struct SettingsView: View {
             Divider()
 
             VStack(alignment: .leading, spacing: 8) {
-                FieldTitle(title: "CoreBluetooth 设备 UUID", detail: "可选")
-                TextField("留空即可自动扫描 A2687", text: $settings.peripheralID)
-                    .font(.body.monospaced())
-                    .textFieldStyle(.roundedBorder)
-                Text("填写后将优先连接这台充电器；留空时自动扫描兼容设备。")
+                FieldTitle(title: "配对的充电头", detail: settings.normalizedPeripheralID == nil ? "未配对" : "已配对")
+                if settings.normalizedPeripheralID == nil {
+                    pairingPicker
+                } else {
+                    pairedRow
+                }
+            }
+            }
+        }
+    }
+
+    /// 没配对过：按一下扫 15 秒，挑一台就把 UUID 存下来，之后再也不扫。
+    private var pairingPicker: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 8) {
+                Button {
+                    bluetooth.startPairingScan()
+                } label: {
+                    Label(bluetooth.isPairingScan ? "正在扫描…" : "扫描充电头", systemImage: "dot.radiowaves.left.and.right")
+                }
+                .buttonStyle(.bordered)
+                .disabled(bluetooth.isPairingScan)
+
+                if bluetooth.isPairingScan {
+                    ProgressView().controlSize(.small)
+                    Button("停止") { bluetooth.stopPairingScan() }
+                        .buttonStyle(.borderless)
+                }
+            }
+
+            ForEach(bluetooth.discovered) { charger in
+                Button {
+                    settings.peripheralID = charger.id.uuidString
+                    bluetooth.stopPairingScan()
+                    save()
+                } label: {
+                    HStack(spacing: 8) {
+                        Image(systemName: "bolt.fill").foregroundStyle(.blue)
+                        VStack(alignment: .leading, spacing: 1) {
+                            Text(charger.name).font(.callout.weight(.medium))
+                            Text(charger.id.uuidString)
+                                .font(.caption.monospaced())
+                                .foregroundStyle(.secondary)
+                        }
+                        Spacer()
+                        Text("\(charger.rssi) dBm")
+                            .font(.caption.monospacedDigit())
+                            .foregroundStyle(.tertiary)
+                    }
+                    .padding(8)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .background(RoundedRectangle(cornerRadius: 8).fill(.primary.opacity(0.045)))
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+            }
+
+            if bluetooth.discovered.isEmpty {
+                Text(bluetooth.isPairingScan
+                     ? "正在找附近的 A2687，让充电头保持通电。"
+                     : "还没配对充电头。扫描一次选中之后就会记住，以后只连这一台，不再扫描。")
                     .font(.caption)
                     .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
             }
+        }
+    }
+
+    /// 已配对：只显示存下的 UUID，和一个「重新配对」的出口。
+    private var pairedRow: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 8) {
+                Text(settings.peripheralID)
+                    .font(.caption.monospaced())
+                    .textSelection(.enabled)
+                    .foregroundStyle(.secondary)
+                Spacer()
+                Button("重新配对") {
+                    settings.peripheralID = ""
+                    save()
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
             }
+            Text("只会尝试连这一台，连接请求一直挂着，充电头上电就自动接上，全程不扫描。")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
         }
     }
 
