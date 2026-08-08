@@ -44,6 +44,7 @@ struct SettingsView: View {
     @ObservedObject var service: ServiceController
     @ObservedObject private var settings: AppSettings
     @ObservedObject private var bluetooth: BluetoothService
+    @ObservedObject private var appleMusicAuthorization: AppleMusicAuthorizationManager
     @Environment(\.dismiss) private var dismiss
     @State private var selection: SettingsCategory = .general
     @State private var revealUserID = false
@@ -54,6 +55,7 @@ struct SettingsView: View {
         self.service = service
         settings = service.settings
         bluetooth = service.bluetooth
+        appleMusicAuthorization = service.appleMusicAuthorization
     }
 
     var body: some View {
@@ -189,6 +191,44 @@ struct SettingsView: View {
             settingSection("Apple Music", detail: "直接读取本机 Music.app 的播放状态、曲目与进度。", icon: "music.note") {
                 Toggle("启用本机 Apple Music", isOn: $settings.appleMusicModuleEnabled)
                     .toggleStyle(.switch)
+
+                Divider().padding(.vertical, 3)
+
+                fieldTitle("Apple Music 资料库权限", detail: appleMusicAuthorization.statusDescription)
+                HStack(spacing: 10) {
+                    Button {
+                        Task { await service.authorizeAppleMusic() }
+                    } label: {
+                        Label(
+                            service.isUploadingAppleMusicCredentials ? "正在授权…" : "授权 Apple Music",
+                            systemImage: service.isUploadingAppleMusicCredentials ? "hourglass" : "person.crop.circle.badge.checkmark"
+                        )
+                    }
+                    .buttonStyle(.bordered)
+                    .disabled(service.isUploadingAppleMusicCredentials)
+
+                    if appleMusicAuthorization.hasUserToken {
+                        Label("token 已上报，到期前自动续", systemImage: "checkmark.shield")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+
+                Text("只需授权一次：macOS 会请求资料库权限，之后 token 由本机 MusicKit 现签、到期前自动续期上报。私钥不会离开这台电脑。")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+
+                if let uploadError = service.appleMusicCredentialsUploadError {
+                    Label(uploadError, systemImage: "xmark.circle")
+                        .font(.caption)
+                        .foregroundStyle(.red)
+                        .fixedSize(horizontal: false, vertical: true)
+                } else if let uploadedAt = service.appleMusicCredentialsUploadAt {
+                    Label("凭据已于 \(uploadedAt.formatted(date: .omitted, time: .shortened)) 上报", systemImage: "checkmark.circle")
+                        .font(.caption)
+                        .foregroundStyle(.green)
+                }
             }
 
             settingSection("Vibe Coding 用量", detail: "ccusage 聚合本机 JSONL；session ID、项目路径、提示词与回复不会离开电脑。", icon: "terminal") {
@@ -289,7 +329,8 @@ struct SettingsView: View {
                     Label("可用端点", systemImage: "point.3.connected.trianglepath.dotted")
                         .font(.callout.weight(.medium))
                     Text("/status  ·  /activity  ·  /telemetry  ·  /health")
-                    Text("/ports  ·  /metrics  ·  /disconnect  ·  /reconnect")
+                    Text("/apple-music/authorization  ·  /ports  ·  /metrics")
+                    Text("/disconnect  ·  /reconnect")
                 }
                 .font(.caption2.monospaced())
                 .foregroundStyle(.secondary)

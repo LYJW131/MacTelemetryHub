@@ -1,5 +1,6 @@
 import AppKit
 import Foundation
+import MusicKit
 
 enum TelemetryModule: String, CaseIterable, Hashable, Sendable {
     case desktop
@@ -136,6 +137,7 @@ final class ServiceController: ObservableObject {
     let bluetooth: BluetoothService
     let desktopActivity = DesktopActivityMonitor()
     let appleMusic = AppleMusicMonitor()
+    let appleMusicAuthorization = AppleMusicAuthorizationManager()
     let ccusage = CcusageMonitor()
     let agentLimits = AgentLimitsMonitor()
     lazy private(set) var httpServer = LocalHTTPServer { [weak self] request in
@@ -147,6 +149,17 @@ final class ServiceController: ObservableObject {
     @Published private(set) var reporterLastError: String?
     @Published private(set) var isRefreshingVibeCoding = false
     @Published private(set) var vibeCodingRefreshError: String?
+    @Published private(set) var appleMusicCredentialsUploadAt: Date?
+    @Published private(set) var appleMusicCredentialsUploadError: String?
+    @Published private(set) var isUploadingAppleMusicCredentials = false
+    /**
+     * 上次成功上报的那份 developer token 的到期时刻和上报时刻，用来算续期时机。
+     *
+     * 只在内存里。重启后重签一份发一次就行 —— 那份按定义是新鲜的，为省这一次
+     * 请求去持久化不划算，况且要存的还是个跟着 token 走的时间戳。
+     */
+    private var uploadedCredentials: (expiresAt: Date, uploadedAt: Date)?
+    private var appleMusicCredentialsRetryAfter = Date.distantPast
     @Published private(set) var pendingManualReports: Set<TelemetryModule> = []
     @Published private(set) var lastManualReportError: [TelemetryModule: String] = [:]
     @Published private(set) var lastManualReportAt: [TelemetryModule: Date] = [:]
@@ -173,6 +186,10 @@ final class ServiceController: ObservableObject {
     /// 用来照顾没有事件放行的活：充电器功率滚动这类按节流窗口发的变化、
     /// 30 秒心跳、ccusage 的刷新间隔检查。
     private static let tickInterval = Duration.seconds(5)
+
+    /// Apple Music 凭据签发或上报失败后的退避。凭据不像遥测那样有时效压力，
+    /// 等一分钟再试足够了。
+    private static let appleMusicRetryDelay: TimeInterval = 60
 
     /**
      * 前台应用的防抖窗口。
@@ -322,6 +339,73 @@ final class ServiceController: ObservableObject {
         let errors = [agentLimits.lastError, ccusage.lastError].compactMap { $0 }
         vibeCodingRefreshError = errors.isEmpty ? nil : errors.joined(separator: "；")
         wakeReporter()
+    }
+
+    /**
+     * 首次授权，由用户在设置页点出来 —— 只有这条路径会弹系统对话框。
+     *
+     * 授权成功就立刻签一份发过去，不等循环下一圈：用户刚点完按钮，要的就是
+     * 当场看到结果。此后的续期全自动，不再需要碰这个按钮。
+     */
+    func authorizeAppleMusic() async {
+        guard !isUploadingAppleMusicCredentials else { return }
+        isUploadingAppleMusicCredentials = true
+        appleMusicCredentialsUploadError = nil
+        defer { isUploadingAppleMusicCredentials = false }
+
+        guard await appleMusicAuthorization.requestAuthorization() else {
+            appleMusicCredentialsUploadError = appleMusicAuthorization.lastError
+            return
+        }
+        guard settings.postEnabled else {
+            appleMusicCredentialsUploadError = "Apple Music 已授权；开启远端上报后会自动发送 token。"
+            return
+        }
+        await mintAndUploadAppleMusicCredentials()
+    }
+
+    /**
+     * 到期前把 Apple Music 凭据续上。每圈循环调一次。
+     *
+     * 和别的模块不一样：这里没有「变化」可以观察 —— token 不会变，只会过期。
+     * 所以触发条件是时间，过了「上次上报时刻」到「到期时刻」的中点就重签一份。
+     *
+     * 用相对寿命而不是写死的提前量：MusicKit 签出来的 token 能活多久 Apple 没有
+     * 承诺，写死一个提前量在两个方向上都可能错 —— 短寿命时来不及续，长寿命时
+     * 天天白续。取中点则不管它是几小时还是几个月都成立。
+     */
+    private func refreshAppleMusicCredentialsIfNeeded() async {
+        guard settings.postEnabled, !isUploadingAppleMusicCredentials else { return }
+        // 后台绝不请求授权，没批准就什么都不做 —— 从循环里弹系统弹窗是不能接受的
+        guard MusicAuthorization.currentStatus == .authorized else { return }
+        // 失败后退避。上报失败时 uploadedCredentials 不动，不挡一下的话
+        // 每圈都会重签重发，和 ccusage 判废那处是同一个坑。
+        guard Date() >= appleMusicCredentialsRetryAfter else { return }
+        if let uploaded = uploadedCredentials {
+            let lifetime = uploaded.expiresAt.timeIntervalSince(uploaded.uploadedAt)
+            guard Date() >= uploaded.uploadedAt.addingTimeInterval(lifetime / 2) else { return }
+        }
+        await mintAndUploadAppleMusicCredentials()
+    }
+
+    /// 现签一对再发。新鲜由 mintCredentials 的 `.ignoreCache` 保证。
+    private func mintAndUploadAppleMusicCredentials() async {
+        guard let credentials = await appleMusicAuthorization.mintCredentials() else {
+            appleMusicCredentialsUploadError = appleMusicAuthorization.lastError
+            appleMusicCredentialsRetryAfter = Date().addingTimeInterval(Self.appleMusicRetryDelay)
+            return
+        }
+        do {
+            try await uploadAppleMusicCredentials(credentials)
+            let now = Date()
+            appleMusicCredentialsUploadAt = now
+            appleMusicCredentialsUploadError = nil
+            appleMusicCredentialsRetryAfter = .distantPast
+            uploadedCredentials = (expiresAt: credentials.expiresAt, uploadedAt: now)
+        } catch {
+            appleMusicCredentialsUploadError = error.localizedDescription
+            appleMusicCredentialsRetryAfter = Date().addingTimeInterval(Self.appleMusicRetryDelay)
+        }
     }
 
     private func moduleIsEnabled(_ module: TelemetryModule) -> Bool {
@@ -479,6 +563,11 @@ final class ServiceController: ObservableObject {
                             limitErrors: agentLimits.limitErrors
                         )
                     }
+
+                    // 凭据走自己的端点，不进遥测信封 —— 信封里的东西最终都会经
+                    // telemetryState 流到网站的 /api/status/*，凭据不能沾那条路。
+                    // 所以它也不参与下面的 anythingChanged，续期不会捎带一次遥测。
+                    await refreshAppleMusicCredentialsIfNeeded()
 
                     // 变化判断全是本地计算，每圈都做；nextPostAt 只管「什么时候允许发」。
                     let charger = settings.chargerModuleEnabled && statusPayload.updatedAt != nil
@@ -706,6 +795,59 @@ final class ServiceController: ObservableObject {
         return url.deletingLastPathComponent().appendingPathComponent("presence")
     }
 
+    /// Derived from the configured telemetry URL. For example,
+    /// `/api/ingest/telemetry` becomes `/api/ingest/apple-music/credentials`.
+    private var appleMusicCredentialsURL: URL? {
+        guard let url = URL(string: settings.postURL) else { return nil }
+        return url
+            .deletingLastPathComponent()
+            .appendingPathComponent("apple-music")
+            .appendingPathComponent("credentials")
+    }
+
+    private func uploadAppleMusicCredentials(_ credentials: AppleMusicCredentials) async throws {
+        guard let url = appleMusicCredentialsURL else {
+            throw ReporterError.invalidAppleMusicCredentialsURL
+        }
+        guard Self.isAllowedAppleMusicCredentialsURL(url) else {
+            throw ReporterError.insecureAppleMusicCredentialsURL
+        }
+        let payload = AppleMusicCredentialsUploadPayload(
+            version: 1,
+            deviceID: settings.deviceID,
+            musicUserToken: credentials.musicUserToken,
+            developerToken: credentials.developerToken,
+            expiresAt: Int(credentials.expiresAt.timeIntervalSince1970)
+        )
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.httpBody = try JSONCoding.encoder().encode(payload)
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.setValue("mac-telemetry-hub/2", forHTTPHeaderField: "User-Agent")
+        if !settings.telemetrySecret.isEmpty {
+            request.setValue("Bearer \(settings.telemetrySecret)", forHTTPHeaderField: "Authorization")
+        }
+        request.timeoutInterval = settings.postTimeout
+        let (_, response) = try await URLSession.shared.data(for: request)
+        if let response = response as? HTTPURLResponse, !(200..<300).contains(response.statusCode) {
+            throw ReporterError.httpStatus(response.statusCode)
+        }
+    }
+
+    private static func isAllowedAppleMusicCredentialsURL(_ url: URL) -> Bool {
+        if url.scheme?.lowercased() == "https" {
+            return true
+        }
+#if DEBUG
+        // Local development may use a plain HTTP test server, but never allow
+        // an arbitrary HTTP host to receive Apple Music credentials.
+        guard url.scheme?.lowercased() == "http" else { return false }
+        return ["localhost", "127.0.0.1", "::1"].contains(url.host?.lowercased() ?? "")
+#else
+        return false
+#endif
+    }
+
     /**
      * 发一条只声明在线状态的请求：`{state, active_modules}`，不带任何模块数据。
      *
@@ -770,6 +912,14 @@ final class ServiceController: ObservableObject {
             return encode(ActivityLocalPayload(
                 desktop: desktopActivity.snapshot,
                 appleMusic: appleMusic.snapshot
+            ))
+        case ("GET", "/apple-music/authorization"):
+            return encode(AppleMusicAuthorizationPayload(
+                status: appleMusicAuthorization.statusDescription,
+                authorized: appleMusicAuthorization.authorizationStatus == .authorized,
+                hasUserToken: appleMusicAuthorization.hasUserToken,
+                lastError: appleMusicAuthorization.lastError,
+                lastUploadAt: appleMusicCredentialsUploadAt
             ))
         case ("GET", "/telemetry"):
             return encode(telemetryEnvelope)
@@ -887,7 +1037,46 @@ private struct ActivityLocalPayload: Encodable {
 
 private enum ReporterError: LocalizedError {
     case httpStatus(Int)
+    case invalidAppleMusicCredentialsURL
+    case insecureAppleMusicCredentialsURL
     var errorDescription: String? {
-        switch self { case let .httpStatus(code): "POST 端点返回 HTTP \(code)" }
+        switch self {
+        case let .httpStatus(code): "POST 端点返回 HTTP \(code)"
+        case .invalidAppleMusicCredentialsURL: "Apple Music 凭据上报地址无效。"
+        case .insecureAppleMusicCredentialsURL: "Apple Music 凭据只允许通过 HTTPS 上报。"
+        }
+    }
+}
+
+private struct AppleMusicCredentialsUploadPayload: Encodable, Sendable {
+    let version: Int
+    let deviceID: String
+    let musicUserToken: String
+    let developerToken: String
+    /// developer token 的到期时刻（Unix 秒）。不是秘密，从 token 自己的 JWT 解出来的，
+    /// 带上是为了让后端能在失效时给一句说得清的话，而不是干等 Apple 回 401。
+    let expiresAt: Int
+
+    private enum CodingKeys: String, CodingKey {
+        case version
+        case deviceID = "device_id"
+        case musicUserToken = "music_user_token"
+        case developerToken = "developer_token"
+        case expiresAt = "expires_at"
+    }
+}
+
+private struct AppleMusicAuthorizationPayload: Encodable, Sendable {
+    let status: String
+    let authorized: Bool
+    let hasUserToken: Bool
+    let lastError: String?
+    let lastUploadAt: Date?
+
+    private enum CodingKeys: String, CodingKey {
+        case status, authorized
+        case hasUserToken = "has_user_token"
+        case lastError = "last_error"
+        case lastUploadAt = "last_upload_at"
     }
 }

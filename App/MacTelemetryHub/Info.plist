@@ -24,6 +24,8 @@
     <string>连接 Anker Prime 160W 充电器并读取端口遥测数据。</string>
     <key>NSAppleEventsUsageDescription</key>
     <string>读取 Music.app 当前播放的歌曲、播放状态和进度，用于本机实时状态上报。</string>
+    <key>NSAppleMusicUsageDescription</key>
+    <string>读取你的 Apple Music 资料库权限，用于获取 Apple Music 用户令牌并同步到你配置的后端。</string>
     <key>NSLocalNetworkUsageDescription</key>
     <string>在本机网络提供充电器状态 API，并按配置上报遥测数据。</string>
     <key>NSPrincipalClass</key>

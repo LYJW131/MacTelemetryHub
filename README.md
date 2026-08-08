@@ -17,6 +17,7 @@ usage, rather than the identity of the whole application.
 - `/health`, `/ports`, `/metrics`, `POST /disconnect`, and `POST /reconnect`
 - a versioned telemetry envelope posted to one shared ingest endpoint
 - direct local Music.app state via Apple Events (separate from Apple Music Web API)
+- optional MusicKit library authorization and Apple Music token upload
 - foreground application reporting, limited to the app's name, bundle ID, and icon
 - ccusage aggregation that never uploads session IDs, project paths, prompts, or replies
 - subscription plan tier and server-side rate-limit windows for Claude Code and Codex
@@ -161,7 +162,11 @@ The app also exposes local debugging snapshots at `GET /activity` and
 - Foreground app names and icons use `NSWorkspace` and need no special
   permission. Window contents and titles are never read, so the app needs no
   Accessibility permission at all.
-- Apple Music asks once for permission to communicate with Music.app.
+- Apple Music asks once for permission to communicate with Music.app. The
+  separate “授权并上报 Apple Music token” action asks for MusicKit library
+  permission, obtains a Music User Token and a MusicKit-generated developer
+  token, and sends them only to the dedicated credentials endpoint described
+  below.
 - ccusage requires paths to the local Node executable and
   `node_modules/ccusage/src/cli.js`; its minimum refresh interval is 60 seconds.
 - Codex limits require the path to the `codex` executable. Leaving it blank
@@ -189,6 +194,45 @@ the charger powers on, so there is no scanning, no timeout, and no retry loop.
 
 The current charger's CoreBluetooth identifier is
 `102DC514-2EB9-DAC9-C11A-4A0781776A73`.
+
+## Apple Music credentials upload
+
+The app keeps the existing playback snapshot separate from MusicKit. In the
+Apple Music section of Settings, click **授权并上报 Apple Music token**. After
+the user approves the macOS media-library prompt, MusicKit obtains both tokens
+and the app sends:
+
+```http
+POST /api/ingest/apple-music/credentials
+Authorization: Bearer <TELEMETRY_INGEST_SECRET>
+Content-Type: application/json
+```
+
+```json
+{
+  "version": 1,
+  "device_id": "<telemetry device id>",
+  "music_user_token": "<Music User Token>",
+  "developer_token": "<developer token>"
+}
+```
+
+The endpoint is derived from the configured telemetry URL, so
+`/api/ingest/telemetry` becomes `/api/ingest/apple-music/credentials`. The
+backend should treat both token fields as secrets, avoid logging them, and
+return a 2xx response only after accepting the payload. The local
+`GET /apple-music/authorization` endpoint exposes status only and never returns
+token values.
+
+Production builds require HTTPS for this credentials request. Debug builds
+also allow plain HTTP when the derived endpoint is hosted on localhost,
+127.0.0.1, or ::1, so a local backend can be tested without setting up a
+certificate. HTTP is still rejected for LAN and public hosts.
+
+For automatic developer-token generation, enable **MusicKit** in the App ID's
+App Services in Certificates, Identifiers & Profiles, use the explicit Bundle
+ID `com.liangyangjunwei.MacTelemetryHub`, and run a team-signed build. The
+client never contains your MusicKit private key.
 
 ## Build a local app bundle
 
