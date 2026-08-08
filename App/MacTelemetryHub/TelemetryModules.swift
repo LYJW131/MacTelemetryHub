@@ -872,6 +872,9 @@ final class CcusageMonitor: ObservableObject {
     @Published private(set) var lastError: String?
     private var refreshing = false
     private var lastPlans: [String: AgentPlanSnapshot] = [:]
+    /// 上一次**尝试**采集的时刻。间隔门闩看它而不是 lastSuccess：失败或被判废
+    /// 时 lastSuccess 不动，光看它的话 2 秒一圈的主循环会每圈都重跑一次 ccusage。
+    private var lastAttempt: Date?
 
     func stop() {
         payload = nil
@@ -879,6 +882,7 @@ final class CcusageMonitor: ObservableObject {
         lastSuccess = nil
         lastError = nil
         lastPlans = [:]
+        lastAttempt = nil
         refreshing = false
     }
 
@@ -892,7 +896,7 @@ final class CcusageMonitor: ObservableObject {
         guard !refreshing else { return }
         // 套餐变了要立刻重采：plans 是随 ccusage 一起上报的，光等间隔门闩的话
         // 换套餐 / 额度跳档最长会被压 60 秒才发出去。
-        if let lastSuccess, Date().timeIntervalSince(lastSuccess) < interval,
+        if let lastAttempt, Date().timeIntervalSince(lastAttempt) < interval,
            plans == lastPlans { return }
         await refreshNow(nodePath: nodePath, cliPath: cliPath, plans: plans, limitErrors: limitErrors)
     }
@@ -907,11 +911,18 @@ final class CcusageMonitor: ObservableObject {
     ) async {
         guard !refreshing else { return }
         refreshing = true
+        lastAttempt = Date()
         defer { refreshing = false }
         do {
             let collection = try await Task.detached(priority: .utility) {
                 try CcusageCollector.collect(nodePath: nodePath, cliPath: cliPath, plans: plans, limitErrors: limitErrors)
             }.value
+            if let reason = rejectionReason(collection) {
+                // 这次的钱算错了，整份丢弃、留住上一次的好值。lastSuccess 不动，
+                // 指纹就不变，也不会因此多推一次遥测。
+                lastError = reason
+                return
+            }
             payload = collection.localPayload
             uploadPayload = collection.uploadPayload
             lastSuccess = Date()
@@ -921,11 +932,23 @@ final class CcusageMonitor: ObservableObject {
             lastError = error.localizedDescription
         }
     }
+
+    /// 这次采集能不能用。返回非 nil 就是不能用，内容是原因。
+    ///
+    /// 有 token 却零花费，就是没取到价目表 —— 详见
+    /// CcusageCollector.unpricedModelNames。
+    private func rejectionReason(_ collection: CcusageCollection) -> String? {
+        guard !collection.unpricedModels.isEmpty else { return nil }
+        let names = collection.unpricedModels.joined(separator: "、")
+        return "ccusage 未取到价目表，\(names) 按 $0 计，本次丢弃"
+    }
 }
 
 private struct CcusageCollection: Sendable {
     let localPayload: JSONValue
     let uploadPayload: JSONValue
+    /// 有 token 却算出 0 花费的模型。非空说明这次没拿到价目表。
+    let unpricedModels: [String]
 }
 
 private enum CcusageCollector {
@@ -943,6 +966,7 @@ private enum CcusageCollector {
         }
 
         var reports: [String: Any] = [:]
+        var unpriced: Set<String> = []
         for agent in ["claude", "codex"] {
             let onlineArgs = [cliPath, agent, "daily", "--json", "--mode", "calculate"]
             let dailyData: Data
@@ -961,6 +985,7 @@ private enum CcusageCollector {
             }
             daily["sessionSummary"] = summarize(session)
             reports[agent] = daily
+            unpriced.formUnion(unpricedModelNames(daily))
         }
         let data = try JSONSerialization.data(withJSONObject: reports)
         let localPayload = try JSONDecoder().decode(JSONValue.self, from: data)
@@ -969,7 +994,8 @@ private enum CcusageCollector {
         )
         return CcusageCollection(
             localPayload: localPayload,
-            uploadPayload: try JSONDecoder().decode(JSONValue.self, from: uploadData)
+            uploadPayload: try JSONDecoder().decode(JSONValue.self, from: uploadData),
+            unpricedModels: unpriced.sorted()
         )
     }
 
@@ -994,6 +1020,29 @@ private enum CcusageCollector {
     /// 名字是留给 ccusage 将来如实上报的那天，标记才是眼下真正生效的那条。
     private static func isHiddenModel(_ name: String, _ row: [String: Any]) -> Bool {
         name == "codex-auto-review" || row["isFallback"] as? Bool == true
+    }
+
+    /// 有 token 却算出 0 花费的模型。
+    ///
+    /// ccusage 的价目表拉自 litellm 的在线 JSON（raw.githubusercontent.com），
+    /// 拉不到时它**静默**退回编译进二进制的那份离线表，退出码仍然是 0。那份表
+    /// 停在 Opus 5 发布之前，于是 Opus 的用量整段按 $0 计 —— 站点上就是「今天
+    /// 花了 24 块」这种一眼假的数。
+    ///
+    /// isHiddenModel 那些要排掉：codex-auto-review 之类本来就没有自己的价、
+    /// 按兜底模型折算，跟取不到表是两回事。
+    private static func unpricedModelNames(_ report: [String: Any]) -> Set<String> {
+        var names: Set<String> = []
+        for row in report["daily"] as? [[String: Any]] ?? [] {
+            for model in row["modelBreakdowns"] as? [[String: Any]] ?? [] {
+                guard let name = model["modelName"] as? String,
+                      !isHiddenModel(name, model) else { continue }
+                let tokens = number(model["inputTokens"]) + number(model["outputTokens"])
+                    + number(model["cacheReadTokens"]) + number(model["cacheCreationTokens"])
+                if tokens > 0, number(model["cost"]) == 0 { names.insert(name) }
+            }
+        }
+        return names
     }
 
     private static func summarize(_ report: [String: Any]) -> [String: Any] {
