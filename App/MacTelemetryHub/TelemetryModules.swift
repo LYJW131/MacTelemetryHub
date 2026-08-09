@@ -1,4 +1,5 @@
 import AppKit
+import CryptoKit
 import Foundation
 import Security
 
@@ -36,6 +37,8 @@ enum JSONValue: Codable, Sendable {
 struct DesktopActivitySnapshot: Codable, Equatable, Sendable {
     let applicationName: String
     let bundleIdentifier: String?
+    /// 缩放后 PNG 的内容指纹；协议用它引用图标，`iconData` 只负责首次传输。
+    let iconHash: String?
     let iconData: Data?
     let observedAt: Int64
 }
@@ -92,7 +95,7 @@ struct TelemetryModulesPayload: Encodable, Sendable {
 }
 
 struct TelemetryEnvelope: Encodable, Sendable {
-    let version = 2
+    let version = 3
     let heartbeatAt: Int64
     let activeModules: [String]
     let modules: TelemetryModulesPayload
@@ -157,6 +160,7 @@ final class DesktopActivityMonitor: ObservableObject {
         snapshot = DesktopActivitySnapshot(
             applicationName: app.localizedName ?? "Unknown",
             bundleIdentifier: app.bundleIdentifier,
+            iconHash: iconData.map(Self.sha256Hex),
             iconData: iconData,
             observedAt: Self.nowMilliseconds
         )
@@ -164,6 +168,10 @@ final class DesktopActivityMonitor: ObservableObject {
     }
 
     private static var nowMilliseconds: Int64 { Int64(Date().timeIntervalSince1970 * 1_000) }
+
+    private static func sha256Hex(_ data: Data) -> String {
+        SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
+    }
 
     private static func pngData(for icon: NSImage?) -> Data? {
         guard let icon else { return nil }
@@ -463,6 +471,7 @@ extension DesktopActivitySnapshot {
         DesktopActivitySnapshot(
             applicationName: applicationName,
             bundleIdentifier: bundleIdentifier,
+            iconHash: iconHash,
             iconData: iconData,
             observedAt: observedAt
         )

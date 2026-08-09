@@ -80,13 +80,21 @@ private struct ChargerStructuralSignature: Equatable {
 private struct DesktopUploadSignature: Equatable {
     let applicationName: String
     let bundleIdentifier: String?
-    let iconData: Data?
+    let iconHash: String?
 
     init(_ snapshot: DesktopActivitySnapshot) {
         applicationName = snapshot.applicationName
         bundleIdentifier = snapshot.bundleIdentifier
-        iconData = snapshot.iconData
+        iconHash = snapshot.iconHash
     }
+}
+
+private struct TelemetryIngestResponse: Decodable {
+    struct Result: Decodable {
+        let desktopIconAvailable: Bool?
+    }
+
+    let data: Result
 }
 
 private struct TimeZoneUploadSignature: Equatable {
@@ -185,6 +193,9 @@ final class ServiceController: ObservableObject {
     /// 只跟结构性变化比，管的是「要不要即时发」，不管「要不要带 charger 模块」
     private var lastPostedChargerStructural: ChargerStructuralSignature?
     private var lastPostedDesktop: DesktopUploadSignature?
+    /// 这个上报会话里服务端已经确认保存的图标内容指纹。
+    private var uploadedDesktopIconHashes: Set<String> = []
+    private var uploadedDesktopIconOrder: [String] = []
     private var lastPostedTimeZone: TimeZoneUploadSignature?
     private var lastPostedAppleMusic: AppleMusicUploadSignature?
     private var lastPostedMusicAnchor: AppleMusicPositionAnchor?
@@ -216,6 +227,9 @@ final class ServiceController: ObservableObject {
      * 数字；拆开之后延迟降到这个量级，而防抖强度可以单独调。
      */
     private static let desktopSettleDelay = Duration.milliseconds(400)
+
+    /// 防止长期运行、打开大量一次性应用时让图标缓存无限增长。
+    private static let uploadedDesktopIconLimit = 64
 
     /// 进度偏离预测多少才算被拖过。留 2.5 秒，既不会把采样抖动当 seek，
     /// 也接得住真的拖动。
@@ -555,6 +569,8 @@ final class ServiceController: ObservableObject {
         lastPostedCharger = nil
         lastPostedChargerStructural = nil
         lastPostedDesktop = nil
+        uploadedDesktopIconHashes.removeAll(keepingCapacity: true)
+        uploadedDesktopIconOrder.removeAll(keepingCapacity: true)
         lastPostedTimeZone = nil
         lastPostedAppleMusic = nil
         lastPostedMusicAnchor = nil
@@ -709,11 +725,11 @@ final class ServiceController: ObservableObject {
                     let shouldPost = Date() >= backoffUntil && (manualMode || urgent || Date() >= nextPostAt)
 
                     if let url, anythingChanged, shouldPost {
-                        let desktopPayload = desktop.map {
-                            let shouldSendIcon =
-                                $0.bundleIdentifier != lastPostedDesktop?.bundleIdentifier ||
-                                $0.iconData != lastPostedDesktop?.iconData
-                            return $0.withIconData(shouldSendIcon ? $0.iconData : nil)
+                        let desktopPayload = desktop.map { snapshot in
+                            let shouldSendIcon = snapshot.iconHash.map {
+                                !uploadedDesktopIconHashes.contains($0)
+                            } ?? false
+                            return snapshot.withIconData(shouldSendIcon ? snapshot.iconData : nil)
                         }
                         // 封面不再由这边送：网页那边为了拿曲目链接本来就要查一次
                         // Apple Music 目录，那次查询的结果自带封面 URL。
@@ -731,14 +747,20 @@ final class ServiceController: ObservableObject {
                         request.httpMethod = "POST"
                         request.httpBody = try JSONCoding.encoder().encode(envelope)
                         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-                        request.setValue("mac-telemetry-hub/2", forHTTPHeaderField: "User-Agent")
+                        request.setValue("mac-telemetry-hub/3", forHTTPHeaderField: "User-Agent")
                         if !settings.telemetrySecret.isEmpty {
                             request.setValue("Bearer \(settings.telemetrySecret)", forHTTPHeaderField: "Authorization")
                         }
                         request.timeoutInterval = timeout
-                        let (_, response) = try await URLSession.shared.data(for: request)
+                        let (responseData, response) = try await URLSession.shared.data(for: request)
                         if let response = response as? HTTPURLResponse, !(200..<300).contains(response.statusCode) {
                             throw ReporterError.httpStatus(response.statusCode)
+                        }
+                        let responsePayload = try JSONDecoder()
+                            .decode(TelemetryIngestResponse.self, from: responseData)
+                        let desktopIconAvailable = responsePayload.data.desktopIconAvailable
+                        if desktopToSend, desktopIconAvailable == nil {
+                            throw ReporterError.invalidTelemetryResponse
                         }
                         reporterLastSuccess = Date()
                         reporterLastError = nil
@@ -747,7 +769,17 @@ final class ServiceController: ObservableObject {
                         // 结构指纹跟着每次成功发送推进，跟 chargerChanged 无关：
                         // 结构变了完整指纹必然也变，反过来不成立。
                         if let chargerStructural { lastPostedChargerStructural = chargerStructural }
-                        if desktopToSend { lastPostedDesktop = desktopSignature }
+                        if desktopToSend {
+                            if desktopIconAvailable == false, let iconHash = desktop?.iconHash {
+                                forgetUploadedDesktopIcon(iconHash)
+                                // 服务端缓存可能刚被清空；下一圈立即补发完整图标。
+                                lastPostedDesktop = nil
+                                wakeReporter()
+                            } else {
+                                lastPostedDesktop = desktopSignature
+                                if let desktop { rememberUploadedDesktopIcon(desktop) }
+                            }
+                        }
                         if timezoneToSend { lastPostedTimeZone = timezoneSignature }
                         if musicToSend {
                             lastPostedAppleMusic = musicSignature
@@ -785,6 +817,22 @@ final class ServiceController: ObservableObject {
                 await waitForNextTick()
             }
         }
+    }
+
+    private func rememberUploadedDesktopIcon(_ snapshot: DesktopActivitySnapshot) {
+        guard let iconHash = snapshot.iconHash else { return }
+        uploadedDesktopIconHashes.insert(iconHash)
+        uploadedDesktopIconOrder.removeAll { $0 == iconHash }
+        uploadedDesktopIconOrder.append(iconHash)
+        if uploadedDesktopIconOrder.count > Self.uploadedDesktopIconLimit {
+            let evicted = uploadedDesktopIconOrder.removeFirst()
+            uploadedDesktopIconHashes.remove(evicted)
+        }
+    }
+
+    private func forgetUploadedDesktopIcon(_ iconHash: String) {
+        uploadedDesktopIconHashes.remove(iconHash)
+        uploadedDesktopIconOrder.removeAll { $0 == iconHash }
     }
 
     var telemetryEnvelope: TelemetryEnvelope {
@@ -864,7 +912,7 @@ final class ServiceController: ObservableObject {
         request.httpMethod = "POST"
         request.httpBody = try JSONCoding.encoder().encode(payload)
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        request.setValue("mac-telemetry-hub/2", forHTTPHeaderField: "User-Agent")
+        request.setValue("mac-telemetry-hub/3", forHTTPHeaderField: "User-Agent")
         if !settings.telemetrySecret.isEmpty {
             request.setValue("Bearer \(settings.telemetrySecret)", forHTTPHeaderField: "Authorization")
         }
@@ -893,7 +941,7 @@ final class ServiceController: ObservableObject {
             "active_modules": activeModuleNames,
         ])
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        request.setValue("mac-telemetry-hub/2", forHTTPHeaderField: "User-Agent")
+        request.setValue("mac-telemetry-hub/3", forHTTPHeaderField: "User-Agent")
         if !settings.telemetrySecret.isEmpty {
             request.setValue("Bearer \(settings.telemetrySecret)", forHTTPHeaderField: "Authorization")
         }
@@ -1065,10 +1113,12 @@ private struct ActivityLocalPayload: Encodable {
 
 private enum ReporterError: LocalizedError {
     case httpStatus(Int)
+    case invalidTelemetryResponse
     case invalidAppleMusicCredentialsURL
     var errorDescription: String? {
         switch self {
         case let .httpStatus(code): "POST 端点返回 HTTP \(code)"
+        case .invalidTelemetryResponse: "遥测端点响应缺少图标确认状态。"
         case .invalidAppleMusicCredentialsURL: "Apple Music 凭据上报地址无效。"
         }
     }

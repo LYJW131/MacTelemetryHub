@@ -35,9 +35,14 @@ envelope and may contain only the modules that have fresh data:
 
 ```json
 {
-  "version": 2,
+  "version": 3,
   "modules": {
-    "desktop": {},
+    "desktop": {
+      "application_name": "Safari",
+      "bundle_identifier": "com.apple.Safari",
+      "icon_hash": "<sha256>",
+      "icon_data": "<base64, only when missing remotely>"
+    },
     "apple_music": {},
     "timezone": {},
     "charger": {},
@@ -46,14 +51,16 @@ envelope and may contain only the modules that have fresh data:
 }
 ```
 
-Version 2 is the only accepted contract; there is no legacy payload fallback.
+Version 3 is the only accepted contract; desktop icons are addressed by SHA-256,
+with PNG bytes included only when that hash is not already stored by the receiver.
+There is no legacy payload fallback.
 The POST body is deliberately bounded. ccusage's complete reports stay on the
 Mac for the native dashboard; the app uploads only display-ready totals, seven
 daily points, 30-day token totals, and 60 twelve-hour activity buckets. That
 module is sent again only after ccusage refreshes, while the smaller live
-modules are also sent only when their display content changes. A heartbeat-only
-envelope is sent every 30 seconds so the site can detect an offline reporter
-without receiving duplicate charger, desktop, music, or ccusage snapshots.
+modules are also sent only when their display content changes. Presence uses its
+own endpoint every 30 seconds so the site can detect an offline reporter without
+receiving duplicate charger, desktop, music, or ccusage snapshots.
 
 ## Plan tier and rate-limit windows
 
