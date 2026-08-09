@@ -61,16 +61,24 @@ struct AppleMusicSnapshot: Codable, Equatable, Sendable {
     let observedAt: Int64
 }
 
+struct TimeZoneSnapshot: Codable, Equatable, Sendable {
+    let identifier: String
+    let abbreviation: String?
+    let secondsFromGMT: Int
+    let observedAt: Int64
+}
+
 struct TelemetryModulesPayload: Encodable, Sendable {
     let charger: StatusPayload?
     let desktop: DesktopActivitySnapshot?
     let appleMusic: AppleMusicSnapshot?
+    let timezone: TimeZoneSnapshot?
     let vibeCoding: JSONValue?
     let includeDesktop: Bool
     let includeAppleMusic: Bool
 
     private enum CodingKeys: String, CodingKey {
-        case charger, desktop, appleMusic, vibeCoding
+        case charger, desktop, appleMusic, timezone, vibeCoding
     }
 
     func encode(to encoder: Encoder) throws {
@@ -78,6 +86,7 @@ struct TelemetryModulesPayload: Encodable, Sendable {
         try container.encodeIfPresent(charger, forKey: .charger)
         if includeDesktop { try container.encode(desktop, forKey: .desktop) }
         if includeAppleMusic { try container.encode(appleMusic, forKey: .appleMusic) }
+        try container.encodeIfPresent(timezone, forKey: .timezone)
         try container.encodeIfPresent(vibeCoding, forKey: .vibeCoding)
     }
 }
@@ -173,6 +182,51 @@ final class DesktopActivityMonitor: ObservableObject {
               let bitmap = NSBitmapImageRep(data: tiff) else { return nil }
         return bitmap.representation(using: .png, properties: [:])
     }
+}
+
+@MainActor
+final class TimeZoneMonitor: ObservableObject {
+    @Published private(set) var snapshot: TimeZoneSnapshot?
+    /// 时区或当前偏移变化时通知上报循环
+    var onChange: (() -> Void)?
+
+    private var observer: NSObjectProtocol?
+
+    func start() {
+        refresh()
+        guard observer == nil else { return }
+        observer = NotificationCenter.default.addObserver(
+            forName: NSNotification.Name.NSSystemTimeZoneDidChange,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor in self?.refresh() }
+        }
+    }
+
+    func stop() {
+        if let observer { NotificationCenter.default.removeObserver(observer) }
+        observer = nil
+        snapshot = nil
+    }
+
+    /// 每轮上报前也刷新一次，覆盖夏令时切换这类没有明确系统通知的情况。
+    func refresh() {
+        let zone = TimeZone.current
+        let next = TimeZoneSnapshot(
+            identifier: zone.identifier,
+            abbreviation: zone.abbreviation(),
+            secondsFromGMT: zone.secondsFromGMT(),
+            observedAt: Self.nowMilliseconds
+        )
+        guard snapshot?.identifier != next.identifier ||
+            snapshot?.abbreviation != next.abbreviation ||
+            snapshot?.secondsFromGMT != next.secondsFromGMT else { return }
+        snapshot = next
+        onChange?()
+    }
+
+    private static var nowMilliseconds: Int64 { Int64(Date().timeIntervalSince1970 * 1_000) }
 }
 
 @MainActor

@@ -6,6 +6,7 @@ enum TelemetryModule: String, CaseIterable, Hashable, Sendable {
     case desktop
     case appleMusic = "apple_music"
     case charger
+    case timezone
     case vibeCoding = "vibe_coding"
 
     var displayName: String {
@@ -13,6 +14,7 @@ enum TelemetryModule: String, CaseIterable, Hashable, Sendable {
         case .desktop: "前台应用"
         case .appleMusic: "Apple Music"
         case .charger: "充电设备"
+        case .timezone: "Mac 时区"
         case .vibeCoding: "Vibe Coding"
         }
     }
@@ -87,6 +89,18 @@ private struct DesktopUploadSignature: Equatable {
     }
 }
 
+private struct TimeZoneUploadSignature: Equatable {
+    let identifier: String
+    let abbreviation: String?
+    let secondsFromGMT: Int
+
+    init(_ snapshot: TimeZoneSnapshot) {
+        identifier = snapshot.identifier
+        abbreviation = snapshot.abbreviation
+        secondsFromGMT = snapshot.secondsFromGMT
+    }
+}
+
 /// 播放进度刻意不进签名：播放时它每次采集都在变，会让「有变化才发」退化成定时轮询。
 /// 网页拿 positionMs + observedAt 自己插值，进度条不需要上报器喂。
 /// 拖动进度条这类跳变由 `AppleMusicPositionAnchor` 单独识别。
@@ -136,6 +150,7 @@ final class ServiceController: ObservableObject {
     let settings: AppSettings
     let bluetooth: BluetoothService
     let desktopActivity = DesktopActivityMonitor()
+    let timeZone = TimeZoneMonitor()
     let appleMusic = AppleMusicMonitor()
     let appleMusicAuthorization = AppleMusicAuthorizationManager()
     let ccusage = CcusageMonitor()
@@ -170,6 +185,7 @@ final class ServiceController: ObservableObject {
     /// 只跟结构性变化比，管的是「要不要即时发」，不管「要不要带 charger 模块」
     private var lastPostedChargerStructural: ChargerStructuralSignature?
     private var lastPostedDesktop: DesktopUploadSignature?
+    private var lastPostedTimeZone: TimeZoneUploadSignature?
     private var lastPostedAppleMusic: AppleMusicUploadSignature?
     private var lastPostedMusicAnchor: AppleMusicPositionAnchor?
     private var lastHeartbeatAt: Date?
@@ -235,6 +251,7 @@ final class ServiceController: ObservableObject {
         desktopSettleTask?.cancel()
         desktopSettleTask = nil
         desktopActivity.stop()
+        timeZone.stop()
         appleMusic.stop()
         ccusage.stop()
         agentLimits.stop()
@@ -413,6 +430,7 @@ final class ServiceController: ObservableObject {
         case .desktop: settings.desktopModuleEnabled
         case .appleMusic: settings.appleMusicModuleEnabled
         case .charger: settings.chargerModuleEnabled
+        case .timezone: settings.timezoneModuleEnabled
         case .vibeCoding: settings.ccusageModuleEnabled
         }
     }
@@ -422,6 +440,7 @@ final class ServiceController: ObservableObject {
         case .desktop: desktopActivity.snapshot != nil
         case .appleMusic: appleMusic.snapshot != nil
         case .charger: statusPayload.updatedAt != nil
+        case .timezone: timeZone.snapshot != nil
         case .vibeCoding: ccusage.uploadPayload != nil
         }
     }
@@ -502,6 +521,14 @@ final class ServiceController: ObservableObject {
             desktopActivity.stop()
         }
 
+        if settings.timezoneModuleEnabled {
+            timeZone.onChange = { [weak self] in self?.wakeReporter() }
+            timeZone.start()
+        } else {
+            timeZone.onChange = nil
+            timeZone.stop()
+        }
+
         if settings.appleMusicModuleEnabled {
             // 音乐不用防抖：playerInfo 的竞态已经由 monitor 内部那次确认读消掉了
             appleMusic.onChange = { [weak self] in self?.wakeReporter() }
@@ -528,6 +555,7 @@ final class ServiceController: ObservableObject {
         lastPostedCharger = nil
         lastPostedChargerStructural = nil
         lastPostedDesktop = nil
+        lastPostedTimeZone = nil
         lastPostedAppleMusic = nil
         lastPostedMusicAnchor = nil
         lastHeartbeatAt = nil
@@ -544,6 +572,7 @@ final class ServiceController: ObservableObject {
             while !Task.isCancelled {
                 var manualModulesForAttempt: Set<TelemetryModule> = []
                 do {
+                    if settings.timezoneModuleEnabled { timeZone.refresh() }
                     // 前台应用和 Apple Music 都不在这里采集：前者完全由 NSWorkspace
                     // 的激活通知驱动，后者由 Music.app 的 playerInfo 跨进程通知驱动、
                     // 另带一个兜底重读补上不发通知的 seek。循环只管读它们留下的
@@ -582,10 +611,13 @@ final class ServiceController: ObservableObject {
                     }
                     let desktop = settings.desktopModuleEnabled ? desktopActivity.snapshot : nil
                     let desktopSignature = desktop.map(DesktopUploadSignature.init)
+                    let timezone = settings.timezoneModuleEnabled ? timeZone.snapshot : nil
+                    let timezoneSignature = timezone.map(TimeZoneUploadSignature.init)
                     let music = settings.appleMusicModuleEnabled ? appleMusic.snapshot : nil
                     let musicSignature = music.map(AppleMusicUploadSignature.init)
                     let chargerChanged = chargerSignature != nil && chargerSignature != lastPostedCharger
                     let desktopChanged = desktopSignature != nil && desktopSignature != lastPostedDesktop
+                    let timezoneChanged = timezoneSignature != nil && timezoneSignature != lastPostedTimeZone
                     // 进度不参与变化判断，只在它偏离网页的预测值时才重新对锚点，
                     // 否则播放中每一轮都会「有变化」，按需上报就退化成了定时轮询。
                     // 单曲循环时 trackID 不变，靠进度跳回开头被这里认出来。
@@ -615,6 +647,9 @@ final class ServiceController: ObservableObject {
                     let desktopToSend = manualMode
                         ? manualModules.contains(.desktop) && desktop != nil
                         : desktopChanged
+                    let timezoneToSend = manualMode
+                        ? manualModules.contains(.timezone) && timezone != nil
+                        : timezoneChanged
                     let musicToSend = manualMode
                         ? manualModules.contains(.appleMusic) && music != nil
                         : musicChanged
@@ -622,7 +657,7 @@ final class ServiceController: ObservableObject {
                         ? manualModules.contains(.vibeCoding) && ccusage.uploadPayload != nil
                         : ccusageChanged
                     let heartbeatDue = lastHeartbeatAt.map { Date().timeIntervalSince($0) >= 30 } ?? true
-                    let dataChanged = chargerToSend || desktopToSend || musicToSend || ccusageToSend
+                    let dataChanged = chargerToSend || desktopToSend || timezoneToSend || musicToSend || ccusageToSend
                     /**
                      * 心跳不再借数据端点发。
                      *
@@ -662,6 +697,7 @@ final class ServiceController: ObservableObject {
                         desktop?.bundleIdentifier != lastPostedDesktop?.bundleIdentifier ||
                         desktop?.applicationName != lastPostedDesktop?.applicationName
                     )
+                    let timezoneUrgent = !manualMode && timezoneChanged
                     // 插拔和换设备也是用户正盯着的事，跟播放/前台应用同一档。
                     // 只认结构性指纹：功率、电压、电流的滚动照旧等节流窗口，
                     // 否则充电中每一轮都「有变化」，即时上报就退化成 5 秒一次的轮询。
@@ -669,7 +705,7 @@ final class ServiceController: ObservableObject {
                         chargerStructural != lastPostedChargerStructural
                     // 退避期内一律不放行。否则服务端挂掉时，未推进的 lastPosted 会让
                     // urgent 一直为真，即时上报就变成每圈一次的重试风暴。
-                    let urgent = (manualMode || musicUrgent || desktopUrgent || chargerUrgent) && Date() >= backoffUntil
+                    let urgent = (manualMode || musicUrgent || desktopUrgent || timezoneUrgent || chargerUrgent) && Date() >= backoffUntil
                     let shouldPost = Date() >= backoffUntil && (manualMode || urgent || Date() >= nextPostAt)
 
                     if let url, anythingChanged, shouldPost {
@@ -685,6 +721,7 @@ final class ServiceController: ObservableObject {
                         let envelope = makeTelemetryEnvelope(
                             charger: chargerToSend ? charger : nil,
                             desktop: desktopToSend ? desktopPayload : nil,
+                            timezone: timezoneToSend ? timezone : nil,
                             appleMusic: musicToSend ? musicPayload : nil,
                             vibeCoding: ccusageToSend ? ccusage.uploadPayload : nil,
                             includeDesktop: desktopToSend,
@@ -711,6 +748,7 @@ final class ServiceController: ObservableObject {
                         // 结构变了完整指纹必然也变，反过来不成立。
                         if let chargerStructural { lastPostedChargerStructural = chargerStructural }
                         if desktopToSend { lastPostedDesktop = desktopSignature }
+                        if timezoneToSend { lastPostedTimeZone = timezoneSignature }
                         if musicToSend {
                             lastPostedAppleMusic = musicSignature
                             lastPostedMusicAnchor = music.map(AppleMusicPositionAnchor.init)
@@ -753,6 +791,7 @@ final class ServiceController: ObservableObject {
         makeTelemetryEnvelope(
             charger: settings.chargerModuleEnabled && statusPayload.updatedAt != nil ? statusPayload : nil,
             desktop: settings.desktopModuleEnabled ? desktopActivity.snapshot : nil,
+            timezone: settings.timezoneModuleEnabled ? timeZone.snapshot : nil,
             appleMusic: settings.appleMusicModuleEnabled ? appleMusic.snapshot : nil,
             vibeCoding: settings.ccusageModuleEnabled ? ccusage.uploadPayload : nil,
             includeDesktop: settings.desktopModuleEnabled,
@@ -763,6 +802,7 @@ final class ServiceController: ObservableObject {
     private func makeTelemetryEnvelope(
         charger: StatusPayload?,
         desktop: DesktopActivitySnapshot?,
+        timezone: TimeZoneSnapshot?,
         appleMusic: AppleMusicSnapshot?,
         vibeCoding: JSONValue?,
         includeDesktop: Bool,
@@ -776,6 +816,7 @@ final class ServiceController: ObservableObject {
                 charger: charger,
                 desktop: desktop,
                 appleMusic: appleMusic,
+                timezone: timezone,
                 vibeCoding: vibeCoding,
                 includeDesktop: includeDesktop,
                 includeAppleMusic: includeAppleMusic
@@ -879,6 +920,7 @@ final class ServiceController: ObservableObject {
         if settings.chargerModuleEnabled { names.append("charger") }
         if settings.desktopModuleEnabled { names.append("desktop") }
         if settings.appleMusicModuleEnabled { names.append("apple_music") }
+        if settings.timezoneModuleEnabled { names.append("timezone") }
         if settings.ccusageModuleEnabled { names.append("vibe_coding") }
         return names
     }

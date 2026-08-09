@@ -6,7 +6,7 @@ usage, rather than the identity of the whole application.
 
 ## What the app includes
 
-- independently switchable charger, foreground-app, Apple Music, and ccusage modules
+- independently switchable charger, foreground-app, Apple Music, Mac timezone, and ccusage modules
 - CoreBluetooth discovery or a pinned peripheral UUID for the charger module
 - AES-GCM + ephemeral P-256 ECDH session handshake
 - account-scoped 40-character Anker user ID stored in Keychain
@@ -39,6 +39,7 @@ envelope and may contain only the modules that have fresh data:
   "modules": {
     "desktop": {},
     "apple_music": {},
+    "timezone": {},
     "charger": {},
     "vibe_coding": {}
   }

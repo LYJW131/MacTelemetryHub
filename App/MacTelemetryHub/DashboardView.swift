@@ -296,6 +296,18 @@ struct DashboardView: View {
                 feedbackIsError: service.manualReportFailed(.appleMusic)
             )
             ModuleStatusCard(
+                title: "Mac 时区",
+                icon: "clock",
+                enabled: service.settings.timezoneModuleEnabled,
+                value: service.timeZone.snapshot?.identifier ?? "等待时区",
+                detail: service.timeZone.snapshot.map { formatUTCOffset($0.secondsFromGMT) },
+                action: { _ = service.requestImmediateReport(.timezone) },
+                actionEnabled: service.canRequestImmediateReport(.timezone),
+                isReporting: service.isManualReportInFlight(.timezone),
+                feedback: service.manualReportMessage(for: .timezone),
+                feedbackIsError: service.manualReportFailed(.timezone)
+            )
+            ModuleStatusCard(
                 title: "ccusage",
                 icon: "terminal",
                 enabled: service.settings.ccusageModuleEnabled,
@@ -494,6 +506,12 @@ private struct EmptyModuleView: View {
         .overlay(RoundedRectangle(cornerRadius: 8).stroke(.primary.opacity(0.08), lineWidth: 1))
         .clipShape(RoundedRectangle(cornerRadius: 8))
     }
+}
+
+private func formatUTCOffset(_ seconds: Int) -> String {
+    let sign = seconds < 0 ? "−" : "+"
+    let absolute = abs(seconds)
+    return String(format: "UTC%@%02d:%02d", sign, absolute / 3_600, (absolute % 3_600) / 60)
 }
 
 private struct ModuleStatusCard: View {

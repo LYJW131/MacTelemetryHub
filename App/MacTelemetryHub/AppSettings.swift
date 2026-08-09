@@ -15,6 +15,7 @@ final class AppSettings: ObservableObject {
         static let chargerModuleEnabled = "chargerModuleEnabled"
         static let desktopModuleEnabled = "desktopModuleEnabled"
         static let appleMusicModuleEnabled = "appleMusicModuleEnabled"
+        static let timezoneModuleEnabled = "timezoneModuleEnabled"
         static let ccusageModuleEnabled = "ccusageModuleEnabled"
         static let nodePath = "ccusageNodePath"
         static let ccusageCLIPath = "ccusageCLIPath"
@@ -37,6 +38,7 @@ final class AppSettings: ObservableObject {
     @Published var chargerModuleEnabled: Bool
     @Published var desktopModuleEnabled: Bool
     @Published var appleMusicModuleEnabled: Bool
+    @Published var timezoneModuleEnabled: Bool
     @Published var ccusageModuleEnabled: Bool
     @Published var nodePath: String
     @Published var ccusageCLIPath: String
@@ -76,6 +78,7 @@ final class AppSettings: ObservableObject {
         chargerModuleEnabled = defaults.object(forKey: Key.chargerModuleEnabled) as? Bool ?? true
         desktopModuleEnabled = defaults.object(forKey: Key.desktopModuleEnabled) as? Bool ?? true
         appleMusicModuleEnabled = defaults.object(forKey: Key.appleMusicModuleEnabled) as? Bool ?? true
+        timezoneModuleEnabled = defaults.object(forKey: Key.timezoneModuleEnabled) as? Bool ?? true
         ccusageModuleEnabled = defaults.object(forKey: Key.ccusageModuleEnabled) as? Bool ?? false
         nodePath = defaults.string(forKey: Key.nodePath)
             ?? environment["CCUSAGE_NODE_PATH"]
@@ -160,6 +163,7 @@ final class AppSettings: ObservableObject {
         defaults.set(chargerModuleEnabled, forKey: Key.chargerModuleEnabled)
         defaults.set(desktopModuleEnabled, forKey: Key.desktopModuleEnabled)
         defaults.set(appleMusicModuleEnabled, forKey: Key.appleMusicModuleEnabled)
+        defaults.set(timezoneModuleEnabled, forKey: Key.timezoneModuleEnabled)
         defaults.set(ccusageModuleEnabled, forKey: Key.ccusageModuleEnabled)
         defaults.set(nodePath, forKey: Key.nodePath)
         defaults.set(ccusageCLIPath, forKey: Key.ccusageCLIPath)

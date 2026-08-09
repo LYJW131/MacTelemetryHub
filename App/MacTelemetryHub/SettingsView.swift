@@ -231,6 +231,11 @@ struct SettingsView: View {
                 }
             }
 
+            settingSection("Mac 时区", detail: "上传 IANA 时区、当前 UTC 偏移和时区缩写，不读取地址。", icon: "clock") {
+                Toggle("启用 Mac 时区采集", isOn: $settings.timezoneModuleEnabled)
+                    .toggleStyle(.switch)
+            }
+
             settingSection("Vibe Coding 用量", detail: "ccusage 聚合本机 JSONL；session ID、项目路径、提示词与回复不会离开电脑。", icon: "terminal") {
                 Toggle("启用 ccusage", isOn: $settings.ccusageModuleEnabled)
                     .toggleStyle(.switch)
