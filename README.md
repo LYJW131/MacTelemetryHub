@@ -65,17 +65,23 @@ receiving duplicate charger, desktop, music, or CodexBar snapshots.
 
 ## Plan tier and rate-limit windows
 
-All coding data comes through the CodexBar CLI, with no Node/ccusage process,
-direct Claude credential read, or Codex app-server fallback:
+Token、费用和限额来自 CodexBar；ccusage 只离线读取最近会话时间与模型，用来判断
+Claude Code / Codex 是否正在使用，不上传 session ID、项目路径、提示词或回复：
 
 - `cost --provider both --provider-native-only --days 365 --format json --refresh`
   reads Claude and Codex local logs in one process and supplies token/cost history.
-- `usage --provider both --source web --no-credits --format json` reads both
-  providers' plan tiers and server-side quota windows in one process.
+- `usage --provider both --source auto --no-credits --format json` reads Claude
+  and Codex plan tiers and server-side quota windows.
+- Three concurrent `usage` calls for `cursor`, `opencodego`, and `antigravity`
+  read one total quota percentage each. They never add token/cost/model detail to
+  the upload payload.
+- `ccusage claude session --json --offline` and
+  `ccusage codex session --json --offline` provide the lightweight live status.
 
 The app keeps the existing `vibe_coding` payload shape by merging those two
 results into each agent's `plan` object and `limits` array. Window counts and
-durations are taken from CodexBar's response rather than assumed.
+durations are taken from CodexBar's response rather than assumed. Session status
+refreshes every 60 seconds; CodexBar cost and quota data refresh every 10 minutes.
 
 `position_ms` in the music module is an anchor, not a stream. Paired with
 `observed_at` and `state` it lets the site interpolate the playhead on its own,

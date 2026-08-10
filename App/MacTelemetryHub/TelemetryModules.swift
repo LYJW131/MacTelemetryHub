@@ -677,6 +677,9 @@ struct AgentPlanSnapshot: Codable, Equatable, Sendable {
     }
 }
 
+private let agentLimitProviderIDs = ["claude", "codex", "cursor", "opencodego", "antigravity"]
+private let supplementalQuotaProviderIDs = ["cursor", "opencodego", "antigravity"]
+
 @MainActor
 final class AgentLimitsMonitor: ObservableObject {
     @Published private(set) var plans: [String: AgentPlanSnapshot] = [:]
@@ -720,7 +723,7 @@ final class AgentLimitsMonitor: ObservableObject {
         var fresh = outcome.plans
         // 某一 provider 本轮完全失败时也保留它上次的好值；错误通过
         // limitErrors 单独标记。统一命令的一边失败不能把另一边或旧快照清掉。
-        for agent in ["claude", "codex"] where fresh[agent] == nil {
+        for agent in agentLimitProviderIDs where fresh[agent] == nil {
             if outcome.limitErrors[agent] != nil, let previous = plans[agent] {
                 fresh[agent] = previous
             }
@@ -766,16 +769,42 @@ private struct AgentLimitsOutcome: Sendable {
 }
 
 private enum AgentLimitsCollector {
-    /// 一条 CodexBar 命令同时取 Claude 与 Codex。auto 会按 CodexBar GUI 的规则
-    /// 为 Claude 选择 Web、为 Codex 选择 OAuth；后者才会带 Spark 周限额。
+    /// Claude 与 Codex 仍共用 `both`；其余三个 provider 必须分别指定。CodexBar
+    /// 的 `all` 会把其它已配置但未展示的 provider 也拉进来，而且任意一个失败时
+    /// 整条命令可能不给 JSON，因此这里并发跑四个有边界的调用。
     nonisolated static func collect(codexBarPath: String) async -> AgentLimitsOutcome {
-        await Task.detached(priority: .utility) {
-            Self.collectBlocking(codexBarPath: codexBarPath)
-        }.value
+        let jobs: [(argument: String, providers: [String])] = [
+            ("both", ["claude", "codex"]),
+            ("cursor", ["cursor"]),
+            ("opencodego", ["opencodego"]),
+            ("antigravity", ["antigravity"]),
+        ]
+        let tasks = jobs.map { job in
+            Task.detached(priority: .utility) {
+                Self.collectBlocking(
+                    codexBarPath: codexBarPath,
+                    providerArgument: job.argument,
+                    providers: job.providers
+                )
+            }
+        }
+        var plans: [String: AgentPlanSnapshot] = [:]
+        var errors: [String] = []
+        var limitErrors: [String: String] = [:]
+        for task in tasks {
+            let outcome = await task.value
+            plans.merge(outcome.plans) { _, fresh in fresh }
+            errors.append(contentsOf: outcome.errors)
+            limitErrors.merge(outcome.limitErrors) { _, fresh in fresh }
+        }
+        return AgentLimitsOutcome(plans: plans, errors: errors, limitErrors: limitErrors)
     }
 
-    nonisolated private static func collectBlocking(codexBarPath: String) -> AgentLimitsOutcome {
-        let providers = ["claude", "codex"]
+    nonisolated private static func collectBlocking(
+        codexBarPath: String,
+        providerArgument: String,
+        providers: [String]
+    ) -> AgentLimitsOutcome {
         func failed(_ message: String) -> AgentLimitsOutcome {
             AgentLimitsOutcome(
                 plans: [:],
@@ -791,7 +820,7 @@ private enum AgentLimitsCollector {
         let output = Pipe()
         process.executableURL = URL(fileURLWithPath: codexBarPath)
         process.arguments = [
-            "usage", "--provider", "both", "--source", "auto",
+            "usage", "--provider", providerArgument, "--source", "auto",
             "--no-credits", "--format", "json",
         ]
         process.standardOutput = output
@@ -833,7 +862,9 @@ private enum AgentLimitsCollector {
             let label = provider == "claude" && tier.hasPrefix("Claude ")
                 ? String(tier.dropFirst("Claude ".count))
                 : tier
-            let windows = parseWebLimits(provider: provider, usage: usage)
+            let windows = supplementalQuotaProviderIDs.contains(provider)
+                ? parseTotalLimit(provider: provider, usage: usage)
+                : parseWebLimits(provider: provider, usage: usage)
             plans[provider] = AgentPlanSnapshot(
                 tier: tier,
                 label: label,
@@ -855,6 +886,45 @@ private enum AgentLimitsCollector {
             limitErrors[provider] = message
         }
         return AgentLimitsOutcome(plans: plans, errors: errors, limitErrors: limitErrors)
+    }
+
+    /// 附加 provider 在网页上只占一行“总限额”。Cursor 明确把 primary 叫 Total；
+    /// OpenCode Go 的最长窗口是 Monthly，代表套餐总周期；Antigravity 没有合并总量，
+    /// 只有 Gemini 与 Claude/GPT 两个池，因此取使用率较高者，避免低估剩余压力。
+    nonisolated private static func parseTotalLimit(
+        provider: String,
+        usage: [String: Any]
+    ) -> [AgentLimitWindow] {
+        let slots: [(name: String, value: [String: Any])] =
+            ["primary", "secondary", "tertiary"].compactMap { name in
+                (usage[name] as? [String: Any]).map { (name, $0) }
+            }
+        let selected: (name: String, value: [String: Any])?
+        switch provider {
+        case "cursor":
+            selected = slots.first { $0.name == "primary" }
+        case "opencodego":
+            selected = slots.max {
+                (($0.value["windowMinutes"] as? NSNumber)?.intValue ?? 0) <
+                    (($1.value["windowMinutes"] as? NSNumber)?.intValue ?? 0)
+            }
+        case "antigravity":
+            selected = slots.max {
+                (($0.value["usedPercent"] as? NSNumber)?.doubleValue ?? 0) <
+                    (($1.value["usedPercent"] as? NSNumber)?.doubleValue ?? 0)
+            }
+        default:
+            selected = nil
+        }
+        guard let window = selected?.value else { return [] }
+        return [AgentLimitWindow(
+            key: "\(provider).total",
+            label: "Total",
+            group: nil,
+            windowMinutes: (window["windowMinutes"] as? NSNumber)?.intValue,
+            usedPercent: (window["usedPercent"] as? NSNumber)?.doubleValue ?? 0,
+            resetsAt: unixSeconds(window["resetsAt"] as? String)
+        )]
     }
 
     nonisolated private static func parseWebLimits(
@@ -1259,8 +1329,23 @@ private enum CodexBarCostCollector {
         }
 
         aggregate["activeDays"] = Double(activeDates.count)
+        let quotaLabels = [
+            "cursor": "Cursor",
+            "opencodego": "OpenCode Go",
+            "antigravity": "Antigravity",
+        ]
+        let quotaProviders: [[String: Any]] = supplementalQuotaProviderIDs.map { provider in
+            let total = plans[provider]?.limits.first
+            return [
+                "id": provider,
+                "label": quotaLabels[provider] ?? provider,
+                "usedPercent": total?.usedPercent ?? NSNull(),
+                "limitsError": limitErrors[provider] ?? NSNull(),
+            ]
+        }
         return [
             "agents": agents,
+            "quotaProviders": quotaProviders,
             "totals": aggregate,
             "topModels": modelTotals
                 .filter { $0.value > 0 }
