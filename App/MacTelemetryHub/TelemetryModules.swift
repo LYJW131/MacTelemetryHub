@@ -38,6 +38,7 @@ struct CodingSessionSnapshot: Codable, Equatable, Sendable {
     let currentModel: String?
     let lastActivityAt: String?
     let active: Bool
+    let sessionCount: Int
 }
 
 @MainActor
@@ -116,7 +117,8 @@ private enum CodingSessionCollector {
                 snapshots[agent] = CodingSessionSnapshot(
                     currentModel: latest.flatMap(currentModel),
                     lastActivityAt: lastActivity,
-                    active: age.map { $0 >= 0 && $0 <= activeWindow } ?? false
+                    active: age.map { $0 >= 0 && $0 <= activeWindow } ?? false,
+                    sessionCount: sessions.count
                 )
             } catch {
                 errors.append("ccusage \(agent) session：\(error.localizedDescription)")
@@ -1049,7 +1051,7 @@ final class CodexBarCostMonitor: ObservableObject {
         }
     }
 
-    /// 60 秒的 session 扫描只覆盖状态字段，不重跑 365 天 Token 扫描。
+    /// 60 秒的 session 扫描只覆盖状态字段与 session 总数，不重跑 365 天 Token 扫描。
     @discardableResult
     func applySessions(_ sessions: [String: CodingSessionSnapshot]) -> Bool {
         guard let uploadPayload else { return false }
@@ -1130,6 +1132,16 @@ private enum CodexBarCostCollector {
                 agent["active"] = active
             }
             return .object(agent)
+        }
+        if case .object(var totals) = root["totals"] {
+            let sessionCount = JSONValue.number(
+                Double(sessions.values.reduce(0) { $0 + $1.sessionCount })
+            )
+            if totals["sessionCount"] != sessionCount {
+                changed = true
+                totals["sessionCount"] = sessionCount
+                root["totals"] = .object(totals)
+            }
         }
         guard changed else { return payload }
         root["agents"] = .array(agents)
@@ -1228,8 +1240,8 @@ private enum CodexBarCostCollector {
         }
 
         return [
-            // CodexBar cost JSON 不公开 session 数与精确最后活动时间，因此协议也
-            // 不再伪造这两个字段。currentModel 是最近一个有用量日的主力模型。
+            // CodexBar cost JSON 不公开精确最后活动时间，因此这里不伪造；session
+            // 总数由独立的 ccusage 扫描在 makeUploadSummary 中汇总。
             "currentModel": currentModel ?? NSNull(),
             "activity": activity,
         ]
@@ -1329,6 +1341,9 @@ private enum CodexBarCostCollector {
         }
 
         aggregate["activeDays"] = Double(activeDates.count)
+        aggregate["sessionCount"] = Double(
+            sessions.values.reduce(0) { $0 + $1.sessionCount }
+        )
         let quotaLabels = [
             "cursor": "Cursor",
             "opencodego": "OpenCode Go",
