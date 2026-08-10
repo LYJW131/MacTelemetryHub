@@ -282,10 +282,14 @@ struct DashboardView: View {
                 enabled: service.settings.codexBarModuleEnabled,
                 value: codexBarCost.lastSuccess == nil ? "等待统计" : "聚合完成",
                 detail: codexBarCost.lastError ?? codexBarCost.lastSuccess?.formatted(date: .omitted, time: .standard),
-                action: { _ = service.requestImmediateReport(.vibeCoding) },
-                actionEnabled: service.canRequestImmediateReport(.vibeCoding),
-                isReporting: service.isManualReportInFlight(.vibeCoding),
-                feedback: service.manualReportMessage(for: .vibeCoding),
+                action: { Task { await service.refreshCodexBarNow() } },
+                actionIcon: "arrow.clockwise",
+                actionHelp: "重新采集并上报 CodexBar",
+                actionEnabled: service.settings.codexBarModuleEnabled,
+                isReporting: service.isRefreshingCodexBar || service.isManualReportInFlight(.vibeCoding),
+                feedback: service.isRefreshingCodexBar
+                    ? "正在重新读取用量与限额…"
+                    : service.manualReportMessage(for: .vibeCoding),
                 feedbackIsError: service.manualReportFailed(.vibeCoding)
             )
             ModuleStatusCard(
@@ -495,6 +499,8 @@ private struct ModuleStatusCard: View {
     let value: String
     let detail: String?
     let action: (() -> Void)?
+    var actionIcon = "paperplane"
+    var actionHelp: String?
     let actionEnabled: Bool
     let isReporting: Bool
     let feedback: String?
@@ -516,14 +522,14 @@ private struct ModuleStatusCard: View {
                                 ProgressView()
                                     .controlSize(.small)
                             } else {
-                                Image(systemName: "paperplane")
+                                Image(systemName: actionIcon)
                             }
                         }
                         .frame(width: 14, height: 14)
                     }
                     .buttonStyle(.borderless)
                     .disabled(!actionEnabled || isReporting)
-                    .help("立即上报\(title)")
+                    .help(actionHelp ?? "立即上报\(title)")
                 }
                 Circle()
                     .fill(enabled ? Color.green : Color.secondary.opacity(0.35))

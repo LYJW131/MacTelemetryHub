@@ -789,17 +789,18 @@ final class CodexBarCostMonitor: ObservableObject {
         // 换套餐 / 额度跳档最长会被压 60 秒才发出去。
         if let lastAttempt, Date().timeIntervalSince(lastAttempt) < interval,
            plans == lastPlans { return }
-        await refreshNow(cliPath: cliPath, plans: plans, limitErrors: limitErrors)
+        _ = await refreshNow(cliPath: cliPath, plans: plans, limitErrors: limitErrors)
     }
 
     /// Bypasses the interval gate for an explicit user refresh, while preserving
     /// the monitor's single-flight guard.
+    @discardableResult
     func refreshNow(
         cliPath: String,
         plans: [String: AgentPlanSnapshot],
         limitErrors: [String: String]
-    ) async {
-        guard !refreshing else { return }
+    ) async -> Bool {
+        guard !refreshing else { return false }
         refreshing = true
         lastAttempt = Date()
         defer { refreshing = false }
@@ -815,14 +816,16 @@ final class CodexBarCostMonitor: ObservableObject {
                 // 这次的钱算错了，整份丢弃、留住上一次的好值。lastSuccess 不动，
                 // 指纹就不变，也不会因此多推一次遥测。
                 lastError = reason
-                return
+                return false
             }
             uploadPayload = collection.uploadPayload
             lastSuccess = Date()
             lastPlans = plans
             lastError = nil
+            return true
         } catch {
             lastError = error.localizedDescription
+            return false
         }
     }
 

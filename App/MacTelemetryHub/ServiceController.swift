@@ -170,6 +170,7 @@ final class ServiceController: ObservableObject {
 
     @Published private(set) var reporterLastSuccess: Date?
     @Published private(set) var reporterLastError: String?
+    @Published private(set) var isRefreshingCodexBar = false
     @Published private(set) var appleMusicCredentialsUploadAt: Date?
     @Published private(set) var appleMusicCredentialsUploadError: String?
     @Published private(set) var isUploadingAppleMusicCredentials = false
@@ -328,6 +329,23 @@ final class ServiceController: ObservableObject {
         lastManualReportError[module] = nil
         wakeReporter()
         return true
+    }
+
+    /// Re-runs both CodexBar commands, then immediately queues the fresh snapshot for upload.
+    /// The monitors retain their own single-flight guards; this flag only owns the button state.
+    func refreshCodexBarNow() async {
+        guard settings.codexBarModuleEnabled, !isRefreshingCodexBar else { return }
+        isRefreshingCodexBar = true
+        defer { isRefreshingCodexBar = false }
+
+        await agentLimits.refreshNow(codexBarPath: settings.codexBarCLIPath)
+        let refreshed = await codexBarCost.refreshNow(
+            cliPath: settings.codexBarCLIPath,
+            plans: agentLimits.plans,
+            limitErrors: agentLimits.limitErrors
+        )
+        guard refreshed else { return }
+        _ = requestImmediateReport(.vibeCoding)
     }
 
     func canRequestImmediateReport(_ module: TelemetryModule) -> Bool {
