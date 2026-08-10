@@ -100,12 +100,12 @@ struct DashboardView: View {
 
                 HStack(spacing: 8) {
                     Circle()
-                        .fill(httpServer.listeningURL == nil ? .orange : .green)
+                        .fill(!service.settings.httpServerEnabled ? Color.secondary : httpServer.listeningURL == nil ? .orange : .green)
                         .frame(width: 7, height: 7)
                     VStack(alignment: .leading, spacing: 2) {
-                        Text(httpServer.listeningURL == nil ? "本地 API 未监听" : "本地 API 在线")
+                        Text(!service.settings.httpServerEnabled ? "本地 API 已关闭" : httpServer.listeningURL == nil ? "本地 API 未监听" : "本地 API 在线")
                             .font(.callout.weight(.medium))
-                        Text(httpServer.listeningURL?.absoluteString ?? "在设置中检查端口")
+                        Text(httpServer.listeningURL?.absoluteString ?? (service.settings.httpServerEnabled ? "在设置中检查端口" : "远端上报继续运行"))
                             .font(.caption2.monospaced())
                             .foregroundStyle(.secondary)
                             .lineLimit(1)
@@ -416,6 +416,11 @@ struct DashboardView: View {
                 Button("打开") { NSWorkspace.shared.open(url) }
                     .buttonStyle(.link)
                     .font(.caption)
+            } else if !service.settings.httpServerEnabled {
+                Image(systemName: "lock.fill").foregroundStyle(.secondary)
+                Text("本地 HTTP API 已关闭")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
             } else {
                 Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(.orange)
                 Text(httpServer.lastError ?? "HTTP 服务未启动")

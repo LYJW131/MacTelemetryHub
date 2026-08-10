@@ -6,6 +6,7 @@ import ServiceManagement
 final class AppSettings: ObservableObject {
     private enum Key {
         static let peripheralID = "peripheralID"
+        static let httpServerEnabled = "httpServerEnabled"
         static let httpPort = "httpPort"
         static let postEnabled = "postEnabled"
         static let postURL = "postURL"
@@ -28,6 +29,7 @@ final class AppSettings: ObservableObject {
 
     @Published var userID: String
     @Published var peripheralID: String
+    @Published var httpServerEnabled: Bool
     @Published var httpPort: Int
     @Published var postEnabled: Bool
     @Published var postURL: String
@@ -59,6 +61,7 @@ final class AppSettings: ObservableObject {
         let storedUserID = environmentUserID.isEmpty ? (keychain.read(account: Key.userIDAccount) ?? "") : ""
         userID = environmentUserID.isEmpty ? storedUserID : environmentUserID
         peripheralID = defaults.string(forKey: Key.peripheralID) ?? environment["A2687_ADDRESS"] ?? ""
+        httpServerEnabled = defaults.object(forKey: Key.httpServerEnabled) as? Bool ?? false
         let storedPort = defaults.integer(forKey: Key.httpPort)
         httpPort = storedPort == 0 ? Int(environment["A2687_PORT"] ?? "8787") ?? 8787 : storedPort
         let initialPostURL = defaults.string(forKey: Key.postURL) ?? environment["A2687_POST_URL"] ?? ""
@@ -117,7 +120,9 @@ final class AppSettings: ObservableObject {
                 throw SettingsError.invalidPeripheralID
             }
         }
-        guard (1...65535).contains(httpPort) else { throw SettingsError.invalidPort }
+        if httpServerEnabled {
+            guard (1...65535).contains(httpPort) else { throw SettingsError.invalidPort }
+        }
         guard postInterval > 0, postTimeout > 0 else { throw SettingsError.invalidTiming }
         if postEnabled {
             guard let url = URL(string: postURL), ["http", "https"].contains(url.scheme?.lowercased() ?? ""), url.host != nil else {
@@ -154,6 +159,7 @@ final class AppSettings: ObservableObject {
         try keychain.write(userID, account: Key.userIDAccount)
         try keychain.write(telemetrySecret, account: Key.telemetrySecretAccount)
         defaults.set(peripheralID, forKey: Key.peripheralID)
+        defaults.set(httpServerEnabled, forKey: Key.httpServerEnabled)
         defaults.set(httpPort, forKey: Key.httpPort)
         defaults.set(postEnabled, forKey: Key.postEnabled)
         defaults.set(postURL, forKey: Key.postURL)

@@ -249,7 +249,9 @@ final class ServiceController: ObservableObject {
         guard !started else { return }
         started = true
         configureModules()
-        httpServer.start(port: settings.httpPort)
+        if settings.httpServerEnabled {
+            httpServer.start(port: settings.httpPort)
+        }
         restartReporter()
         observePowerTransitions()
         sendPresence("online")
@@ -307,7 +309,13 @@ final class ServiceController: ObservableObject {
     func applySettings() throws {
         let oldPort = httpServer.listeningURL?.port
         try settings.save()
-        if oldPort != settings.httpPort { httpServer.start(port: settings.httpPort) }
+        if settings.httpServerEnabled {
+            if oldPort != settings.httpPort {
+                httpServer.start(port: settings.httpPort)
+            }
+        } else {
+            httpServer.stop()
+        }
         configureModules()
         restartReporter()
     }

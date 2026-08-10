@@ -314,39 +314,48 @@ struct SettingsView: View {
     private var localSettings: some View {
         VStack(alignment: .leading, spacing: 0) {
             settingSection("本地 HTTP API", detail: "监听所有本机网络接口，供调试与局域网客户端读取。", icon: "network") {
-                HStack(spacing: 16) {
-                    VStack(alignment: .leading, spacing: 3) {
-                        Text("监听端口")
-                            .font(.callout.weight(.medium))
-                        Text("端点会在保存后重新监听。")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                    }
-                    Spacer()
-                    TextField("8787", value: $settings.httpPort, format: .number.grouping(.never))
-                        .font(.body.monospacedDigit())
-                        .textFieldStyle(.roundedBorder)
-                        .multilineTextAlignment(.trailing)
-                        .frame(width: 100)
-                }
+                Toggle("启用本地 HTTP API", isOn: $settings.httpServerEnabled)
+                    .toggleStyle(.switch)
 
-                VStack(alignment: .leading, spacing: 5) {
-                    Label("可用端点", systemImage: "point.3.connected.trianglepath.dotted")
-                        .font(.callout.weight(.medium))
-                    Text("/status  ·  /activity  ·  /telemetry  ·  /health")
-                    Text("/apple-music/authorization  ·  /ports  ·  /metrics")
-                    Text("/disconnect  ·  /reconnect")
+                if settings.httpServerEnabled {
+                    HStack(spacing: 16) {
+                        VStack(alignment: .leading, spacing: 3) {
+                            Text("监听端口")
+                                .font(.callout.weight(.medium))
+                            Text("端点会在保存后重新监听。")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+                        Spacer()
+                        TextField("8787", value: $settings.httpPort, format: .number.grouping(.never))
+                            .font(.body.monospacedDigit())
+                            .textFieldStyle(.roundedBorder)
+                            .multilineTextAlignment(.trailing)
+                            .frame(width: 100)
+                    }
+
+                    VStack(alignment: .leading, spacing: 5) {
+                        Label("可用端点", systemImage: "point.3.connected.trianglepath.dotted")
+                            .font(.callout.weight(.medium))
+                        Text("/status  ·  /activity  ·  /telemetry  ·  /health")
+                        Text("/apple-music/authorization  ·  /ports  ·  /metrics")
+                        Text("/disconnect  ·  /reconnect")
+                    }
+                    .font(.caption2.monospaced())
+                    .foregroundStyle(.secondary)
+                } else {
+                    Label("关闭后不监听任何本地或局域网端口；远端上报不受影响。", systemImage: "lock.fill")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
                 }
-                .font(.caption2.monospaced())
-                .foregroundStyle(.secondary)
             }
 
             settingSection("后台状态", detail: "服务在菜单栏保持可见，关闭主窗口不会停止采集。", icon: "menubar.rectangle") {
                 HStack(spacing: 8) {
                     Circle()
-                        .fill(service.httpServer.listeningURL == nil ? .orange : .green)
+                        .fill(!settings.httpServerEnabled ? Color.secondary : service.httpServer.listeningURL == nil ? .orange : .green)
                         .frame(width: 7, height: 7)
-                    Text(service.httpServer.listeningURL == nil ? "HTTP 服务未启动" : "HTTP 服务正在监听")
+                    Text(!settings.httpServerEnabled ? "HTTP 服务已关闭" : service.httpServer.listeningURL == nil ? "HTTP 服务未启动" : "HTTP 服务正在监听")
                         .font(.callout.weight(.medium))
                     Spacer()
                     if let url = service.httpServer.listeningURL {
