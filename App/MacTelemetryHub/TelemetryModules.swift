@@ -617,8 +617,8 @@ private struct AgentLimitsOutcome: Sendable {
 }
 
 private enum AgentLimitsCollector {
-    /// 一条 CodexBar Web 命令同时取 Claude 与 Codex。CLI 的真实 App 内置路径可
-    /// 共享 GUI 写入的 Cookie Keychain cache；Homebrew 符号链接会被保存逻辑解析掉。
+    /// 一条 CodexBar 命令同时取 Claude 与 Codex。auto 会按 CodexBar GUI 的规则
+    /// 为 Claude 选择 Web、为 Codex 选择 OAuth；后者才会带 Spark 周限额。
     nonisolated static func collect(codexBarPath: String) async -> AgentLimitsOutcome {
         await Task.detached(priority: .utility) {
             Self.collectBlocking(codexBarPath: codexBarPath)
@@ -642,7 +642,7 @@ private enum AgentLimitsCollector {
         let output = Pipe()
         process.executableURL = URL(fileURLWithPath: codexBarPath)
         process.arguments = [
-            "usage", "--provider", "both", "--source", "web",
+            "usage", "--provider", "both", "--source", "auto",
             "--no-credits", "--format", "json",
         ]
         process.standardOutput = output
@@ -666,13 +666,13 @@ private enum AgentLimitsCollector {
                   providers.contains(provider) else { continue }
             if let failure = row["error"] as? [String: Any] {
                 let detail = failure["message"] as? String ?? "未知错误"
-                let message = "CodexBar \(provider) Web：\(detail)"
+                let message = "CodexBar \(provider)：\(detail)"
                 errors.append(message)
                 limitErrors[provider] = message
                 continue
             }
             guard let usage = row["usage"] as? [String: Any] else {
-                let message = "CodexBar \(provider) Web 响应缺少 usage"
+                let message = "CodexBar \(provider) 响应缺少 usage"
                 errors.append(message)
                 limitErrors[provider] = message
                 continue
@@ -692,7 +692,7 @@ private enum AgentLimitsCollector {
                 observedAt: nowMilliseconds
             )
             if windows.isEmpty {
-                let message = "CodexBar \(provider) Web 响应里没有限额窗口"
+                let message = "CodexBar \(provider) 响应里没有限额窗口"
                 errors.append(message)
                 limitErrors[provider] = message
             }
@@ -701,7 +701,7 @@ private enum AgentLimitsCollector {
             let suffix = process.terminationStatus == 0
                 ? "响应里没有该 provider"
                 : "退出码 \(process.terminationStatus)"
-            let message = "CodexBar \(provider) Web \(suffix)"
+            let message = "CodexBar \(provider) \(suffix)"
             errors.append(message)
             limitErrors[provider] = message
         }
@@ -736,7 +736,6 @@ private enum AgentLimitsCollector {
                 resetsAt: unixSeconds(window["resetsAt"] as? String)
             ))
         }
-        windows.sort { $0.key < $1.key }
         return windows
     }
 
