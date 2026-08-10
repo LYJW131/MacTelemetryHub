@@ -812,12 +812,6 @@ final class CodexBarCostMonitor: ObservableObject {
                     limitErrors: limitErrors
                 )
             }.value
-            if let reason = rejectionReason(collection) {
-                // 这次的钱算错了，整份丢弃、留住上一次的好值。lastSuccess 不动，
-                // 指纹就不变，也不会因此多推一次遥测。
-                lastError = reason
-                return false
-            }
             uploadPayload = collection.uploadPayload
             lastSuccess = Date()
             lastPlans = plans
@@ -829,21 +823,10 @@ final class CodexBarCostMonitor: ObservableObject {
         }
     }
 
-    /// 这次采集能不能用。返回非 nil 就是不能用，内容是原因。
-    ///
-    /// 有 token 却零花费，就是没取到价目表 —— 详见
-    /// CodexBarCostCollector.unpricedModelNames。
-    private func rejectionReason(_ collection: CodexBarCostCollection) -> String? {
-        guard !collection.unpricedModels.isEmpty else { return nil }
-        let names = collection.unpricedModels.joined(separator: "、")
-        return "CodexBar 未取到价目表，\(names) 按 $0 计，本次丢弃"
-    }
 }
 
 private struct CodexBarCostCollection: Sendable {
     let uploadPayload: JSONValue
-    /// 有 token 却算出 0 花费的模型。非空说明这次没拿到价目表。
-    let unpricedModels: [String]
 }
 
 private enum CodexBarCostCollector {
@@ -864,14 +847,12 @@ private enum CodexBarCostCollector {
             throw TelemetryModuleError.codexBar("cost 输出不是有效 JSON")
         }
         var reports: [String: Any] = [:]
-        var unpriced: Set<String> = []
         for raw in rows {
             guard let agent = raw["provider"] as? String,
                   ["claude", "codex"].contains(agent) else { continue }
             var report = normalizeCostReport(raw, provider: agent)
             report["usageSummary"] = summarize(report)
             reports[agent] = report
-            unpriced.formUnion(unpricedModelNames(report))
         }
         guard !reports.isEmpty else {
             throw TelemetryModuleError.codexBar("cost 响应里没有 Claude/Codex 报告")
@@ -880,8 +861,7 @@ private enum CodexBarCostCollector {
             withJSONObject: makeUploadSummary(reports, plans: plans, limitErrors: limitErrors)
         )
         return CodexBarCostCollection(
-            uploadPayload: try JSONDecoder().decode(JSONValue.self, from: uploadData),
-            unpricedModels: unpriced.sorted()
+            uploadPayload: try JSONDecoder().decode(JSONValue.self, from: uploadData)
         )
     }
 
@@ -905,30 +885,6 @@ private enum CodexBarCostCollector {
     /// token 仍由 daily/totals 计入总量。
     private static func isHiddenModel(_ name: String, _ row: [String: Any]) -> Bool {
         name == "codex-auto-review" || row["isFallback"] as? Bool == true
-    }
-
-    /// 有 token 却算出 0 花费的模型。
-    ///
-    /// CodexBar 可能在新模型价目尚未到达时保留 token、但省略 cost；这种报告
-    /// 不能覆盖上一份完整数据，否则站点费用会突然回落。
-    ///
-    /// isHiddenModel 那些要排掉：codex-auto-review 之类本来就没有自己的价、
-    /// 按兜底模型折算，跟取不到表是两回事。
-    private static func unpricedModelNames(_ report: [String: Any]) -> Set<String> {
-        var names: Set<String> = []
-        for row in report["daily"] as? [[String: Any]] ?? [] {
-            for model in row["modelBreakdowns"] as? [[String: Any]] ?? [] {
-                guard let name = model["modelName"] as? String,
-                      !isHiddenModel(name, model) else { continue }
-                let components = number(model["inputTokens"]) + number(model["outputTokens"])
-                    + number(model["cacheReadTokens"]) + number(model["cacheCreationTokens"])
-                let tokens = max(number(model["totalTokens"]), components)
-                if tokens > 0, model["cost"] == nil || number(model["cost"]) == 0 {
-                    names.insert(name)
-                }
-            }
-        }
-        return names
     }
 
     /// CodexBar 的 Codex scanner 把 cached input 包含在 inputTokens 里；Claude scanner
