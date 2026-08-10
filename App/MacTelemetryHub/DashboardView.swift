@@ -3,7 +3,6 @@ import SwiftUI
 
 private enum DashboardSection: String, CaseIterable, Identifiable {
     case overview
-    case usage
     case charger
 
     var id: Self { self }
@@ -11,7 +10,6 @@ private enum DashboardSection: String, CaseIterable, Identifiable {
     var title: String {
         switch self {
         case .overview: "总览"
-        case .usage: "Vibe Coding"
         case .charger: "充电设备"
         }
     }
@@ -19,7 +17,6 @@ private enum DashboardSection: String, CaseIterable, Identifiable {
     var subtitle: String {
         switch self {
         case .overview: "查看所有已启用的数据源"
-        case .usage: "本机 Claude 与 Codex 用量"
         case .charger: "端口、电流与设备状态"
         }
     }
@@ -27,7 +24,6 @@ private enum DashboardSection: String, CaseIterable, Identifiable {
     var icon: String {
         switch self {
         case .overview: "rectangle.grid.2x2"
-        case .usage: "terminal"
         case .charger: "bolt.horizontal"
         }
     }
@@ -38,8 +34,7 @@ struct DashboardView: View {
     @ObservedObject private var bluetooth: BluetoothService
     @ObservedObject private var httpServer: LocalHTTPServer
     @ObservedObject private var appleMusic: AppleMusicMonitor
-    @ObservedObject private var ccusage: CcusageMonitor
-    @ObservedObject private var agentLimits: AgentLimitsMonitor
+    @ObservedObject private var codexBarCost: CodexBarCostMonitor
     @State private var selection: DashboardSection = .overview
 
     init(service: ServiceController) {
@@ -47,8 +42,7 @@ struct DashboardView: View {
         bluetooth = service.bluetooth
         httpServer = service.httpServer
         appleMusic = service.appleMusic
-        ccusage = service.ccusage
-        agentLimits = service.agentLimits
+        codexBarCost = service.codexBarCost
     }
 
     var body: some View {
@@ -79,7 +73,6 @@ struct DashboardView: View {
                             .frame(width: 18)
                     }
                     .tag(section)
-                    .disabled(section == .usage && !service.settings.ccusageModuleEnabled)
                 }
             }
 
@@ -144,8 +137,6 @@ struct DashboardView: View {
                     switch selection {
                     case .overview:
                         overviewContent
-                    case .usage:
-                        usageContent
                     case .charger:
                         chargerContent(now: now)
                     }
@@ -202,28 +193,6 @@ struct DashboardView: View {
             }
 
             footer(now: Date())
-        }
-    }
-
-    private var usageContent: some View {
-        VStack(alignment: .leading, spacing: 18) {
-            if service.settings.ccusageModuleEnabled {
-                VibeCodingUsageView(
-                    payload: ccusage.payload,
-                    updatedAt: ccusage.lastSuccess,
-                    error: ccusage.lastError,
-                    plans: agentLimits.plans,
-                    onRefresh: { Task { await service.refreshVibeCodingNow() } },
-                    isRefreshing: service.isRefreshingVibeCoding,
-                    refreshMessage: service.vibeCodingRefreshError.map { "刷新失败：\($0)" }
-                )
-            } else {
-                EmptyModuleView(
-                    title: "Vibe Coding 未启用",
-                    detail: "在设置的“数据源”中开启 ccusage，并填写本机 Node 与 CLI 路径。",
-                    icon: "terminal"
-                )
-            }
         }
     }
 
@@ -308,11 +277,11 @@ struct DashboardView: View {
                 feedbackIsError: service.manualReportFailed(.timezone)
             )
             ModuleStatusCard(
-                title: "ccusage",
+                title: "CodexBar",
                 icon: "terminal",
-                enabled: service.settings.ccusageModuleEnabled,
-                value: ccusage.lastSuccess == nil ? "等待统计" : "聚合完成",
-                detail: ccusage.lastError ?? ccusage.lastSuccess?.formatted(date: .omitted, time: .standard),
+                enabled: service.settings.codexBarModuleEnabled,
+                value: codexBarCost.lastSuccess == nil ? "等待统计" : "聚合完成",
+                detail: codexBarCost.lastError ?? codexBarCost.lastSuccess?.formatted(date: .omitted, time: .standard),
                 action: { _ = service.requestImmediateReport(.vibeCoding) },
                 actionEnabled: service.canRequestImmediateReport(.vibeCoding),
                 isReporting: service.isManualReportInFlight(.vibeCoding),

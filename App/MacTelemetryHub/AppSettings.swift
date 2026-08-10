@@ -17,11 +17,9 @@ final class AppSettings: ObservableObject {
         static let desktopModuleEnabled = "desktopModuleEnabled"
         static let appleMusicModuleEnabled = "appleMusicModuleEnabled"
         static let timezoneModuleEnabled = "timezoneModuleEnabled"
-        static let ccusageModuleEnabled = "ccusageModuleEnabled"
-        static let nodePath = "ccusageNodePath"
-        static let ccusageCLIPath = "ccusageCLIPath"
-        static let ccusageRefreshInterval = "ccusageRefreshInterval"
-        static let codexCLIPath = "codexCLIPath"
+        static let codexBarModuleEnabled = "codexBarModuleEnabled"
+        static let codexBarCLIPath = "codexBarCLIPath"
+        static let codexBarCostRefreshInterval = "codexBarCostRefreshInterval"
         static let agentLimitsRefreshInterval = "agentLimitsRefreshInterval"
         static let userIDAccount = "anker-user-id"
         static let telemetrySecretAccount = "telemetry-ingest-secret"
@@ -41,11 +39,9 @@ final class AppSettings: ObservableObject {
     @Published var desktopModuleEnabled: Bool
     @Published var appleMusicModuleEnabled: Bool
     @Published var timezoneModuleEnabled: Bool
-    @Published var ccusageModuleEnabled: Bool
-    @Published var nodePath: String
-    @Published var ccusageCLIPath: String
-    @Published var ccusageRefreshInterval: Double
-    @Published var codexCLIPath: String
+    @Published var codexBarModuleEnabled: Bool
+    @Published var codexBarCLIPath: String
+    @Published var codexBarCostRefreshInterval: Double
     @Published var agentLimitsRefreshInterval: Double
     @Published var launchAtLoginEnabled = false
 
@@ -82,20 +78,15 @@ final class AppSettings: ObservableObject {
         desktopModuleEnabled = defaults.object(forKey: Key.desktopModuleEnabled) as? Bool ?? true
         appleMusicModuleEnabled = defaults.object(forKey: Key.appleMusicModuleEnabled) as? Bool ?? true
         timezoneModuleEnabled = defaults.object(forKey: Key.timezoneModuleEnabled) as? Bool ?? true
-        ccusageModuleEnabled = defaults.object(forKey: Key.ccusageModuleEnabled) as? Bool ?? false
-        nodePath = defaults.string(forKey: Key.nodePath)
-            ?? environment["CCUSAGE_NODE_PATH"]
-            ?? Self.firstExistingPath(["/Users/\(NSUserName())/.local/bin/node", "/opt/homebrew/bin/node", "/usr/local/bin/node"])
+        codexBarModuleEnabled = defaults.object(forKey: Key.codexBarModuleEnabled) as? Bool ?? false
+        codexBarCLIPath = defaults.string(forKey: Key.codexBarCLIPath)
+            ?? environment["CODEXBAR_CLI_PATH"]
+            ?? Self.firstExistingPath([
+                "/Applications/CodexBar.app/Contents/Helpers/CodexBarCLI",
+            ])
             ?? ""
-        ccusageCLIPath = defaults.string(forKey: Key.ccusageCLIPath)
-            ?? environment["CCUSAGE_CLI_PATH"]
-            ?? ""
-        let storedCcusageInterval = defaults.double(forKey: Key.ccusageRefreshInterval)
-        ccusageRefreshInterval = storedCcusageInterval == 0 ? 60 : storedCcusageInterval
-        codexCLIPath = defaults.string(forKey: Key.codexCLIPath)
-            ?? environment["CODEX_CLI_PATH"]
-            ?? Self.firstExistingPath(["/Users/\(NSUserName())/.local/bin/codex", "/opt/homebrew/bin/codex", "/usr/local/bin/codex"])
-            ?? ""
+        let storedCostInterval = defaults.double(forKey: Key.codexBarCostRefreshInterval)
+        codexBarCostRefreshInterval = storedCostInterval == 0 ? 60 : storedCostInterval
         let storedAgentLimitsInterval = defaults.double(forKey: Key.agentLimitsRefreshInterval)
         agentLimitsRefreshInterval = storedAgentLimitsInterval == 0 ? 300 : storedAgentLimitsInterval
         launchAtLoginEnabled = SMAppService.mainApp.status == .enabled
@@ -129,20 +120,11 @@ final class AppSettings: ObservableObject {
                 throw SettingsError.invalidPostURL
             }
         }
-        if ccusageModuleEnabled {
-            guard FileManager.default.isExecutableFile(atPath: nodePath) else {
-                throw SettingsError.invalidNodePath
+        if codexBarModuleEnabled {
+            guard FileManager.default.isExecutableFile(atPath: codexBarCLIPath) else {
+                throw SettingsError.invalidCodexBarPath
             }
-            guard FileManager.default.fileExists(atPath: ccusageCLIPath) else {
-                throw SettingsError.invalidCcusagePath
-            }
-            guard ccusageRefreshInterval >= 60 else { throw SettingsError.invalidCcusageInterval }
-            // 没装 Codex 的机器留空即可，此时只出 Claude 套餐等级，不该因此拦住保存
-            if !codexCLIPath.isEmpty {
-                guard FileManager.default.isExecutableFile(atPath: codexCLIPath) else {
-                    throw SettingsError.invalidCodexPath
-                }
-            }
+            guard codexBarCostRefreshInterval >= 60 else { throw SettingsError.invalidCodexBarCostInterval }
             guard agentLimitsRefreshInterval >= 60 else { throw SettingsError.invalidAgentLimitsInterval }
         }
     }
@@ -153,9 +135,9 @@ final class AppSettings: ObservableObject {
         peripheralID = peripheralID.trimmingCharacters(in: .whitespacesAndNewlines)
         postURL = postURL.trimmingCharacters(in: .whitespacesAndNewlines)
         telemetrySecret = telemetrySecret.trimmingCharacters(in: .whitespacesAndNewlines)
-        nodePath = (nodePath as NSString).expandingTildeInPath
-        ccusageCLIPath = (ccusageCLIPath as NSString).expandingTildeInPath
-        codexCLIPath = (codexCLIPath as NSString).expandingTildeInPath
+        codexBarCLIPath = URL(
+            fileURLWithPath: (codexBarCLIPath as NSString).expandingTildeInPath
+        ).resolvingSymlinksInPath().path
         try keychain.write(userID, account: Key.userIDAccount)
         try keychain.write(telemetrySecret, account: Key.telemetrySecretAccount)
         defaults.set(peripheralID, forKey: Key.peripheralID)
@@ -170,11 +152,9 @@ final class AppSettings: ObservableObject {
         defaults.set(desktopModuleEnabled, forKey: Key.desktopModuleEnabled)
         defaults.set(appleMusicModuleEnabled, forKey: Key.appleMusicModuleEnabled)
         defaults.set(timezoneModuleEnabled, forKey: Key.timezoneModuleEnabled)
-        defaults.set(ccusageModuleEnabled, forKey: Key.ccusageModuleEnabled)
-        defaults.set(nodePath, forKey: Key.nodePath)
-        defaults.set(ccusageCLIPath, forKey: Key.ccusageCLIPath)
-        defaults.set(ccusageRefreshInterval, forKey: Key.ccusageRefreshInterval)
-        defaults.set(codexCLIPath, forKey: Key.codexCLIPath)
+        defaults.set(codexBarModuleEnabled, forKey: Key.codexBarModuleEnabled)
+        defaults.set(codexBarCLIPath, forKey: Key.codexBarCLIPath)
+        defaults.set(codexBarCostRefreshInterval, forKey: Key.codexBarCostRefreshInterval)
         defaults.set(agentLimitsRefreshInterval, forKey: Key.agentLimitsRefreshInterval)
     }
 
@@ -194,8 +174,7 @@ final class AppSettings: ObservableObject {
 
 enum SettingsError: LocalizedError {
     case invalidUserID, invalidPeripheralID, invalidPort, invalidTiming, invalidPostURL
-    case invalidNodePath, invalidCcusagePath, invalidCcusageInterval
-    case invalidCodexPath, invalidAgentLimitsInterval
+    case invalidCodexBarPath, invalidCodexBarCostInterval, invalidAgentLimitsInterval
 
     var errorDescription: String? {
         switch self {
@@ -204,10 +183,8 @@ enum SettingsError: LocalizedError {
         case .invalidPort: "HTTP 端口必须在 1 到 65535 之间。"
         case .invalidTiming: "POST 间隔和超时必须大于 0。"
         case .invalidPostURL: "POST 地址必须是完整的 http:// 或 https:// URL。"
-        case .invalidNodePath: "启用 ccusage 时，Node 路径必须指向可执行文件。"
-        case .invalidCcusagePath: "启用 ccusage 时，CLI 路径必须指向 ccusage/src/cli.js。"
-        case .invalidCcusageInterval: "ccusage 刷新间隔不能低于 60 秒。"
-        case .invalidCodexPath: "Codex 路径填写后必须指向可执行文件；留空则不采集 Codex 限额。"
+        case .invalidCodexBarPath: "启用 Vibe Coding 用量时，CodexBar CLI 路径必须指向可执行文件。"
+        case .invalidCodexBarCostInterval: "本地用量刷新间隔不能低于 60 秒。"
         case .invalidAgentLimitsInterval: "限额刷新间隔不能低于 60 秒。"
         }
     }

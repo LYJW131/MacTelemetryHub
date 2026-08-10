@@ -161,7 +161,7 @@ final class ServiceController: ObservableObject {
     let timeZone = TimeZoneMonitor()
     let appleMusic = AppleMusicMonitor()
     let appleMusicAuthorization = AppleMusicAuthorizationManager()
-    let ccusage = CcusageMonitor()
+    let codexBarCost = CodexBarCostMonitor()
     let agentLimits = AgentLimitsMonitor()
     lazy private(set) var httpServer = LocalHTTPServer { [weak self] request in
         guard let self else { return .text("Unavailable\n", status: 503, reason: "Service Unavailable") }
@@ -170,8 +170,6 @@ final class ServiceController: ObservableObject {
 
     @Published private(set) var reporterLastSuccess: Date?
     @Published private(set) var reporterLastError: String?
-    @Published private(set) var isRefreshingVibeCoding = false
-    @Published private(set) var vibeCodingRefreshError: String?
     @Published private(set) var appleMusicCredentialsUploadAt: Date?
     @Published private(set) var appleMusicCredentialsUploadError: String?
     @Published private(set) var isUploadingAppleMusicCredentials = false
@@ -186,7 +184,7 @@ final class ServiceController: ObservableObject {
     @Published private(set) var lastManualReportAt: [TelemetryModule: Date] = [:]
 
     private var reporterTask: Task<Void, Never>?
-    private var lastPostedCcusageAt: Date?
+    private var lastPostedCodexBarCostAt: Date?
     private var lastPostedCharger: ChargerUploadSignature?
     /// 只跟结构性变化比，管的是「要不要即时发」，不管「要不要带 charger 模块」
     private var lastPostedChargerStructural: ChargerStructuralSignature?
@@ -209,7 +207,7 @@ final class ServiceController: ObservableObject {
 
     /// 循环的常规周期。前台应用、音乐、充电器插拔都会提前叫醒它，所以这个只
     /// 用来照顾没有事件放行的活：充电器功率滚动这类按节流窗口发的变化、
-    /// 30 秒心跳、ccusage 的刷新间隔检查。
+    /// 30 秒心跳、CodexBar 的刷新间隔检查。
     private static let tickInterval = Duration.seconds(5)
 
     /// MusicKit 读取失败后的退避。
@@ -269,7 +267,7 @@ final class ServiceController: ObservableObject {
         desktopActivity.stop()
         timeZone.stop()
         appleMusic.stop()
-        ccusage.stop()
+        codexBarCost.stop()
         agentLimits.stop()
         httpServer.stop()
         bluetooth.shutdown()
@@ -360,26 +358,6 @@ final class ServiceController: ObservableObject {
         lastManualReportError[module] != nil
     }
 
-    /// Refreshes both local usage aggregation and server-side agent limits once.
-    /// Each monitor owns its own non-reentrancy guard; this method only coordinates order.
-    func refreshVibeCodingNow() async {
-        guard settings.ccusageModuleEnabled, !isRefreshingVibeCoding else { return }
-        isRefreshingVibeCoding = true
-        vibeCodingRefreshError = nil
-        defer { isRefreshingVibeCoding = false }
-
-        await agentLimits.refreshNow(codexPath: settings.codexCLIPath)
-        await ccusage.refreshNow(
-            nodePath: settings.nodePath,
-            cliPath: settings.ccusageCLIPath,
-            plans: agentLimits.plans,
-            limitErrors: agentLimits.limitErrors
-        )
-        let errors = [agentLimits.lastError, ccusage.lastError].compactMap { $0 }
-        vibeCodingRefreshError = errors.isEmpty ? nil : errors.joined(separator: "；")
-        wakeReporter()
-    }
-
     /**
      * 首次授权，由用户在设置页点出来 —— 只有这条路径会弹系统对话框。
      *
@@ -439,7 +417,7 @@ final class ServiceController: ObservableObject {
         case .appleMusic: settings.appleMusicModuleEnabled
         case .charger: settings.chargerModuleEnabled
         case .timezone: settings.timezoneModuleEnabled
-        case .vibeCoding: settings.ccusageModuleEnabled
+        case .vibeCoding: settings.codexBarModuleEnabled
         }
     }
 
@@ -449,7 +427,7 @@ final class ServiceController: ObservableObject {
         case .appleMusic: appleMusic.snapshot != nil
         case .charger: statusPayload.updatedAt != nil
         case .timezone: timeZone.snapshot != nil
-        case .vibeCoding: ccusage.uploadPayload != nil
+        case .vibeCoding: codexBarCost.uploadPayload != nil
         }
     }
 
@@ -545,8 +523,8 @@ final class ServiceController: ObservableObject {
             appleMusic.onChange = nil
             appleMusic.stop()
         }
-        if !settings.ccusageModuleEnabled {
-            ccusage.stop()
+        if !settings.codexBarModuleEnabled {
+            codexBarCost.stop()
             agentLimits.stop()
         }
     }
@@ -559,7 +537,7 @@ final class ServiceController: ObservableObject {
         // 上一轮遗留的唤醒标记不能带进新循环，否则第一圈会白转一次
         pendingWake = false
         reporterLastError = nil
-        lastPostedCcusageAt = nil
+        lastPostedCodexBarCostAt = nil
         lastPostedCharger = nil
         lastPostedChargerStructural = nil
         lastPostedDesktop = nil
@@ -591,17 +569,16 @@ final class ServiceController: ObservableObject {
                     // 的激活通知驱动，后者由 Music.app 的 playerInfo 跨进程通知驱动、
                     // 另带一个兜底重读补上不发通知的 seek。循环只管读它们留下的
                     // snapshot —— 变化时它们会把循环叫醒，没事件时按 tickInterval 转。
-                    if settings.ccusageModuleEnabled {
-                        // 先刷限额：ccusage 的上传载荷要把 plan/limits 并进去，
+                    if settings.codexBarModuleEnabled {
+                        // 先刷限额：本地用量上传载荷要把 plan/limits 并进去，
                         // 顺序反了这一轮发出去的就是上一轮的套餐快照。
                         await agentLimits.refreshIfNeeded(
-                            codexPath: settings.codexCLIPath,
+                            codexBarPath: settings.codexBarCLIPath,
                             interval: settings.agentLimitsRefreshInterval
                         )
-                        await ccusage.refreshIfNeeded(
-                            nodePath: settings.nodePath,
-                            cliPath: settings.ccusageCLIPath,
-                            interval: settings.ccusageRefreshInterval,
+                        await codexBarCost.refreshIfNeeded(
+                            cliPath: settings.codexBarCLIPath,
+                            interval: settings.codexBarCostRefreshInterval,
                             plans: agentLimits.plans,
                             limitErrors: agentLimits.limitErrors
                         )
@@ -648,11 +625,11 @@ final class ServiceController: ObservableObject {
                     // snapshot 从有值变成 nil 时也要发送一次 null，避免网页保留旧歌曲。
                     let musicChanged = settings.appleMusicModuleEnabled &&
                         (musicSignature != lastPostedAppleMusic || musicSeeked)
-                    let ccusageChanged: Bool
-                    if settings.ccusageModuleEnabled, let refreshedAt = ccusage.lastSuccess {
-                        ccusageChanged = lastPostedCcusageAt.map { refreshedAt > $0 } ?? true
+                    let codexBarCostChanged: Bool
+                    if settings.codexBarModuleEnabled, let refreshedAt = codexBarCost.lastSuccess {
+                        codexBarCostChanged = lastPostedCodexBarCostAt.map { refreshedAt > $0 } ?? true
                     } else {
-                        ccusageChanged = false
+                        codexBarCostChanged = false
                     }
                     let manualModules = pendingManualReports
                     manualModulesForAttempt = manualModules
@@ -672,9 +649,9 @@ final class ServiceController: ObservableObject {
                     let musicToSend = manualMode
                         ? manualModules.contains(.appleMusic) && music != nil
                         : musicChanged
-                    let ccusageToSend = manualMode
-                        ? manualModules.contains(.vibeCoding) && ccusage.uploadPayload != nil
-                        : ccusageChanged
+                    let codexBarCostToSend = manualMode
+                        ? manualModules.contains(.vibeCoding) && codexBarCost.uploadPayload != nil
+                        : codexBarCostChanged
                     let credentialsToSend: AppleMusicCredentialsPayload?
                     // 手动上报只发用户选中的模块；token 的自动变化留到下一轮。
                     if !manualMode,
@@ -692,7 +669,7 @@ final class ServiceController: ObservableObject {
                     }
                     let heartbeatDue = lastHeartbeatAt.map { Date().timeIntervalSince($0) >= 30 } ?? true
                     let dataChanged = chargerToSend || desktopToSend || timezoneToSend ||
-                        musicToSend || ccusageToSend || credentialsToSend != nil
+                        musicToSend || codexBarCostToSend || credentialsToSend != nil
                     /**
                      * 心跳不再借数据端点发。
                      *
@@ -711,7 +688,7 @@ final class ServiceController: ObservableObject {
 
                     // 播放/暂停、换歌、换前台应用是用户正盯着的事，不值得为它们等满节流窗口。
                     // 这些变化本来也会上报，即时化只是把等待砍掉，不增加请求总数；
-                    // 而且同一个 envelope 会把此刻待发的充电器 / ccusage 一起捎走。
+                    // 而且同一个 envelope 会把此刻待发的充电器 / CodexBar 一起捎走。
                     // 进度跳变也算紧急。单曲循环时曲目和状态都没变，只有进度
                     // 从结尾跳回开头 —— 不放行的话网页会把进度条钉在 100%，
                     // 一直等到下一个节流窗口（实测 postInterval=30 时要等 30 秒）。
@@ -760,7 +737,7 @@ final class ServiceController: ObservableObject {
                             timezone: timezoneToSend ? timezone : nil,
                             appleMusic: musicToSend ? musicPayload : nil,
                             appleMusicCredentials: credentialsToSend,
-                            vibeCoding: ccusageToSend ? ccusage.uploadPayload : nil,
+                            vibeCoding: codexBarCostToSend ? codexBarCost.uploadPayload : nil,
                             includeDesktop: desktopToSend,
                             includeAppleMusic: musicToSend
                         )
@@ -817,7 +794,7 @@ final class ServiceController: ObservableObject {
                             appleMusicCredentialsUploadAt = Date()
                             appleMusicCredentialsUploadError = nil
                         }
-                        if ccusageToSend { lastPostedCcusageAt = ccusage.lastSuccess }
+                        if codexBarCostToSend { lastPostedCodexBarCostAt = codexBarCost.lastSuccess }
                         if !manualModulesForAttempt.isEmpty {
                             pendingManualReports.subtract(manualModulesForAttempt)
                             let now = Date()
@@ -884,7 +861,7 @@ final class ServiceController: ObservableObject {
             timezone: settings.timezoneModuleEnabled ? timeZone.snapshot : nil,
             appleMusic: settings.appleMusicModuleEnabled ? appleMusic.snapshot : nil,
             appleMusicCredentials: credentialsPayload,
-            vibeCoding: settings.ccusageModuleEnabled ? ccusage.uploadPayload : nil,
+            vibeCoding: settings.codexBarModuleEnabled ? codexBarCost.uploadPayload : nil,
             includeDesktop: settings.desktopModuleEnabled,
             includeAppleMusic: settings.appleMusicModuleEnabled
         )
@@ -975,7 +952,7 @@ final class ServiceController: ObservableObject {
         if settings.desktopModuleEnabled { names.append(TelemetryModule.desktop.rawValue) }
         if settings.appleMusicModuleEnabled { names.append(TelemetryModule.appleMusic.rawValue) }
         if settings.timezoneModuleEnabled { names.append(TelemetryModule.timezone.rawValue) }
-        if settings.ccusageModuleEnabled { names.append(TelemetryModule.vibeCoding.rawValue) }
+        if settings.codexBarModuleEnabled { names.append(TelemetryModule.vibeCoding.rawValue) }
         return names
     }
 
@@ -1024,14 +1001,13 @@ final class ServiceController: ObservableObject {
         /**
          * 采集侧各模块最近一次的失败原因。
          *
-         * 限额那条会静默失败 —— 凭据被拒、接口限流、token 过期，表现都只是
-         * 「limits 变成空数组」，套餐等级还在（它是本地文件读的）。没有这个
-         * 端点就只能靠猜。
+         * CodexBar Web 的某个 provider 可能单独失败；采集器会保留该 provider
+         * 上一次的好值，并把本轮错误留在这里。没有这个端点就只能靠猜。
          */
         case ("GET", "/debug/errors"):
             return encode([
                 "agentLimits": agentLimits.lastError,
-                "ccusage": ccusage.lastError,
+                "codexbar": codexBarCost.lastError,
                 "appleMusic": appleMusic.lastError,
                 "bluetooth": bluetooth.lastError,
                 "reporter": reporterLastError,

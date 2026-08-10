@@ -15,7 +15,6 @@
 		B10000000000000000000007 /* SettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = F10000000000000000000007 /* SettingsView.swift */; };
 		B10000000000000000000008 /* UIComponents.swift in Sources */ = {isa = PBXBuildFile; fileRef = F10000000000000000000008 /* UIComponents.swift */; };
 		B10000000000000000000010 /* TelemetryModules.swift in Sources */ = {isa = PBXBuildFile; fileRef = F10000000000000000000010 /* TelemetryModules.swift */; };
-		B10000000000000000000011 /* VibeCodingUsageView.swift in Sources */ = {isa = PBXBuildFile; fileRef = F10000000000000000000011 /* VibeCodingUsageView.swift */; };
 		B10000000000000000000012 /* AppleMusicAuthorization.swift in Sources */ = {isa = PBXBuildFile; fileRef = F10000000000000000000012 /* AppleMusicAuthorization.swift */; };
 		B10000000000000000000009 /* A2687Crypto.swift in Sources */ = {isa = PBXBuildFile; fileRef = F10000000000000000000009 /* A2687Crypto.swift */; };
 		B1000000000000000000000A /* A2687Protocol.swift in Sources */ = {isa = PBXBuildFile; fileRef = F1000000000000000000000A /* A2687Protocol.swift */; };
@@ -34,7 +33,6 @@
 		F10000000000000000000007 /* SettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SettingsView.swift; sourceTree = "<group>"; };
 		F10000000000000000000008 /* UIComponents.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = UIComponents.swift; sourceTree = "<group>"; };
 		F10000000000000000000010 /* TelemetryModules.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TelemetryModules.swift; sourceTree = "<group>"; };
-		F10000000000000000000011 /* VibeCodingUsageView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VibeCodingUsageView.swift; sourceTree = "<group>"; };
 		F10000000000000000000012 /* AppleMusicAuthorization.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppleMusicAuthorization.swift; sourceTree = "<group>"; };
 		F10000000000000000000009 /* A2687Crypto.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = A2687Crypto.swift; sourceTree = "<group>"; };
 		F1000000000000000000000A /* A2687Protocol.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = A2687Protocol.swift; sourceTree = "<group>"; };
@@ -76,7 +74,6 @@
 				F10000000000000000000007 /* SettingsView.swift */,
 				F10000000000000000000008 /* UIComponents.swift */,
 				F10000000000000000000010 /* TelemetryModules.swift */,
-				F10000000000000000000011 /* VibeCodingUsageView.swift */,
 				F10000000000000000000012 /* AppleMusicAuthorization.swift */,
 				F1000000000000000000000D /* Info.plist */,
 				F1000000000000000000000F /* Assets.xcassets */,
@@ -175,7 +172,6 @@
 				B10000000000000000000007 /* SettingsView.swift in Sources */,
 				B10000000000000000000008 /* UIComponents.swift in Sources */,
 				B10000000000000000000010 /* TelemetryModules.swift in Sources */,
-				B10000000000000000000011 /* VibeCodingUsageView.swift in Sources */,
 				B10000000000000000000012 /* AppleMusicAuthorization.swift in Sources */,
 				B10000000000000000000009 /* A2687Crypto.swift in Sources */,
 				B1000000000000000000000A /* A2687Protocol.swift in Sources */,

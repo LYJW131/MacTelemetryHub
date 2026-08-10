@@ -236,16 +236,19 @@ struct SettingsView: View {
                     .toggleStyle(.switch)
             }
 
-            settingSection("Vibe Coding 用量", detail: "ccusage 聚合本机 JSONL；session ID、项目路径、提示词与回复不会离开电脑。", icon: "terminal") {
-                Toggle("启用 ccusage", isOn: $settings.ccusageModuleEnabled)
+            settingSection("Vibe Coding 用量", detail: "CodexBar 聚合本机 Claude/Codex 日志，并通过 Web 来源统一读取两者限额；不会上传 session ID、项目路径、提示词或回复。", icon: "terminal") {
+                Toggle("启用 CodexBar", isOn: $settings.codexBarModuleEnabled)
                     .toggleStyle(.switch)
 
-                if settings.ccusageModuleEnabled {
+                if settings.codexBarModuleEnabled {
                     VStack(alignment: .leading, spacing: 12) {
-                        pathField(title: "Node 可执行文件", detail: "本机路径", text: $settings.nodePath, placeholder: "/opt/homebrew/bin/node")
-                        pathField(title: "ccusage CLI", detail: "node_modules/ccusage/src/cli.js", text: $settings.ccusageCLIPath, placeholder: "/path/to/node_modules/ccusage/src/cli.js")
-                        NumericField(title: "统计刷新", unit: "秒（最少 60）", placeholder: "60", value: $settings.ccusageRefreshInterval)
-                        pathField(title: "Codex 可执行文件", detail: "留空则不采集 Codex 限额", text: $settings.codexCLIPath, placeholder: "/opt/homebrew/bin/codex")
+                        pathField(
+                            title: "CodexBar CLI",
+                            detail: "必须使用 App 内置真实路径；保存时会自动解析 Homebrew 符号链接",
+                            text: $settings.codexBarCLIPath,
+                            placeholder: "/Applications/CodexBar.app/Contents/Helpers/CodexBarCLI"
+                        )
+                        NumericField(title: "本地统计刷新", unit: "秒（最少 60）", placeholder: "60", value: $settings.codexBarCostRefreshInterval)
                         NumericField(title: "限额刷新", unit: "秒（最少 60）", placeholder: "300", value: $settings.agentLimitsRefreshInterval)
                     }
                     .padding(.top, 5)
