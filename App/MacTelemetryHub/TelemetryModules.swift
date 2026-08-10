@@ -108,14 +108,18 @@ private enum CodingSessionCollector {
                     throw TelemetryModuleError.ccusage("\(agent) session 输出不是有效 JSON")
                 }
                 let sessions = report["sessions"] as? [[String: Any]] ?? []
-                let latest = sessions.max {
-                    ($0["lastActivity"] as? String ?? "") < ($1["lastActivity"] as? String ?? "")
+                let ordered = sessions.sorted {
+                    ($0["lastActivity"] as? String ?? "") > ($1["lastActivity"] as? String ?? "")
                 }
+                let latest = ordered.first
                 let lastActivity = (latest?["lastActivity"] as? String)?.nilIfEmpty
                 let date = sessionDate(lastActivity)
                 let age = date.map { Date().timeIntervalSince($0) }
+                // 最新 session 可能尚未写入模型，或只有自动 review；模型向下找，
+                // 但活动时间仍严格使用最新 session，不能把旧会话误报成正在使用。
+                let model = ordered.lazy.compactMap(currentModel).first
                 snapshots[agent] = CodingSessionSnapshot(
-                    currentModel: latest.flatMap(currentModel),
+                    currentModel: model,
                     lastActivityAt: lastActivity,
                     active: age.map { $0 >= 0 && $0 <= activeWindow } ?? false,
                     sessionCount: sessions.count
