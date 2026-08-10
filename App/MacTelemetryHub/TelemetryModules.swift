@@ -683,6 +683,42 @@ struct AgentPlanSnapshot: Codable, Equatable, Sendable {
     }
 }
 
+/// CodexBar exposes the provider's raw login method. Preserve the display labels
+/// used before the collector migration so changing sources does not leak enum IDs
+/// into the website.
+func agentPlanLabel(agent: String, tier: String) -> String {
+    switch agent {
+    case "codex":
+        switch tier.lowercased() {
+        case "free": return "Free"
+        case "go": return "Go"
+        case "plus": return "Plus"
+        case "pro": return "Pro"
+        case "prolite": return "Pro Lite"
+        case "team": return "Team"
+        case "business": return "Business"
+        case "enterprise": return "Enterprise"
+        case "edu": return "Edu"
+        default: return tier
+        }
+    case "claude":
+        if tier.hasPrefix("Claude ") {
+            return String(tier.dropFirst("Claude ".count))
+        }
+        switch tier {
+        case "default_claude_max_5x": return "Max 5x"
+        case "default_claude_max_20x": return "Max 20x"
+        case "default_claude_pro": return "Pro"
+        case "claude_max": return "Max"
+        case "claude_pro": return "Pro"
+        case "claude_free": return "Free"
+        default: return tier
+        }
+    default:
+        return tier
+    }
+}
+
 private let agentLimitProviderIDs = ["claude", "codex", "cursor", "opencodego", "antigravity"]
 private let supplementalQuotaProviderIDs = ["cursor", "opencodego", "antigravity"]
 
@@ -865,9 +901,7 @@ private enum AgentLimitsCollector {
             let loginMethod = (identity?["loginMethod"] as? String)?.nilIfEmpty
                 ?? (usage["loginMethod"] as? String)?.nilIfEmpty
             let tier = loginMethod ?? provider
-            let label = provider == "claude" && tier.hasPrefix("Claude ")
-                ? String(tier.dropFirst("Claude ".count))
-                : tier
+            let label = agentPlanLabel(agent: provider, tier: tier)
             let windows = supplementalQuotaProviderIDs.contains(provider)
                 ? parseTotalLimit(provider: provider, usage: usage)
                 : parseWebLimits(provider: provider, usage: usage)
@@ -940,25 +974,45 @@ private enum AgentLimitsCollector {
         var windows: [AgentLimitWindow] = []
         for slot in ["primary", "secondary", "tertiary"] {
             guard let window = usage[slot] as? [String: Any] else { continue }
+            let windowMinutes = (window["windowMinutes"] as? NSNumber)?.intValue
+            // The pre-CodexBar Claude collector exposed the aggregate weekly bucket
+            // as `weekly_all`; the frontend uses that stable semantic key to append
+            // “all models”. Codex's primary weekly bucket intentionally keeps its
+            // own key because Spark is a separate allowance, not part of that total.
+            let key = provider == "claude" && windowMinutes == 10_080
+                ? "weekly_all"
+                : "\(provider).\(slot)"
             windows.append(AgentLimitWindow(
-                key: "\(provider).\(slot)",
+                key: key,
                 label: nil,
                 group: nil,
-                windowMinutes: (window["windowMinutes"] as? NSNumber)?.intValue,
+                windowMinutes: windowMinutes,
                 usedPercent: (window["usedPercent"] as? NSNumber)?.doubleValue ?? 0,
                 resetsAt: unixSeconds(window["resetsAt"] as? String)
             ))
         }
+        let claudeWeeklyReset = provider == "claude"
+            ? windows.first { $0.key == "weekly_all" }?.resetsAt
+            : nil
         for extra in usage["extraRateWindows"] as? [[String: Any]] ?? [] {
             guard let window = extra["window"] as? [String: Any] else { continue }
             let key = (extra["id"] as? String)?.nilIfEmpty ?? "\(provider).extra.\(windows.count)"
+            let windowMinutes = (window["windowMinutes"] as? NSNumber)?.intValue
+            // CodexBar's Fable extra window currently omits resetsAt even though its
+            // aggregate Claude weekly window carries the shared seven-day boundary.
+            // The old collector returned that reset, so retain the established UI
+            // contract when the extra window leaves it out.
+            let resetsAt = unixSeconds(window["resetsAt"] as? String)
+                ?? (provider == "claude" && windowMinutes == 10_080
+                    ? claudeWeeklyReset
+                    : nil)
             windows.append(AgentLimitWindow(
                 key: key,
                 label: (extra["title"] as? String)?.nilIfEmpty,
                 group: nil,
-                windowMinutes: (window["windowMinutes"] as? NSNumber)?.intValue,
+                windowMinutes: windowMinutes,
                 usedPercent: (window["usedPercent"] as? NSNumber)?.doubleValue ?? 0,
-                resetsAt: unixSeconds(window["resetsAt"] as? String)
+                resetsAt: resetsAt
             ))
         }
         return windows
