@@ -64,6 +64,18 @@ struct AppleMusicSnapshot: Codable, Equatable, Sendable {
     let observedAt: Int64
 }
 
+/**
+ * 并入统一遥测信封的 Apple Music token 增量。
+ *
+ * 两个 token 分别判变，所以字段都是可选的；developer token 的 expiresAt 和它
+ * 同进同出。GET /telemetry 使用同一结构，但会把当前三项完整返回。
+ */
+struct AppleMusicCredentialsPayload: Encodable, Sendable {
+    let musicUserToken: String?
+    let developerToken: String?
+    let expiresAt: Int?
+}
+
 struct TimeZoneSnapshot: Codable, Equatable, Sendable {
     let identifier: String
     let abbreviation: String?
@@ -75,13 +87,14 @@ struct TelemetryModulesPayload: Encodable, Sendable {
     let charger: StatusPayload?
     let desktop: DesktopActivitySnapshot?
     let appleMusic: AppleMusicSnapshot?
+    let appleMusicCredentials: AppleMusicCredentialsPayload?
     let timezone: TimeZoneSnapshot?
     let vibeCoding: JSONValue?
     let includeDesktop: Bool
     let includeAppleMusic: Bool
 
     private enum CodingKeys: String, CodingKey {
-        case charger, desktop, appleMusic, timezone, vibeCoding
+        case charger, desktop, appleMusic, appleMusicCredentials, timezone, vibeCoding
     }
 
     func encode(to encoder: Encoder) throws {
@@ -89,6 +102,7 @@ struct TelemetryModulesPayload: Encodable, Sendable {
         try container.encodeIfPresent(charger, forKey: .charger)
         if includeDesktop { try container.encode(desktop, forKey: .desktop) }
         if includeAppleMusic { try container.encode(appleMusic, forKey: .appleMusic) }
+        try container.encodeIfPresent(appleMusicCredentials, forKey: .appleMusicCredentials)
         try container.encodeIfPresent(timezone, forKey: .timezone)
         try container.encodeIfPresent(vibeCoding, forKey: .vibeCoding)
     }

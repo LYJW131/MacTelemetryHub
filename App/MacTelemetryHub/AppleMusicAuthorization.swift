@@ -63,9 +63,8 @@ final class AppleMusicAuthorizationManager: ObservableObject {
     /**
      * 现签一对 token。
      *
-     * `.ignoreCache` 是关键：MusicKit 自己有一层 token 缓存，不显式绕开的话它可以
-     * 把一份快过期的旧 token 还回来。上报出去的必须是刚签发的 —— 刚签的按定义就是
-     * 新鲜的，不需要再拿去打一次 API 验证。
+     * 使用 MusicKit 默认缓存。上报循环会定期再取并分别比较两个 token；缓存值没变
+     * 就静默，SDK 真正轮换其中一个时才把那个字段带进下一次遥测信封。
      *
      * 不弹窗：授权没批准就直接返回 nil，交给调用方决定要不要提示。
      */
@@ -80,9 +79,8 @@ final class AppleMusicAuthorizationManager: ObservableObject {
             // MusicDataRequest.tokenProvider 是 SDK 里的可变全局量，Swift 6 的严格
             // 并发检查不让碰。新建一个默认 provider 行为一样，且不动那个全局量。
             let provider = DefaultMusicTokenProvider()
-            let options: MusicTokenRequestOptions = .ignoreCache
-            let developerToken = try await provider.developerToken(options: options)
-            let musicUserToken = try await provider.userToken(for: developerToken, options: options)
+            let developerToken = try await provider.developerToken(options: [])
+            let musicUserToken = try await provider.userToken(for: developerToken, options: [])
             guard !musicUserToken.isEmpty, !developerToken.isEmpty else {
                 throw AppleMusicAuthorizationError.emptyToken
             }
