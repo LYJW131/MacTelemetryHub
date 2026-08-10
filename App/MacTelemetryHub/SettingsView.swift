@@ -236,7 +236,7 @@ struct SettingsView: View {
                     .toggleStyle(.switch)
             }
 
-            settingSection("Vibe Coding 用量", detail: "CodexBar 聚合本机 Claude/Codex 日志，并通过 Web 来源统一读取两者限额；不会上传 session ID、项目路径、提示词或回复。", icon: "terminal") {
+            settingSection("Vibe Coding 用量", detail: "CodexBar 聚合 Token、费用和限额；ccusage 只读取最近会话时间与模型，用来判断是否正在使用。不会上传 session ID、项目路径、提示词或回复。", icon: "terminal") {
                 Toggle("启用 CodexBar", isOn: $settings.codexBarModuleEnabled)
                     .toggleStyle(.switch)
 
@@ -248,8 +248,15 @@ struct SettingsView: View {
                             text: $settings.codexBarCLIPath,
                             placeholder: "/Applications/CodexBar.app/Contents/Helpers/CodexBarCLI"
                         )
-                        NumericField(title: "本地统计刷新", unit: "秒（最少 60）", placeholder: "60", value: $settings.codexBarCostRefreshInterval)
-                        NumericField(title: "限额刷新", unit: "秒（最少 60）", placeholder: "300", value: $settings.agentLimitsRefreshInterval)
+                        pathField(
+                            title: "ccusage CLI",
+                            detail: "仅扫描 Claude/Codex session 的最近活动，不参与 Token、费用或限额",
+                            text: $settings.ccusageCLIPath,
+                            placeholder: "~/.hermes/node/bin/ccusage"
+                        )
+                        NumericField(title: "会话状态刷新", unit: "秒（最少 60）", placeholder: "60", value: $settings.codingSessionRefreshInterval)
+                        NumericField(title: "Token / 费用刷新", unit: "秒（最少 60）", placeholder: "600", value: $settings.codexBarCostRefreshInterval)
+                        NumericField(title: "限额刷新", unit: "秒（最少 60）", placeholder: "600", value: $settings.agentLimitsRefreshInterval)
                     }
                     .padding(.top, 5)
                 }

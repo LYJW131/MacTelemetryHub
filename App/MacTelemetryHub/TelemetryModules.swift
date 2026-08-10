@@ -3,7 +3,7 @@ import CryptoKit
 import Foundation
 import Security
 
-enum JSONValue: Codable, Sendable {
+enum JSONValue: Codable, Equatable, Sendable {
     case object([String: JSONValue])
     case array([JSONValue])
     case string(String)
@@ -31,6 +31,155 @@ enum JSONValue: Codable, Sendable {
         case let .bool(value): try container.encode(value)
         case .null: try container.encodeNil()
         }
+    }
+}
+
+struct CodingSessionSnapshot: Codable, Equatable, Sendable {
+    let currentModel: String?
+    let lastActivityAt: String?
+    let active: Bool
+}
+
+@MainActor
+final class CodingSessionMonitor: ObservableObject {
+    @Published private(set) var snapshots: [String: CodingSessionSnapshot] = [:]
+    @Published private(set) var lastSuccess: Date?
+    @Published private(set) var lastError: String?
+    private var refreshing = false
+    private var lastAttempt: Date?
+
+    func stop() {
+        snapshots = [:]
+        lastSuccess = nil
+        lastError = nil
+        refreshing = false
+        lastAttempt = nil
+    }
+
+    @discardableResult
+    func refreshIfNeeded(cliPath: String, interval: Double) async -> Bool {
+        guard !refreshing else { return false }
+        if let lastAttempt, Date().timeIntervalSince(lastAttempt) < interval { return false }
+        return await refreshNow(cliPath: cliPath)
+    }
+
+    @discardableResult
+    func refreshNow(cliPath: String) async -> Bool {
+        guard !refreshing else { return false }
+        refreshing = true
+        lastAttempt = Date()
+        defer { refreshing = false }
+
+        let outcome = await Task.detached(priority: .utility) {
+            CodingSessionCollector.collect(cliPath: cliPath)
+        }.value
+        var fresh = outcome.snapshots
+        for agent in ["claude", "codex"] where fresh[agent] == nil {
+            if let previous = snapshots[agent] { fresh[agent] = previous }
+        }
+        let changed = fresh != snapshots
+        snapshots = fresh
+        lastError = outcome.errors.isEmpty ? nil : outcome.errors.joined(separator: "；")
+        if !fresh.isEmpty { lastSuccess = Date() }
+        return changed
+    }
+}
+
+private struct CodingSessionOutcome: Sendable {
+    let snapshots: [String: CodingSessionSnapshot]
+    let errors: [String]
+}
+
+private enum CodingSessionCollector {
+    /// 和页面「正在使用」的窗口保持一致。60 秒扫描一次，五分钟内有会话活动就点亮。
+    private static let activeWindow: TimeInterval = 5 * 60
+
+    nonisolated static func collect(cliPath: String) -> CodingSessionOutcome {
+        guard FileManager.default.isExecutableFile(atPath: cliPath) else {
+            return CodingSessionOutcome(snapshots: [:], errors: ["ccusage CLI 路径不可执行：\(cliPath)"])
+        }
+        var snapshots: [String: CodingSessionSnapshot] = [:]
+        var errors: [String] = []
+        for agent in ["claude", "codex"] {
+            do {
+                let data = try run(cliPath, [agent, "session", "--json", "--offline"])
+                guard let report = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+                    throw TelemetryModuleError.ccusage("\(agent) session 输出不是有效 JSON")
+                }
+                let sessions = report["sessions"] as? [[String: Any]] ?? []
+                let latest = sessions.max {
+                    ($0["lastActivity"] as? String ?? "") < ($1["lastActivity"] as? String ?? "")
+                }
+                let lastActivity = (latest?["lastActivity"] as? String)?.nilIfEmpty
+                let date = sessionDate(lastActivity)
+                let age = date.map { Date().timeIntervalSince($0) }
+                snapshots[agent] = CodingSessionSnapshot(
+                    currentModel: latest.flatMap(currentModel),
+                    lastActivityAt: lastActivity,
+                    active: age.map { $0 >= 0 && $0 <= activeWindow } ?? false
+                )
+            } catch {
+                errors.append("ccusage \(agent) session：\(error.localizedDescription)")
+            }
+        }
+        return CodingSessionOutcome(snapshots: snapshots, errors: errors)
+    }
+
+    nonisolated private static func run(_ executable: String, _ arguments: [String]) throws -> Data {
+        let process = Process()
+        let output = Pipe()
+        process.executableURL = URL(fileURLWithPath: executable)
+        process.arguments = arguments
+        process.standardOutput = output
+        process.standardError = FileHandle.nullDevice
+        var environment = ProcessInfo.processInfo.environment
+        let bin = URL(fileURLWithPath: executable).deletingLastPathComponent().path
+        environment["PATH"] = "\(bin):\(environment["PATH"] ?? "/usr/bin:/bin:/usr/sbin:/sbin")"
+        process.environment = environment
+        try process.run()
+        let data = output.fileHandleForReading.readDataToEndOfFile()
+        process.waitUntilExit()
+        guard process.terminationStatus == 0 else {
+            throw TelemetryModuleError.ccusage("退出码 \(process.terminationStatus)")
+        }
+        return data
+    }
+
+    nonisolated private static func currentModel(_ session: [String: Any]) -> String? {
+        if let models = session["models"] as? [String: [String: Any]] {
+            return models
+                .filter { !isHiddenModel($0.key, $0.value) }
+                .max { tokenCount($0.value) < tokenCount($1.value) }?.key
+        }
+        if let rows = session["modelBreakdowns"] as? [[String: Any]] {
+            return rows
+                .filter { row in
+                    guard let name = row["modelName"] as? String else { return false }
+                    return !isHiddenModel(name, row)
+                }
+                .max { tokenCount($0) < tokenCount($1) }?["modelName"] as? String
+        }
+        return (session["modelsUsed"] as? [String])?
+            .last { $0 != "codex-auto-review" }
+    }
+
+    nonisolated private static func isHiddenModel(_ name: String, _ row: [String: Any]) -> Bool {
+        name == "codex-auto-review" || row["isFallback"] as? Bool == true
+    }
+
+    nonisolated private static func tokenCount(_ row: [String: Any]) -> Double {
+        if let total = row["totalTokens"] as? NSNumber, total.doubleValue > 0 {
+            return total.doubleValue
+        }
+        return ["inputTokens", "outputTokens", "cacheReadTokens", "cacheCreationTokens"]
+            .reduce(0) { $0 + ((row[$1] as? NSNumber)?.doubleValue ?? 0) }
+    }
+
+    nonisolated private static func sessionDate(_ value: String?) -> Date? {
+        guard let value else { return nil }
+        let fractional = ISO8601DateFormatter()
+        fractional.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        return fractional.date(from: value) ?? ISO8601DateFormatter().date(from: value)
     }
 }
 
@@ -781,14 +930,20 @@ final class CodexBarCostMonitor: ObservableObject {
         cliPath: String,
         interval: Double,
         plans: [String: AgentPlanSnapshot],
-        limitErrors: [String: String]
+        limitErrors: [String: String],
+        sessions: [String: CodingSessionSnapshot]
     ) async {
         guard !refreshing else { return }
         // 套餐变了要立刻重采：plans 是随本地统计一起上报的，光等间隔门闩的话
         // 换套餐 / 额度跳档最长会被压 60 秒才发出去。
         if let lastAttempt, Date().timeIntervalSince(lastAttempt) < interval,
            plans == lastPlans { return }
-        _ = await refreshNow(cliPath: cliPath, plans: plans, limitErrors: limitErrors)
+        _ = await refreshNow(
+            cliPath: cliPath,
+            plans: plans,
+            limitErrors: limitErrors,
+            sessions: sessions
+        )
     }
 
     /// Bypasses the interval gate for an explicit user refresh, while preserving
@@ -797,7 +952,8 @@ final class CodexBarCostMonitor: ObservableObject {
     func refreshNow(
         cliPath: String,
         plans: [String: AgentPlanSnapshot],
-        limitErrors: [String: String]
+        limitErrors: [String: String],
+        sessions: [String: CodingSessionSnapshot]
     ) async -> Bool {
         guard !refreshing else { return false }
         refreshing = true
@@ -808,7 +964,8 @@ final class CodexBarCostMonitor: ObservableObject {
                 try CodexBarCostCollector.collect(
                     cliPath: cliPath,
                     plans: plans,
-                    limitErrors: limitErrors
+                    limitErrors: limitErrors,
+                    sessions: sessions
                 )
             }.value
             uploadPayload = collection.uploadPayload
@@ -822,6 +979,17 @@ final class CodexBarCostMonitor: ObservableObject {
         }
     }
 
+    /// 60 秒的 session 扫描只覆盖状态字段，不重跑 365 天 Token 扫描。
+    @discardableResult
+    func applySessions(_ sessions: [String: CodingSessionSnapshot]) -> Bool {
+        guard let uploadPayload else { return false }
+        let merged = CodexBarCostCollector.applyingSessions(sessions, to: uploadPayload)
+        guard merged != uploadPayload else { return false }
+        self.uploadPayload = merged
+        lastSuccess = Date()
+        return true
+    }
+
 }
 
 private struct CodexBarCostCollection: Sendable {
@@ -832,7 +1000,8 @@ private enum CodexBarCostCollector {
     nonisolated static func collect(
         cliPath: String,
         plans: [String: AgentPlanSnapshot],
-        limitErrors: [String: String]
+        limitErrors: [String: String],
+        sessions: [String: CodingSessionSnapshot]
     ) throws -> CodexBarCostCollection {
         guard FileManager.default.isExecutableFile(atPath: cliPath) else {
             throw TelemetryModuleError.codexBar("CodexBar CLI 路径不可执行：\(cliPath)")
@@ -857,11 +1026,45 @@ private enum CodexBarCostCollector {
             throw TelemetryModuleError.codexBar("cost 响应里没有 Claude/Codex 报告")
         }
         let uploadData = try JSONSerialization.data(
-            withJSONObject: makeUploadSummary(reports, plans: plans, limitErrors: limitErrors)
+            withJSONObject: makeUploadSummary(
+                reports,
+                plans: plans,
+                limitErrors: limitErrors,
+                sessions: sessions
+            )
         )
         return CodexBarCostCollection(
             uploadPayload: try JSONDecoder().decode(JSONValue.self, from: uploadData)
         )
+    }
+
+    nonisolated static func applyingSessions(
+        _ sessions: [String: CodingSessionSnapshot],
+        to payload: JSONValue
+    ) -> JSONValue {
+        guard case .object(var root) = payload,
+              case .array(let values) = root["agents"] else { return payload }
+        var changed = false
+        let agents = values.map { value -> JSONValue in
+            guard case .object(var agent) = value,
+                  case let .string(id) = agent["id"],
+                  let session = sessions[id] else { return value }
+            let currentModel = session.currentModel.map(JSONValue.string) ?? .null
+            let lastActivity = session.lastActivityAt.map(JSONValue.string) ?? .null
+            let active = JSONValue.bool(session.active)
+            if agent["currentModel"] != currentModel ||
+                agent["lastActivityAt"] != lastActivity || agent["active"] != active {
+                changed = true
+                agent["currentModel"] = currentModel
+                agent["lastActivityAt"] = lastActivity
+                agent["active"] = active
+            }
+            return .object(agent)
+        }
+        guard changed else { return payload }
+        root["agents"] = .array(agents)
+        root["collectedAt"] = .string(ISO8601DateFormatter().string(from: Date()))
+        return .object(root)
     }
 
     private static func run(_ executable: String, _ arguments: [String]) throws -> Data {
@@ -967,7 +1170,8 @@ private enum CodexBarCostCollector {
     private static func makeUploadSummary(
         _ reports: [String: Any],
         plans: [String: AgentPlanSnapshot],
-        limitErrors: [String: String]
+        limitErrors: [String: String],
+        sessions: [String: CodingSessionSnapshot]
     ) -> [String: Any] {
         let calendar = Calendar.current
         let today = calendar.startOfDay(for: Date())
@@ -997,6 +1201,7 @@ private enum CodexBarCostCollector {
             let todayText = dayString(today)
             let todayRow = preparedDay(recentByDate[todayText] ?? normalizedEmptyDay(date: todayText))
             let summary = report["usageSummary"] as? [String: Any] ?? [:]
+            let session = sessions[agent]
             let totals = normalizeTotals(report["totals"] as? [String: Any] ?? [:])
             let models = Set(allDays.flatMap { $0["models"] as? [String] ?? [] }).sorted()
 
@@ -1021,24 +1226,36 @@ private enum CodexBarCostCollector {
                 ]
             } ?? []
 
-            agents.append([
+            let currentModelValue: Any = session?.currentModel
+                ?? (summary["currentModel"] as? String) ?? NSNull()
+            let lastActivityValue: Any = session?.lastActivityAt ?? NSNull()
+            let topModelValue: Any = agentModelTotals
+                .filter { $0.value > 0 }
+                .max { $0.value < $1.value }?.key ?? NSNull()
+            let activityValue: Any = summary["activity"] ?? []
+            let limitsErrorValue: Any = limitErrors[agent] ?? NSNull()
+            let last30DaysTokens = recentDays.reduce(0.0) {
+                $0 + number($1["totalTokens"])
+            }
+            let agentValue: [String: Any] = [
                 "id": agent,
                 "label": agent == "claude" ? "Claude Code" : "Codex",
                 "models": models,
-                "currentModel": summary["currentModel"] ?? NSNull(),
+                "currentModel": currentModelValue,
+                "lastActivityAt": lastActivityValue,
+                "active": session?.active ?? false,
                 // 零用量的模型只是出现在 daily 里，不代表用过，不参与排名
-                "topModel": agentModelTotals
-                    .filter { $0.value > 0 }
-                    .max { $0.value < $1.value }?.key ?? NSNull(),
-                "activity": summary["activity"] ?? [],
+                "topModel": topModelValue,
+                "activity": activityValue,
                 "today": todayRow,
-                "last30DaysTokens": recentDays.reduce(0.0) { $0 + number($1["totalTokens"]) },
+                "last30DaysTokens": last30DaysTokens,
                 "plan": planValue,
                 "limits": limitValues,
                 // 空 limits 有两种含义：这个 agent 没配，或者配了但取不到。
                 // 页面得能分开 —— 前者该整块不渲染，后者该渲染并说明取不到。
-                "limitsError": limitErrors[agent] ?? NSNull(),
-            ])
+                "limitsError": limitsErrorValue,
+            ]
+            agents.append(agentValue)
         }
 
         aggregate["activeDays"] = Double(activeDates.count)
@@ -1197,12 +1414,14 @@ private enum CodexBarCostCollector {
 private enum TelemetryModuleError: LocalizedError {
     case appleMusic(String)
     case codexBar(String)
+    case ccusage(String)
     case agentLimits(String)
 
     var errorDescription: String? {
         switch self {
         case let .appleMusic(message): "Apple Music：\(message)"
         case let .codexBar(message): "CodexBar：\(message)"
+        case let .ccusage(message): "ccusage：\(message)"
         case let .agentLimits(message): "套餐额度：\(message)"
         }
     }

@@ -163,6 +163,7 @@ final class ServiceController: ObservableObject {
     let appleMusicAuthorization = AppleMusicAuthorizationManager()
     let codexBarCost = CodexBarCostMonitor()
     let agentLimits = AgentLimitsMonitor()
+    let codingSessions = CodingSessionMonitor()
     lazy private(set) var httpServer = LocalHTTPServer { [weak self] request in
         guard let self else { return .text("Unavailable\n", status: 503, reason: "Service Unavailable") }
         return await self.route(request)
@@ -270,6 +271,7 @@ final class ServiceController: ObservableObject {
         appleMusic.stop()
         codexBarCost.stop()
         agentLimits.stop()
+        codingSessions.stop()
         httpServer.stop()
         bluetooth.shutdown()
     }
@@ -331,18 +333,22 @@ final class ServiceController: ObservableObject {
         return true
     }
 
-    /// Re-runs both CodexBar commands, then immediately queues the fresh snapshot for upload.
+    /// Re-runs the two CodexBar commands plus the lightweight ccusage session scan, then
+    /// immediately queues the fresh snapshot for upload.
     /// The monitors retain their own single-flight guards; this flag only owns the button state.
     func refreshCodexBarNow() async {
         guard settings.codexBarModuleEnabled, !isRefreshingCodexBar else { return }
         isRefreshingCodexBar = true
         defer { isRefreshingCodexBar = false }
 
-        await agentLimits.refreshNow(codexBarPath: settings.codexBarCLIPath)
+        async let sessionRefresh = codingSessions.refreshNow(cliPath: settings.ccusageCLIPath)
+        async let limitsRefresh: Void = agentLimits.refreshNow(codexBarPath: settings.codexBarCLIPath)
+        _ = await (sessionRefresh, limitsRefresh)
         let refreshed = await codexBarCost.refreshNow(
             cliPath: settings.codexBarCLIPath,
             plans: agentLimits.plans,
-            limitErrors: agentLimits.limitErrors
+            limitErrors: agentLimits.limitErrors,
+            sessions: codingSessions.snapshots
         )
         guard refreshed else { return }
         _ = requestImmediateReport(.vibeCoding)
@@ -544,6 +550,7 @@ final class ServiceController: ObservableObject {
         if !settings.codexBarModuleEnabled {
             codexBarCost.stop()
             agentLimits.stop()
+            codingSessions.stop()
         }
     }
 
@@ -588,8 +595,14 @@ final class ServiceController: ObservableObject {
                     // 另带一个兜底重读补上不发通知的 seek。循环只管读它们留下的
                     // snapshot —— 变化时它们会把循环叫醒，没事件时按 tickInterval 转。
                     if settings.codexBarModuleEnabled {
-                        // 先刷限额：本地用量上传载荷要把 plan/limits 并进去，
-                        // 顺序反了这一轮发出去的就是上一轮的套餐快照。
+                        let sessionChanged = await codingSessions.refreshIfNeeded(
+                            cliPath: settings.ccusageCLIPath,
+                            interval: settings.codingSessionRefreshInterval
+                        )
+                        if sessionChanged {
+                            _ = codexBarCost.applySessions(codingSessions.snapshots)
+                        }
+                        // 先刷限额：本地用量上传载荷要把 plan/limits 并进去。
                         await agentLimits.refreshIfNeeded(
                             codexBarPath: settings.codexBarCLIPath,
                             interval: settings.agentLimitsRefreshInterval
@@ -598,7 +611,8 @@ final class ServiceController: ObservableObject {
                             cliPath: settings.codexBarCLIPath,
                             interval: settings.codexBarCostRefreshInterval,
                             plans: agentLimits.plans,
-                            limitErrors: agentLimits.limitErrors
+                            limitErrors: agentLimits.limitErrors,
+                            sessions: codingSessions.snapshots
                         )
                     }
 
@@ -1026,6 +1040,7 @@ final class ServiceController: ObservableObject {
             return encode([
                 "agentLimits": agentLimits.lastError,
                 "codexbar": codexBarCost.lastError,
+                "ccusageSessions": codingSessions.lastError,
                 "appleMusic": appleMusic.lastError,
                 "bluetooth": bluetooth.lastError,
                 "reporter": reporterLastError,

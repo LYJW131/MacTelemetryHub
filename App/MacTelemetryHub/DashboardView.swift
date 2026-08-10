@@ -281,7 +281,9 @@ struct DashboardView: View {
                 icon: "terminal",
                 enabled: service.settings.codexBarModuleEnabled,
                 value: codexBarCost.lastSuccess == nil ? "等待统计" : "聚合完成",
-                detail: codexBarCost.lastError ?? codexBarCost.lastSuccess?.formatted(date: .omitted, time: .standard),
+                detail: service.codingSessions.lastError
+                    ?? codexBarCost.lastError
+                    ?? codexBarCost.lastSuccess?.formatted(date: .omitted, time: .standard),
                 action: { Task { await service.refreshCodexBarNow() } },
                 actionIcon: "arrow.clockwise",
                 actionHelp: "重新采集并上报 CodexBar",
