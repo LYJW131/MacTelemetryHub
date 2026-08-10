@@ -620,8 +620,8 @@ private struct PortCard: View {
             .background(.primary.opacity(0.035))
 
             VStack(alignment: .leading, spacing: 3) {
-                Label(port.cable == "N/A" ? "未检测到线缆" : port.cable, systemImage: "cable.connector")
-                Text(port.chargingInfo == "N/A" ? "未识别充电协议" : port.chargingInfo)
+                Label(port.cable ?? "未检测到线缆", systemImage: "cable.connector")
+                Text(port.chargingInfo ?? "未识别充电协议")
                     .foregroundStyle(.secondary)
                 Text(displayModel ?? "未识别设备")
                     .fontWeight(.medium)

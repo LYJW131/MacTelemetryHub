@@ -6,8 +6,9 @@ public struct PortState: Codable, Equatable, Sendable {
     public var currentA: Double?
     public var powerW: Double?
     public var cableCode: String?
-    public var cable = "N/A"
-    public var chargingInfo = "N/A"
+    /// 没检测到线缆 / 没识别出协议时就是 nil，不用占位字符串 —— 和其它可选字段一致
+    public var cable: String?
+    public var chargingInfo: String?
     public var vendorID: UInt16?
     public var productID: UInt16?
     public var vendor: String?
@@ -61,8 +62,8 @@ public struct StatusPortPayload: Encodable, Equatable, Sendable {
     public let voltageV: Double?
     public let currentA: Double?
     public let powerW: Double?
-    public let cable: String
-    public let chargingInfo: String
+    public let cable: String?
+    public let chargingInfo: String?
     public let model: String?
     public let vendor: String?
 
@@ -76,8 +77,8 @@ public struct StatusPortPayload: Encodable, Equatable, Sendable {
         try container.encodeOptional(voltageV, forKey: .voltageV)
         try container.encodeOptional(currentA, forKey: .currentA)
         try container.encodeOptional(powerW, forKey: .powerW)
-        try container.encode(cable, forKey: .cable)
-        try container.encode(chargingInfo, forKey: .chargingInfo)
+        try container.encodeOptional(cable, forKey: .cable)
+        try container.encodeOptional(chargingInfo, forKey: .chargingInfo)
         try container.encodeOptional(model, forKey: .model)
         try container.encodeOptional(vendor, forKey: .vendor)
     }
@@ -149,9 +150,10 @@ public struct StatusPayload: Encodable, Equatable, Sendable {
 }
 
 public enum JSONCoding {
+    /// 键一律用驼峰，和 Swift 侧的属性名一致 —— 不再做蛇形转换，
+    /// 省掉「Swift 写驼峰、线上是蛇形、站点又得转回来」这一路心智负担。
     public static func encoder(pretty: Bool = false) -> JSONEncoder {
         let encoder = JSONEncoder()
-        encoder.keyEncodingStrategy = .convertToSnakeCase
         if pretty {
             encoder.outputFormatting = [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes]
         }

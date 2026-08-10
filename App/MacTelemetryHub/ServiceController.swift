@@ -4,10 +4,10 @@ import MusicKit
 
 enum TelemetryModule: String, CaseIterable, Hashable, Sendable {
     case desktop
-    case appleMusic = "apple_music"
+    case appleMusic
     case charger
     case timezone
-    case vibeCoding = "vibe_coding"
+    case vibeCoding
 
     var displayName: String {
         switch self {
@@ -963,11 +963,11 @@ final class ServiceController: ObservableObject {
 
     private var activeModuleNames: [String] {
         var names: [String] = []
-        if settings.chargerModuleEnabled { names.append("charger") }
-        if settings.desktopModuleEnabled { names.append("desktop") }
-        if settings.appleMusicModuleEnabled { names.append("apple_music") }
-        if settings.timezoneModuleEnabled { names.append("timezone") }
-        if settings.ccusageModuleEnabled { names.append("vibe_coding") }
+        if settings.chargerModuleEnabled { names.append(TelemetryModule.charger.rawValue) }
+        if settings.desktopModuleEnabled { names.append(TelemetryModule.desktop.rawValue) }
+        if settings.appleMusicModuleEnabled { names.append(TelemetryModule.appleMusic.rawValue) }
+        if settings.timezoneModuleEnabled { names.append(TelemetryModule.timezone.rawValue) }
+        if settings.ccusageModuleEnabled { names.append(TelemetryModule.vibeCoding.rawValue) }
         return names
     }
 
@@ -1129,8 +1129,6 @@ private struct AppleMusicAuthorizationPayload: Encodable, Sendable {
 
     private enum CodingKeys: String, CodingKey {
         case status, authorized
-        case hasUserToken = "has_user_token"
-        case lastError = "last_error"
-        case lastUploadAt = "last_upload_at"
+        case hasUserToken, lastError, lastUploadAt
     }
 }

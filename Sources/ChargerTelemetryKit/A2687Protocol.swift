@@ -352,14 +352,14 @@ public enum A2687Protocol {
         port.cableCode = code
         if let code {
             if code.uppercased().hasPrefix("03") {
-                port.cable = "N/A"
+                port.cable = nil
             } else {
                 port.cable = cableProfile(code)?.0 ?? "UNKNOWN (\(code))"
             }
         } else {
-            port.cable = port.connected ? "Connected" : "N/A"
+            port.cable = port.connected ? "Connected" : nil
         }
-        port.chargingInfo = port.connected ? (cableProfile(code)?.1 ?? "N/A") : "N/A"
+        port.chargingInfo = port.connected ? cableProfile(code)?.1 : nil
     }
 
     private static func applyIdentity(_ fields: [UInt8: TypedValue], state: inout ChargerState) -> Bool {

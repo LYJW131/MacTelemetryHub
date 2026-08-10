@@ -1160,7 +1160,9 @@ private enum CcusageCollector {
             }
         }
 
-        let bucketMs: Double = 12 * 60 * 60 * 1_000
+        // 一天一桶。原来是 12 小时，同一天被劈成两半，看曲线时得自己把相邻两根
+        // 加起来才对得上「今天用了多少」。桶数不变，跨度从 30 天变成 60 天。
+        let bucketMs: Double = 24 * 60 * 60 * 1_000
         let current = floor(Date().timeIntervalSince1970 * 1_000 / bucketMs) * bucketMs
         let start = current - 59 * bucketMs
         var activity = (0..<60).map { ["t": start + Double($0) * bucketMs, "tokens": 0.0] }
@@ -1213,11 +1215,6 @@ private enum CcusageCollector {
             let recentByDate = Dictionary(uniqueKeysWithValues: recentDays.compactMap { row in
                 (row["date"] as? String).map { ($0, row) }
             })
-            let last7Days = (0..<7).map { offset -> [String: Any] in
-                let date = calendar.date(byAdding: .day, value: offset - 6, to: today) ?? today
-                let key = dayString(date)
-                return preparedDay(recentByDate[key] ?? normalizedEmptyDay(date: key))
-            }
             let todayText = dayString(today)
             let todayRow = preparedDay(recentByDate[todayText] ?? normalizedEmptyDay(date: todayText))
             let summary = report["sessionSummary"] as? [String: Any] ?? [:]
@@ -1230,9 +1227,9 @@ private enum CcusageCollector {
             }
             addTotals(totals, to: &aggregate)
 
-            // 套餐 / 额度必须从这条 [String: Any] 路走。直接把 AgentPlanSnapshot 当
-            // Codable 编进 JSONValue 的话，编码器的 .convertToSnakeCase 会把
-            // CodingKeys 转成蛇形，站点那边的白名单读不到就静默丢掉。
+            // 套餐 / 额度走 [String: Any] 这条路。历史原因是编码器当年开着
+            // .convertToSnakeCase，Codable 结构会被转成蛇形、站点白名单读不到；
+            // 现在编码器不转了，这条路只是还没回头改成 Codable。
             let plan = plans[agent]
             let planValue: Any = plan.map { ["tier": $0.tier, "label": $0.label] } ?? NSNull()
             let limitValues: [[String: Any]] = plan?.limits.map { window in
@@ -1258,7 +1255,6 @@ private enum CcusageCollector {
                 "lastActivityAt": summary["lastActivity"] ?? NSNull(),
                 "activity": summary["activity"] ?? [],
                 "today": todayRow,
-                "last7Days": last7Days,
                 "last30DaysTokens": recentDays.reduce(0.0) { $0 + number($1["totalTokens"]) },
                 "plan": planValue,
                 "limits": limitValues,

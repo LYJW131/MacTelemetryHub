@@ -64,22 +64,22 @@ import Testing
     #expect(payload.ports["C3"]?.voltageV == 19.86)
     #expect(payload.ports["C3"]?.currentA == 0.77)
     let object = try #require(JSONSerialization.jsonObject(with: JSONCoding.encoder().encode(payload)) as? [String: Any])
-    #expect(Set(object.keys) == ["connected", "updated_at", "total_output_power_w", "device", "ports"])
+    #expect(Set(object.keys) == ["connected", "updatedAt", "totalOutputPowerW", "device", "ports"])
     let port = try #require((object["ports"] as? [String: Any])?["C3"] as? [String: Any])
-    #expect(Set(port.keys) == ["mode", "voltage_v", "current_a", "power_w", "cable", "charging_info", "model", "vendor"])
+    #expect(Set(port.keys) == ["mode", "voltageV", "currentA", "powerW", "cable", "chargingInfo", "model", "vendor"])
 }
 
 @Test func disconnectedStatusStillContainsEveryNullableField() throws {
     let object = try #require(JSONSerialization.jsonObject(
         with: JSONCoding.encoder().encode(StatusPayload(connected: false, state: ChargerState()))
     ) as? [String: Any])
-    #expect(Set(object.keys) == ["connected", "updated_at", "total_output_power_w", "device", "ports"])
-    #expect(object["updated_at"] is NSNull)
-    #expect(object["total_output_power_w"] is NSNull)
+    #expect(Set(object.keys) == ["connected", "updatedAt", "totalOutputPowerW", "device", "ports"])
+    #expect(object["updatedAt"] is NSNull)
+    #expect(object["totalOutputPowerW"] is NSNull)
     let device = try #require(object["device"] as? [String: Any])
-    #expect(Set(device.keys) == ["serial_number", "mac_address", "firmware_version"])
+    #expect(Set(device.keys) == ["serialNumber", "macAddress", "firmwareVersion"])
     let c1 = try #require((object["ports"] as? [String: Any])?["C1"] as? [String: Any])
-    #expect(Set(c1.keys) == ["mode", "voltage_v", "current_a", "power_w", "cable", "charging_info", "model", "vendor"])
+    #expect(Set(c1.keys) == ["mode", "voltageV", "currentA", "powerW", "cable", "chargingInfo", "model", "vendor"])
 }
 
 @Test func realtimeParserDecodesPortCableAndObservedAppleIdentity() throws {
