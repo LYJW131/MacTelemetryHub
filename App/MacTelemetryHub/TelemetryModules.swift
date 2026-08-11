@@ -192,7 +192,7 @@ private enum CodingSessionCollector {
 struct DesktopActivitySnapshot: Codable, Equatable, Sendable {
     let applicationName: String
     let bundleIdentifier: String?
-    /// 缩放后 PNG 的内容指纹；协议用它引用图标，`iconData` 仅是服务端兼容回退。
+    /// 缩放后 WebP 的内容指纹；协议用它引用 R2 对象。
     let iconHash: String?
     let iconData: Data?
     /// 本机直传 R2 后的对象键；有它时上报器不再把二进制塞进遥测 JSON。
@@ -332,7 +332,7 @@ final class DesktopActivityMonitor: ObservableObject {
         if let cached = iconCache[iconKey] {
             iconData = cached
         } else {
-            iconData = Self.pngData(for: app.icon)
+            iconData = Self.webPData(for: app.icon)
             if let iconData { iconCache[iconKey] = iconData }
         }
         snapshot = DesktopActivitySnapshot(
@@ -352,22 +352,46 @@ final class DesktopActivityMonitor: ObservableObject {
         SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
     }
 
-    private static func pngData(for icon: NSImage?) -> Data? {
+    private static func webPData(for icon: NSImage?) -> Data? {
         guard let icon else { return nil }
         /**
-         * 128pt 在 Retina 上会渲成 256px、约 125KB，而网页那个位置只有 40 CSS px。
-         * 站点入口还会再压一道，但没必要先把这么大一坨传上去 —— 换一次前台应用
-         * 就是一次上传。64pt（Retina 上 128px）已经比展示所需的 80px 富余。
+         * 网页只显示 40 CSS px，96px 已经覆盖 Retina 所需的 80px 并留有余量。
+         * 这里一次性缩放并转成 WebP；R2 收到的就是最终文件，站点不再二次处理。
          */
-        let size = NSSize(width: 64, height: 64)
+        let size = NSSize(width: 96, height: 96)
         let resized = NSImage(size: size)
         resized.lockFocus()
         NSGraphicsContext.current?.imageInterpolation = .high
         icon.draw(in: NSRect(origin: .zero, size: size))
         resized.unlockFocus()
-        guard let tiff = resized.tiffRepresentation,
-              let bitmap = NSBitmapImageRep(data: tiff) else { return nil }
-        return bitmap.representation(using: .png, properties: [:])
+        guard let source = resized.tiffRepresentation else { return nil }
+
+        // macOS 的 ImageIO 能读 WebP、不能写 WebP；本地上报器直接调用已安装的
+        // libwebp 编码器。只传 stdin/stdout，不产生临时文件。
+        let candidates = ["/opt/homebrew/bin/cwebp", "/usr/local/bin/cwebp"]
+        guard let executable = candidates.first(where: FileManager.default.isExecutableFile(atPath:))
+        else { return nil }
+
+        let process = Process()
+        let input = Pipe()
+        let output = Pipe()
+        process.executableURL = URL(fileURLWithPath: executable)
+        process.arguments = ["-quiet", "-q", "82", "-resize", "96", "96", "-o", "-", "--", "-"]
+        process.standardInput = input
+        process.standardOutput = output
+        process.standardError = FileHandle.nullDevice
+
+        do {
+            try process.run()
+            try input.fileHandleForWriting.write(contentsOf: source)
+            try input.fileHandleForWriting.close()
+            let webP = try output.fileHandleForReading.readToEnd() ?? Data()
+            process.waitUntilExit()
+            return process.terminationStatus == 0 && !webP.isEmpty ? webP : nil
+        } catch {
+            process.terminate()
+            return nil
+        }
     }
 }
 

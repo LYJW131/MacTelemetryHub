@@ -44,8 +44,7 @@ envelope and may contain only the modules that have fresh data:
       "applicationName": "Safari",
       "bundleIdentifier": "com.apple.Safari",
       "iconHash": "<sha256>",
-      "iconObjectKey": "<sha256>.png, when direct R2 upload is configured>",
-      "iconData": "<base64 fallback when direct R2 upload is unavailable>"
+      "iconObjectKey": "<sha256>.webp"
     },
     "appleMusic": {},
     "timezone": {},
@@ -56,10 +55,10 @@ envelope and may contain only the modules that have fresh data:
 ```
 
 Version 4 is the only accepted contract; desktop icons are addressed by SHA-256.
-When the optional local R2 configuration is complete, the Mac signs an S3-compatible
-PUT and uploads the PNG directly to the R2 bucket, then sends only `iconObjectKey`.
-The R2 access key and secret are stored in macOS Keychain. Without that configuration,
-the existing `iconData` path remains available as a compatibility fallback.
+The Mac renders each icon at 96 px, encodes it once as WebP, signs an S3-compatible
+PUT, uploads `<sha256>.webp` directly to R2, and sends only `iconObjectKey`.
+The R2 access key and secret are stored in macOS Keychain. There is no base64 fallback;
+the server never receives image bytes.
 
 An envelope with no `modules` (or an empty one) is a pure heartbeat: it refreshes
 liveness without touching any module's timestamp. One is sent every 30 s while

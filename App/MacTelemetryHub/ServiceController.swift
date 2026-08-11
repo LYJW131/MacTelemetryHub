@@ -70,7 +70,7 @@ private enum R2IconUploader {
         let canonicalPath = URLComponents(url: objectURL, resolvingAgainstBaseURL: false)?.percentEncodedPath
             ?? objectURL.path
         let canonicalHeaders = [
-            "content-type:image/png",
+            "content-type:image/webp",
             "host:\(host)",
             "x-amz-content-sha256:\(payloadHash)",
             "x-amz-date:\(amzDate)",
@@ -105,7 +105,7 @@ private enum R2IconUploader {
         request.httpMethod = "PUT"
         request.httpBody = data
         request.timeoutInterval = timeout
-        request.setValue("image/png", forHTTPHeaderField: "Content-Type")
+        request.setValue("image/webp", forHTTPHeaderField: "Content-Type")
         request.setValue("public, max-age=31536000, immutable", forHTTPHeaderField: "Cache-Control")
         request.setValue(payloadHash, forHTTPHeaderField: "x-amz-content-sha256")
         request.setValue(amzDate, forHTTPHeaderField: "x-amz-date")
@@ -924,7 +924,7 @@ final class ServiceController: ObservableObject {
                             if let iconHash = desktop.iconHash,
                                let iconData = desktop.iconData,
                                let r2Configuration = R2IconUploader.configuration(settings: settings) {
-                                let iconObjectKey = "\(iconHash).png"
+                                let iconObjectKey = "\(iconHash).webp"
                                 if shouldSendIcon {
                                     try await R2IconUploader.upload(
                                         data: iconData,
@@ -937,8 +937,8 @@ final class ServiceController: ObservableObject {
                                 // R2 已经由本机直传；网站端只接收对象键，不再接收图片二进制。
                                 desktopPayload = desktop.withIconData(nil, iconObjectKey: iconObjectKey)
                             } else {
-                                // 未配置本机 R2 时保留旧链路，兼容现有安装和临时降级。
-                                desktopPayload = desktop.withIconData(shouldSendIcon ? desktop.iconData : nil)
+                                // 图片只允许上报器直传 R2；未配置时不再回退成 base64 交给站点处理。
+                                desktopPayload = desktop.withIconData(nil)
                             }
                         } else {
                             desktopPayload = nil
