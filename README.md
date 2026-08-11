@@ -68,7 +68,7 @@ receiving duplicate charger, desktop, music, or CodexBar snapshots.
 Token、费用和限额来自 CodexBar；ccusage 只离线读取最近会话时间与模型，用来判断
 Claude Code / Codex 是否正在使用，不上传 session ID、项目路径、提示词或回复：
 
-- `cost --provider both --provider-native-only --days 365 --format json --refresh`
+- `cost --provider both --provider-native-only --days 30 --format json --refresh`
   reads Claude and Codex local logs in one process and supplies token/cost history.
 - `usage --provider both --source auto --no-credits --format json` reads Claude
   and Codex plan tiers and server-side quota windows.

@@ -1109,7 +1109,7 @@ final class CodexBarCostMonitor: ObservableObject {
         }
     }
 
-    /// 60 秒的 session 扫描只覆盖状态字段与 session 总数，不重跑 365 天 Token 扫描。
+    /// 60 秒的 session 扫描只覆盖状态字段与 session 总数，不重跑 30 天 Token 扫描。
     @discardableResult
     func applySessions(_ sessions: [String: CodingSessionSnapshot]) -> Bool {
         guard let uploadPayload else { return false }
@@ -1139,7 +1139,7 @@ private enum CodexBarCostCollector {
 
         let commandOutput = try run(cliPath, [
             "cost", "--provider", "both", "--provider-native-only",
-            "--days", "365", "--format", "json", "--refresh",
+            "--days", "30", "--format", "json", "--refresh",
         ])
         guard let rows = try JSONSerialization.jsonObject(with: commandOutput) as? [[String: Any]] else {
             throw TelemetryModuleError.codexBar("cost 输出不是有效 JSON")
