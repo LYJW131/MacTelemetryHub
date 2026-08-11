@@ -56,7 +56,7 @@ with PNG bytes included only when that hash is not already stored by the receive
 There is no legacy payload fallback.
 The POST body is deliberately bounded. The app discards CodexBar's project-level
 details after parsing and uploads only display-ready totals, seven daily points,
-30-day token totals, and 60 daily activity buckets. Token inspection stays in
+365-day token totals, and 30 daily activity buckets. Token inspection stays in
 CodexBar's own GUI; Mac Telemetry Hub only shows the collector's health. That
 module is sent again only after CodexBar refreshes, while the smaller live
 modules are also sent only when their display content changes. Presence uses its
@@ -68,7 +68,7 @@ receiving duplicate charger, desktop, music, or CodexBar snapshots.
 Token、费用和限额来自 CodexBar；ccusage 只离线读取最近会话时间与模型，用来判断
 Claude Code / Codex 是否正在使用，不上传 session ID、项目路径、提示词或回复：
 
-- `cost --provider both --provider-native-only --days 30 --format json --refresh`
+- `cost --provider both --provider-native-only --days 365 --format json --refresh`
   reads Claude and Codex local logs in one process and supplies token/cost history.
 - `usage --provider both --source auto --no-credits --format json` reads Claude
   and Codex plan tiers and server-side quota windows.

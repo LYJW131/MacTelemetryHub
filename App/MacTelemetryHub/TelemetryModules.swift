@@ -1109,7 +1109,7 @@ final class CodexBarCostMonitor: ObservableObject {
         }
     }
 
-    /// 60 秒的 session 扫描只覆盖状态字段与 session 总数，不重跑 30 天 Token 扫描。
+    /// 60 秒的 session 扫描只覆盖状态字段与 session 总数，不重跑 365 天 Token 扫描。
     @discardableResult
     func applySessions(_ sessions: [String: CodingSessionSnapshot]) -> Bool {
         guard let uploadPayload else { return false }
@@ -1139,7 +1139,7 @@ private enum CodexBarCostCollector {
 
         let commandOutput = try run(cliPath, [
             "cost", "--provider", "both", "--provider-native-only",
-            "--days", "30", "--format", "json", "--refresh",
+            "--days", "365", "--format", "json", "--refresh",
         ])
         guard let rows = try JSONSerialization.jsonObject(with: commandOutput) as? [[String: Any]] else {
             throw TelemetryModuleError.codexBar("cost 输出不是有效 JSON")
@@ -1282,16 +1282,20 @@ private enum CodexBarCostCollector {
             }
         }
 
-        // 一天一桶。原来是 12 小时，同一天被劈成两半，看曲线时得自己把相邻两根
-        // 加起来才对得上「今天用了多少」。桶数不变，跨度从 30 天变成 60 天。
-        let bucketMs: Double = 24 * 60 * 60 * 1_000
-        let current = floor(Date().timeIntervalSince1970 * 1_000 / bucketMs) * bucketMs
-        let start = current - 59 * bucketMs
-        var activity = (0..<60).map { ["t": start + Double($0) * bucketMs, "tokens": 0.0] }
+        // 趋势图只画最近 30 个本地自然日，一天一桶。总量、费用和模型排行仍使用
+        // cost 命令返回的完整 365 天数据；这里只裁图表，避免横轴前半段被零值占满。
+        let calendar = Calendar.current
+        let current = calendar.startOfDay(for: Date())
+        let start = calendar.date(byAdding: .day, value: -29, to: current) ?? current
+        var activity = (0..<30).map { offset in
+            let date = calendar.date(byAdding: .day, value: offset, to: start) ?? start
+            return ["t": date.timeIntervalSince1970 * 1_000, "tokens": 0.0]
+        }
         for day in days {
             guard let date = dayDate(day["date"] as? String) else { continue }
-            let timestamp = date.timeIntervalSince1970 * 1_000
-            let index = Int(floor((timestamp - start) / bucketMs))
+            guard let index = calendar.dateComponents([.day], from: start, to: date).day else {
+                continue
+            }
             if activity.indices.contains(index) {
                 activity[index]["tokens"] = (activity[index]["tokens"] ?? 0) + number(day["totalTokens"])
             }
