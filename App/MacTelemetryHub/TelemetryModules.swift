@@ -192,10 +192,18 @@ private enum CodingSessionCollector {
 struct DesktopActivitySnapshot: Codable, Equatable, Sendable {
     let applicationName: String
     let bundleIdentifier: String?
-    /// 缩放后 WebP 的内容指纹；协议用它引用 R2 对象。
+    /**
+     * 这个应用的图标身份，取自**源图标**而不是编码产物。
+     *
+     * 关键在于：应用有图标它就非空，哪怕缩放/编码失败、哪怕还没传上 R2。
+     * 从前它取自编码后的字节，于是「这个应用没有图标」和「图标没准备好」在
+     * 协议上长得一模一样，站点把后者也当成一切正常，补传信号永远发不出来 ——
+     * 实测因此整批图标静默消失，且不报错、不重试。
+     */
     let iconHash: String?
+    /// 待上传的编码产物。只在本机流转，发出去之前一定被置空。
     let iconData: Data?
-    /// 本机直传 R2 后的对象键；有它时上报器不再把二进制塞进遥测 JSON。
+    /// 直传 R2 成功后的对象键（`<sha256>.png`），是那份字节的内容地址。
     let iconObjectKey: String?
     let observedAt: Int64
 }
@@ -295,7 +303,12 @@ final class DesktopActivityMonitor: ObservableObject {
     /// snapshot 变化时通知上报循环，让它别干等到下一个周期
     var onChange: (() -> Void)?
     private var observer: NSObjectProtocol?
-    private var iconCache: [String: Data] = [:]
+    /// 一个应用的图标：身份指纹 + 待上传的 PNG（编码失败时 png 为 nil）
+    struct IconEntry {
+        let identity: String
+        let png: Data?
+    }
+    private var iconCache: [String: IconEntry] = [:]
 
     /// 前台应用完全由 `didActivateApplicationNotification` 驱动，没有兜底轮询 ——
     /// 前台是谁这件事不存在「不发通知的变化」，不像音乐的进度还要防着 seek。
@@ -328,18 +341,31 @@ final class DesktopActivityMonitor: ObservableObject {
     func capture(_ activated: NSRunningApplication? = nil) {
         guard let app = activated ?? NSWorkspace.shared.frontmostApplication else { return }
         let iconKey = app.bundleIdentifier ?? app.bundleURL?.path ?? app.localizedName ?? "unknown"
-        let iconData: Data?
+
+        /*
+         * 身份和字节一起缓存。
+         *
+         * 身份取自源图标的 TIFF，那玩意儿动辄上兆，每次 Cmd-Tab 都算一遍 SHA-256
+         * 纯属浪费；一个应用一进程只算一次就够。跨进程重启后 TIFF 字节未必逐位
+         * 相同，那样最多多传一次 —— 对象是内容寻址的，落到 R2 还是同一个键。
+         */
+        let entry: IconEntry?
         if let cached = iconCache[iconKey] {
-            iconData = cached
+            entry = cached
+        } else if let icon = app.icon {
+            entry = IconEntry(identity: Self.sha256Hex(icon.tiffRepresentation ?? Data()),
+                              png: Self.pngData(for: icon))
+            iconCache[iconKey] = entry
         } else {
-            iconData = Self.webPData(for: app.icon)
-            if let iconData { iconCache[iconKey] = iconData }
+            // 应用真的没有图标。这才是 iconHash 允许为空的唯一情形。
+            entry = nil
         }
+
         snapshot = DesktopActivitySnapshot(
             applicationName: app.localizedName ?? "Unknown",
             bundleIdentifier: app.bundleIdentifier,
-            iconHash: iconData.map(Self.sha256Hex),
-            iconData: iconData,
+            iconHash: entry?.identity,
+            iconData: entry?.png,
             iconObjectKey: nil,
             observedAt: Self.nowMilliseconds
         )
@@ -352,46 +378,48 @@ final class DesktopActivityMonitor: ObservableObject {
         SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
     }
 
-    private static func webPData(for icon: NSImage?) -> Data? {
-        guard let icon else { return nil }
-        /**
-         * 网页只显示 40 CSS px，96px 已经覆盖 Retina 所需的 80px 并留有余量。
-         * 这里一次性缩放并转成 WebP；R2 收到的就是最终文件，站点不再二次处理。
+    /**
+     * 图标编码。用系统原生的 PNG 写出，不依赖任何外部二进制。
+     *
+     * 从前这里 fork 出 Homebrew 的 cwebp：签名 app 里那个子进程起不来，返回 nil，
+     * 而 nil 一路被下游当成「这个应用没图标」，于是整批图标静默消失。图标是
+     * 大片纯色加硬边缘的小图，PNG 无损、96px 也就十几 KB，没必要为它引一个
+     * 装不装全看运气的外部依赖。
+     *
+     * 网页只显示 40 CSS px，96px 覆盖 Retina 所需的 80px 还有余量。
+     */
+    private static func pngData(for icon: NSImage) -> Data? {
+        /*
+         * 画进一个显式的 96×96 位图，而不是 NSImage(size:) + lockFocus。
+         *
+         * 后者的后备存储跟着屏幕缩放走：Retina 上会悄悄画成 192×192，出来的 PNG
+         * 有 96KB，而网页上那个位置只有 40 CSS px。显式指定像素数就与屏幕无关，
+         * 换台机器采出来的字节也一致（内容寻址，字节一致才不会白白多出一个对象）。
          */
-        let size = NSSize(width: 96, height: 96)
-        let resized = NSImage(size: size)
-        resized.lockFocus()
-        NSGraphicsContext.current?.imageInterpolation = .high
-        icon.draw(in: NSRect(origin: .zero, size: size))
-        resized.unlockFocus()
-        guard let source = resized.tiffRepresentation else { return nil }
+        let pixels = 96
+        guard let bitmap = NSBitmapImageRep(
+            bitmapDataPlanes: nil,
+            pixelsWide: pixels,
+            pixelsHigh: pixels,
+            bitsPerSample: 8,
+            samplesPerPixel: 4,
+            hasAlpha: true,
+            isPlanar: false,
+            colorSpaceName: .deviceRGB,
+            bytesPerRow: 0,
+            bitsPerPixel: 0
+        ) else { return nil }
+        bitmap.size = NSSize(width: pixels, height: pixels)
 
-        // macOS 的 ImageIO 能读 WebP、不能写 WebP；本地上报器直接调用已安装的
-        // libwebp 编码器。只传 stdin/stdout，不产生临时文件。
-        let candidates = ["/opt/homebrew/bin/cwebp", "/usr/local/bin/cwebp"]
-        guard let executable = candidates.first(where: FileManager.default.isExecutableFile(atPath:))
-        else { return nil }
+        NSGraphicsContext.saveGraphicsState()
+        defer { NSGraphicsContext.restoreGraphicsState() }
+        guard let context = NSGraphicsContext(bitmapImageRep: bitmap) else { return nil }
+        NSGraphicsContext.current = context
+        context.imageInterpolation = .high
+        icon.draw(in: NSRect(x: 0, y: 0, width: pixels, height: pixels))
+        context.flushGraphics()
 
-        let process = Process()
-        let input = Pipe()
-        let output = Pipe()
-        process.executableURL = URL(fileURLWithPath: executable)
-        process.arguments = ["-quiet", "-q", "82", "-resize", "96", "96", "-o", "-", "--", "-"]
-        process.standardInput = input
-        process.standardOutput = output
-        process.standardError = FileHandle.nullDevice
-
-        do {
-            try process.run()
-            try input.fileHandleForWriting.write(contentsOf: source)
-            try input.fileHandleForWriting.close()
-            let webP = try output.fileHandleForReading.readToEnd() ?? Data()
-            process.waitUntilExit()
-            return process.terminationStatus == 0 && !webP.isEmpty ? webP : nil
-        } catch {
-            process.terminate()
-            return nil
-        }
+        return bitmap.representation(using: .png, properties: [:])
     }
 }
 

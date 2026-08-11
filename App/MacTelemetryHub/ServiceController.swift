@@ -46,6 +46,33 @@ private enum R2IconUploader {
         )
     }
 
+    /**
+     * 先问一句桶里有没有。
+     *
+     * 上报器手上本来就有写凭据，一个图标一辈子只问这一次（问过就记在
+     * uploadedDesktopIconHashes 里），代价可以忽略；换来的是桶被清空、
+     * 换机器、重启之后不必依赖站点回执就能自己发现要补传。
+     */
+    static func exists(
+        objectKey: String,
+        configuration: R2UploadConfiguration,
+        timeout: TimeInterval
+    ) async -> Bool {
+        guard let url = try? objectURL(
+            endpoint: configuration.endpoint,
+            bucket: configuration.bucket,
+            objectKey: objectKey
+        ) else { return false }
+        var request = URLRequest(url: url)
+        request.httpMethod = "HEAD"
+        request.timeoutInterval = timeout
+        sign(&request, payloadHash: emptyPayloadHash, contentType: nil,
+             method: "HEAD", url: url, configuration: configuration)
+        guard let (_, response) = try? await URLSession.shared.data(for: request),
+              let http = response as? HTTPURLResponse else { return false }
+        return (200..<300).contains(http.statusCode)
+    }
+
     static func upload(
         data: Data,
         contentHash: String,
@@ -61,22 +88,70 @@ private enum R2IconUploader {
             bucket: configuration.bucket,
             objectKey: objectKey
         )
-        let host = hostHeader(for: objectURL)
-        let payloadHash = actualHash
+        var request = URLRequest(url: objectURL)
+        request.httpMethod = "PUT"
+        request.httpBody = data
+        request.timeoutInterval = timeout
+        // 内容寻址 = 不可变，让浏览器和 Cloudflare 边缘放心缓存一年
+        request.setValue("public, max-age=31536000, immutable", forHTTPHeaderField: "Cache-Control")
+        sign(&request, payloadHash: actualHash, contentType: contentType(for: objectKey),
+             method: "PUT", url: objectURL, configuration: configuration)
+
+        let (responseData, response) = try await URLSession.shared.data(for: request)
+        guard let http = response as? HTTPURLResponse else {
+            throw UploadError.httpStatus(0, "R2 返回了无效响应")
+        }
+        guard (200..<300).contains(http.statusCode) else {
+            let detail = String(data: responseData.prefix(512), encoding: .utf8) ?? ""
+            throw UploadError.httpStatus(http.statusCode, detail)
+        }
+    }
+
+    /// 编码产物的内容地址。身份哈希标识「哪个应用的图标」，这个标识「哪份字节」
+    static func objectKey(for data: Data) -> String { "\(sha256Hex(data)).png" }
+
+    static func contentHash(of data: Data) -> String { sha256Hex(data) }
+
+    /// 空请求体的 payload 哈希，SigV4 里 HEAD/GET 用它
+    private static let emptyPayloadHash =
+        "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+
+    /// 对象键的扩展名决定 Content-Type；键本身是内容地址，扩展名就是事实
+    private static func contentType(for objectKey: String) -> String {
+        objectKey.hasSuffix(".png") ? "image/png" : "image/webp"
+    }
+
+    /**
+     * SigV4 签名。HEAD 和 PUT 共用一份，免得两处各写一遍再慢慢分家。
+     *
+     * `Cache-Control` 有意不进签名头列表：SigV4 只要求签 host 和 x-amz-*，
+     * 多发的头不参与签名，R2 也认（实测 200）。
+     */
+    private static func sign(
+        _ request: inout URLRequest,
+        payloadHash: String,
+        contentType: String?,
+        method: String,
+        url: URL,
+        configuration: R2UploadConfiguration
+    ) {
         let amzDate = timestamp()
         let shortDate = String(amzDate.prefix(8))
         let scope = "\(shortDate)/auto/s3/aws4_request"
-        let signedHeaders = "content-type;host;x-amz-content-sha256;x-amz-date"
-        let canonicalPath = URLComponents(url: objectURL, resolvingAgainstBaseURL: false)?.percentEncodedPath
-            ?? objectURL.path
-        let canonicalHeaders = [
-            "content-type:image/webp",
-            "host:\(host)",
-            "x-amz-content-sha256:\(payloadHash)",
-            "x-amz-date:\(amzDate)",
-        ].joined(separator: "\n") + "\n"
+        let canonicalPath = URLComponents(url: url, resolvingAgainstBaseURL: false)?.percentEncodedPath
+            ?? url.path
+
+        var headers: [(String, String)] = [("host", hostHeader(for: url))]
+        if let contentType { headers.append(("content-type", contentType)) }
+        headers.append(("x-amz-content-sha256", payloadHash))
+        headers.append(("x-amz-date", amzDate))
+        // 规范请求要求签名头按字典序排列
+        headers.sort { $0.0 < $1.0 }
+
+        let signedHeaders = headers.map(\.0).joined(separator: ";")
+        let canonicalHeaders = headers.map { "\($0.0):\($0.1)" }.joined(separator: "\n") + "\n"
         let canonicalRequest = [
-            "PUT",
+            method,
             canonicalPath,
             "",
             canonicalHeaders,
@@ -101,27 +176,13 @@ private enum R2IconUploader {
         )
         let signature = hex(hmac(signingKey, stringToSign))
 
-        var request = URLRequest(url: objectURL)
-        request.httpMethod = "PUT"
-        request.httpBody = data
-        request.timeoutInterval = timeout
-        request.setValue("image/webp", forHTTPHeaderField: "Content-Type")
-        request.setValue("public, max-age=31536000, immutable", forHTTPHeaderField: "Cache-Control")
+        if let contentType { request.setValue(contentType, forHTTPHeaderField: "Content-Type") }
         request.setValue(payloadHash, forHTTPHeaderField: "x-amz-content-sha256")
         request.setValue(amzDate, forHTTPHeaderField: "x-amz-date")
         request.setValue(
             "AWS4-HMAC-SHA256 Credential=\(configuration.accessKeyID)/\(scope), SignedHeaders=\(signedHeaders), Signature=\(signature)",
             forHTTPHeaderField: "Authorization"
         )
-
-        let (responseData, response) = try await URLSession.shared.data(for: request)
-        guard let http = response as? HTTPURLResponse else {
-            throw UploadError.httpStatus(0, "R2 返回了无效响应")
-        }
-        guard (200..<300).contains(http.statusCode) else {
-            let detail = String(data: responseData.prefix(512), encoding: .utf8) ?? ""
-            throw UploadError.httpStatus(http.statusCode, detail)
-        }
     }
 
     private static func objectURL(endpoint: URL, bucket: String, objectKey: String) throws -> URL {
@@ -358,6 +419,9 @@ final class ServiceController: ObservableObject {
     private var lastPostedDesktop: DesktopUploadSignature?
     /// 这个上报会话里服务端已经确认保存的图标内容指纹。
     private var uploadedDesktopIconHashes: Set<String> = []
+    /// 图标直传连续失败次数，按身份哈希记。到上限就不再试，避免打成热循环
+    private var iconUploadAttempts: [String: Int] = [:]
+    private static let maxIconUploadAttempts = 3
     private var uploadedDesktopIconOrder: [String] = []
     private var lastPostedTimeZone: TimeZoneUploadSignature?
     private var lastPostedAppleMusic: AppleMusicUploadSignature?
@@ -918,28 +982,51 @@ final class ServiceController: ObservableObject {
                     if let url, anythingChanged, shouldPost {
                         let desktopPayload: DesktopActivitySnapshot?
                         if let desktop {
-                            let shouldSendIcon = desktop.iconHash.map {
-                                !uploadedDesktopIconHashes.contains($0)
-                            } ?? false
+                            /*
+                             * 图标直传。三条铁律：
+                             *
+                             * 1. 传失败不许连累整份遥测 —— 图片是这里面最不重要的一块，
+                             *    没有权力否决充电头、时区、音乐和 vibe coding 的上报。
+                             *    所以整段包在 do/catch 里，失败就是「这轮没有对象键」。
+                             * 2. 传之前先问桶里有没有。对象是内容寻址的，桶里已经有就直接用，
+                             *    一个图标一辈子只问这一次。
+                             * 3. 反复失败要收手。站点收不到图会回 desktopIconAvailable=false，
+                             *    那条路会把 lastPostedDesktop 清空并立刻叫醒下一轮；真要是
+                             *    永远成功不了（比如凭据错了），不设上限就是一个打站点的热循环。
+                             */
+                            var iconObjectKey: String?
                             if let iconHash = desktop.iconHash,
                                let iconData = desktop.iconData,
-                               let r2Configuration = R2IconUploader.configuration(settings: settings) {
-                                let iconObjectKey = "\(iconHash).webp"
-                                if shouldSendIcon {
-                                    try await R2IconUploader.upload(
-                                        data: iconData,
-                                        contentHash: iconHash,
-                                        objectKey: iconObjectKey,
+                               let r2Configuration = R2IconUploader.configuration(settings: settings),
+                               iconUploadAttempts[iconHash, default: 0] < Self.maxIconUploadAttempts {
+                                let objectKey = "\(R2IconUploader.objectKey(for: iconData))"
+                                do {
+                                    if uploadedDesktopIconHashes.contains(iconHash) {
+                                        iconObjectKey = objectKey
+                                    } else if await R2IconUploader.exists(
+                                        objectKey: objectKey,
                                         configuration: r2Configuration,
                                         timeout: timeout
-                                    )
+                                    ) {
+                                        iconObjectKey = objectKey
+                                    } else {
+                                        try await R2IconUploader.upload(
+                                            data: iconData,
+                                            contentHash: R2IconUploader.contentHash(of: iconData),
+                                            objectKey: objectKey,
+                                            configuration: r2Configuration,
+                                            timeout: timeout
+                                        )
+                                        iconObjectKey = objectKey
+                                    }
+                                    iconUploadAttempts[iconHash] = 0
+                                } catch {
+                                    iconUploadAttempts[iconHash, default: 0] += 1
+                                    reporterLastError = "图标上传失败：\(error.localizedDescription)"
                                 }
-                                // R2 已经由本机直传；网站端只接收对象键，不再接收图片二进制。
-                                desktopPayload = desktop.withIconData(nil, iconObjectKey: iconObjectKey)
-                            } else {
-                                // 图片只允许上报器直传 R2；未配置时不再回退成 base64 交给站点处理。
-                                desktopPayload = desktop.withIconData(nil)
                             }
+                            // 站点只收对象键，二进制一律不进遥测 JSON
+                            desktopPayload = desktop.withIconData(nil, iconObjectKey: iconObjectKey)
                         } else {
                             desktopPayload = nil
                         }
