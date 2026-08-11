@@ -390,7 +390,7 @@ struct SettingsView: View {
                 if settings.postEnabled {
                     VStack(alignment: .leading, spacing: 12) {
                         fieldTitle("上报端点", detail: "HTTP / HTTPS")
-                        TextField("https://example.com/api/ingest/telemetry", text: $settings.postURL)
+                        TextField("https://example.com/api/ingest/mac", text: $settings.postURL)
                             .textFieldStyle(.roundedBorder)
 
                         fieldTitle("Bearer 密钥", detail: "保存在钥匙串")

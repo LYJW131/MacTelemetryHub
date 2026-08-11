@@ -263,8 +263,15 @@ struct TelemetryModulesPayload: Encodable, Sendable {
     }
 }
 
+/**
+ * 发往站点的唯一信封。
+ *
+ * v4 把从前那个独立的 presence 端点并了进来：`modules` 里一个模块都没有的信封
+ * 就是一次纯心跳，靠 `presence` 和 `heartbeatAt` 起作用。从前心跳走另一个 URL、
+ * 另一套请求组装，「这台 Mac 还活着」这件事在两边各写了一遍。
+ */
 struct TelemetryEnvelope: Encodable, Sendable {
-    let version = 3
+    let version = 4
     let heartbeatAt: Int64
     let activeModules: [String]
     let modules: TelemetryModulesPayload

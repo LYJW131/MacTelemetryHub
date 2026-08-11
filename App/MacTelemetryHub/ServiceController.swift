@@ -254,12 +254,12 @@ final class ServiceController: ObservableObject {
         }
         restartReporter()
         observePowerTransitions()
-        sendPresence("online")
+        sendHeartbeat("online")
     }
 
     func stop() {
         // 抢在拆掉一切之前声明离线。同步发 —— 调用方紧接着就要退出进程了。
-        sendPresence("offline", blocking: true)
+        sendHeartbeat("offline", blocking: true)
         reporterTask?.cancel()
         // 循环可能正挂在 waitForNextTick 上，叫醒它才能立刻看到 cancel 并退出
         wakeReporter()
@@ -288,10 +288,10 @@ final class ServiceController: ObservableObject {
         let center = NSWorkspace.shared.notificationCenter
         center.addObserver(forName: NSWorkspace.willSleepNotification, object: nil, queue: .main) { [weak self] _ in
             // 必须同步：观察者一返回系统就接着睡了
-            MainActor.assumeIsolated { self?.sendPresence("offline", blocking: true) }
+            MainActor.assumeIsolated { self?.sendHeartbeat("offline", blocking: true) }
         }
         center.addObserver(forName: NSWorkspace.didWakeNotification, object: nil, queue: .main) { [weak self] _ in
-            MainActor.assumeIsolated { self?.sendPresence("online") }
+            MainActor.assumeIsolated { self?.sendHeartbeat("online") }
         }
         /**
          * 菜单里的「退出」会先调 stop()，但 Cmd-Q、Dock 退出、注销都不走那条路，
@@ -303,7 +303,7 @@ final class ServiceController: ObservableObject {
             object: nil,
             queue: .main
         ) { [weak self] _ in
-            MainActor.assumeIsolated { self?.sendPresence("offline", blocking: true) }
+            MainActor.assumeIsolated { self?.sendHeartbeat("offline", blocking: true) }
         }
     }
 
@@ -703,17 +703,14 @@ final class ServiceController: ObservableObject {
                     let dataChanged = chargerToSend || desktopToSend || timezoneToSend ||
                         musicToSend || codexBarCostToSend || credentialsToSend != nil
                     /**
-                     * 心跳不再借数据端点发。
+                     * 只在没有数据要发的时候才补心跳 —— 有数据时那个包本身就证明
+                     * 活着，再补一条是白发。
                      *
-                     * 从前没有数据变化时会发一个空模块的信封，接收端得先解析完整
-                     * 信封才能看出「这只是一次心跳」。现在心跳走 presence 端点，
-                     * 数据端点就变成纯粹的「有变化才发」。
-                     *
-                     * 只在没有数据要发的时候才走这条 —— 有数据时那个包本身就证明
-                     * 活着，再补一条心跳是白发。
+                     * 心跳和数据走同一个端点、同一个 v4 信封，区别只在 modules 空不空。
+                     * 于是「这台 Mac 还活着」在接收端只有一个写入点。
                      */
                     if heartbeatDue, !dataChanged {
-                        sendPresence("online")
+                        sendHeartbeat("online")
                         lastHeartbeatAt = Date()
                     }
                     let anythingChanged = dataChanged
@@ -777,7 +774,7 @@ final class ServiceController: ObservableObject {
                         request.httpMethod = "POST"
                         request.httpBody = try JSONCoding.encoder().encode(envelope)
                         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-                        request.setValue("mac-telemetry-hub/3", forHTTPHeaderField: "User-Agent")
+                        request.setValue("mac-telemetry-hub/4", forHTTPHeaderField: "User-Agent")
                         if !settings.telemetrySecret.isEmpty {
                             request.setValue("Bearer \(settings.telemetrySecret)", forHTTPHeaderField: "Authorization")
                         }
@@ -928,35 +925,34 @@ final class ServiceController: ObservableObject {
     }
 
     /**
-     * 存活声明走自己的端点，从遥测 URL 上换掉最后一段推出来。
+     * 发一条不带任何模块的信封：只声明在离线，不刷新任何模块的时间戳。
      *
-     * 跟已有的「旧版 /api/ingest/charger 自动迁移到 /telemetry」是同一种做法：
-     * 用户只配一个地址，其余路由由它派生，不再多加一项设置。
-     */
-    private var presenceURL: URL? {
-        guard let url = URL(string: settings.postURL) else { return nil }
-        return url.deletingLastPathComponent().appendingPathComponent("presence")
-    }
-
-    /**
-     * 发一条只声明在线状态的请求：`{state, active_modules}`，不带任何模块数据。
-     *
-     * 这条是状态声明，不是数据上报，所以既不走遥测端点也不带模块 —— 混进模块
-     * 会让接收端把它当成一次正常上报、白白刷新那些模块的时间戳。
+     * 和数据上报走同一个端点、同一个 v4 信封 —— 空 `modules` 就是心跳的全部
+     * 含义，接收端不需要为它准备第二条路。从前这条走独立的 presence 端点、
+     * 发的是另一种 JSON，两边各维护一套。
      *
      * `blocking` 那条路的超时给得很短：睡眠前系统只留很窄的一个窗口，宁可这条
      * 发丢，也不能把睡眠拖住。发丢了还有心跳超时兜底，那条路本来就没拆。
      */
-    private func sendPresence(_ presence: String, blocking: Bool = false) {
-        guard settings.postEnabled, let url = presenceURL else { return }
+    private func sendHeartbeat(_ presence: String, blocking: Bool = false) {
+        guard settings.postEnabled, let url = URL(string: settings.postURL) else { return }
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
-        request.httpBody = try? JSONSerialization.data(withJSONObject: [
-            "state": presence,
-            "active_modules": activeModuleNames,
-        ])
+        request.httpBody = try? JSONCoding.encoder().encode(
+            makeTelemetryEnvelope(
+                charger: nil,
+                desktop: nil,
+                timezone: nil,
+                appleMusic: nil,
+                appleMusicCredentials: nil,
+                vibeCoding: nil,
+                includeDesktop: false,
+                includeAppleMusic: false,
+                presence: presence
+            )
+        )
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        request.setValue("mac-telemetry-hub/3", forHTTPHeaderField: "User-Agent")
+        request.setValue("mac-telemetry-hub/4", forHTTPHeaderField: "User-Agent")
         if !settings.telemetrySecret.isEmpty {
             request.setValue("Bearer \(settings.telemetrySecret)", forHTTPHeaderField: "Authorization")
         }

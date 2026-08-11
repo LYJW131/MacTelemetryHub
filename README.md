@@ -29,31 +29,42 @@ compiled into the app and is only required while the charger module is enabled.
 
 ## Unified ingest protocol
 
-Point the app at `https://<site>/api/ingest/telemetry` and set the same Bearer
+Point the app at `https://<site>/api/ingest/mac` and set the same Bearer
 secret as the site's `TELEMETRY_INGEST_SECRET`. Every request uses a versioned
 envelope and may contain only the modules that have fresh data:
 
 ```json
 {
-  "version": 3,
+  "version": 4,
+  "heartbeatAt": 1760000000000,
+  "presence": "online",
+  "activeModules": ["desktop", "appleMusic", "timezone", "charger", "vibeCoding"],
   "modules": {
     "desktop": {
-      "application_name": "Safari",
-      "bundle_identifier": "com.apple.Safari",
-      "icon_hash": "<sha256>",
-      "icon_data": "<base64, only when missing remotely>"
+      "applicationName": "Safari",
+      "bundleIdentifier": "com.apple.Safari",
+      "iconHash": "<sha256>",
+      "iconData": "<base64, only when missing remotely>"
     },
-    "apple_music": {},
+    "appleMusic": {},
     "timezone": {},
     "charger": {},
-    "vibe_coding": {}
+    "vibeCoding": {}
   }
 }
 ```
 
-Version 3 is the only accepted contract; desktop icons are addressed by SHA-256,
+Version 4 is the only accepted contract; desktop icons are addressed by SHA-256,
 with PNG bytes included only when that hash is not already stored by the receiver.
 There is no legacy payload fallback.
+
+An envelope with no `modules` (or an empty one) is a pure heartbeat: it refreshes
+liveness without touching any module's timestamp. One is sent every 30 s while
+nothing changes, and never alongside a data post — that post already proves the
+reporter is alive. `presence: "offline"` covers graceful exits (quit, sleep) and is
+sent synchronously so it beats the disconnect; crashes, network loss, and forced
+shutdowns still rely on the site's "nothing received for a while" timeout. Both
+paths are needed; neither replaces the other.
 The POST body is deliberately bounded. The app discards CodexBar's project-level
 details after parsing and uploads only display-ready totals, seven daily points,
 365-day token totals, and 30 daily activity buckets. Token inspection stays in
@@ -196,34 +207,30 @@ The current charger's CoreBluetooth identifier is
 The app keeps the existing playback snapshot separate from MusicKit. In the
 Apple Music section of Settings, click **授权并上报 Apple Music token**. After
 the user approves the macOS media-library prompt, MusicKit obtains both tokens
-and the app sends:
-
-```http
-POST /api/ingest/apple-music/credentials
-Authorization: Bearer <TELEMETRY_INGEST_SECRET>
-Content-Type: application/json
-```
+and the app sends them through the unified ingest endpoint, as an
+`appleMusicCredentials` module of the v4 envelope:
 
 ```json
 {
-  "version": 1,
-  "device_id": "<telemetry device id>",
-  "music_user_token": "<Music User Token>",
-  "developer_token": "<developer token>"
+  "appleMusicCredentials": {
+    "musicUserToken": "<Music User Token>",
+    "developerToken": "<developer token>",
+    "expiresAt": 1760000000
+  }
 }
 ```
 
-The endpoint is derived from the configured telemetry URL, so
-`/api/ingest/telemetry` becomes `/api/ingest/apple-music/credentials`. The
-backend should treat both token fields as secrets, avoid logging them, and
-return a 2xx response only after accepting the payload. The local
+There is no separate credentials endpoint — the button only wakes the reporter
+loop, and the two tokens are compared independently, so a rotation uploads just
+the field that changed. The backend should treat both token fields as secrets,
+avoid logging them, and return a 2xx response only after accepting the payload.
+The local
 `GET /apple-music/authorization` endpoint exposes status only and never returns
 token values.
 
-Production builds require HTTPS for this credentials request. Debug builds
-also allow plain HTTP when the derived endpoint is hosted on localhost,
-127.0.0.1, or ::1, so a local backend can be tested without setting up a
-certificate. HTTP is still rejected for LAN and public hosts.
+The ingest URL is only validated as http-or-https with a host; nothing in the app
+forces TLS. Since that one envelope carries both tokens and the Bearer secret,
+use HTTPS for anything but a local backend.
 
 For automatic developer-token generation, enable **MusicKit** in the App ID's
 App Services in Certificates, Identifiers & Profiles, use the explicit Bundle

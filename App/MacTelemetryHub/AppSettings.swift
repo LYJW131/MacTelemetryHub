@@ -65,10 +65,14 @@ final class AppSettings: ObservableObject {
         let storedPort = defaults.integer(forKey: Key.httpPort)
         httpPort = storedPort == 0 ? Int(environment["A2687_PORT"] ?? "8787") ?? 8787 : storedPort
         let initialPostURL = defaults.string(forKey: Key.postURL) ?? environment["A2687_POST_URL"] ?? ""
-        // 旧版只上报充电头；升级后自动迁移到统一遥测入口，避免发送 envelope 到旧路由。
-        postURL = initialPostURL.hasSuffix("/api/ingest/charger")
-            ? String(initialPostURL.dropLast("/api/ingest/charger".count)) + "/api/ingest/telemetry"
-            : initialPostURL
+        /**
+         * 历代入口自动迁移到当前这个，避免升级后还在往已删除的路由发。
+         *
+         * `/charger` 是只上报充电头的那一版，`/telemetry` 是数据和心跳还分两个
+         * 端点的那一版 —— 站点两边都已经删干净，不留兼容路径，所以这里必须换，
+         * 而不只是提示用户改设置。
+         */
+        postURL = Self.migratedPostURL(initialPostURL)
         postEnabled = defaults.object(forKey: Key.postEnabled) as? Bool ?? !initialPostURL.isEmpty
         let storedInterval = defaults.double(forKey: Key.postInterval)
         postInterval = storedInterval == 0 ? Double(environment["TELEMETRY_POST_INTERVAL"] ?? environment["A2687_POST_INTERVAL"] ?? "10") ?? 10 : storedInterval
@@ -111,6 +115,18 @@ final class AppSettings: ObservableObject {
 
         // Explicitly saving Settings is the point where an environment-provided ID
         // becomes persistent.  This keeps startup non-interactive and deterministic.
+    }
+
+    /// 站点现在只有这一个上报入口：数据、心跳、优雅下线都发它。
+    private static let ingestPath = "/api/ingest/mac"
+    /// 已经删除的历代入口，读设置时原地换成上面那个
+    private static let retiredIngestPaths = ["/api/ingest/charger", "/api/ingest/telemetry"]
+
+    private static func migratedPostURL(_ stored: String) -> String {
+        for retired in retiredIngestPaths where stored.hasSuffix(retired) {
+            return String(stored.dropLast(retired.count)) + ingestPath
+        }
+        return stored
     }
 
     var normalizedPeripheralID: UUID? {
