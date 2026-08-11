@@ -4,7 +4,11 @@ set -euo pipefail
 cd "$(dirname "$0")"
 
 DERIVED_DATA="${TMPDIR:-/tmp}/mac-telemetry-hub-xcode"
-OUTPUT_DIR="$PWD/build"
+STAGING_DIR="$(mktemp -d "${TMPDIR:-/tmp}/mac-telemetry-hub-release.XXXXXX")"
+OUTPUT_DIR="$STAGING_DIR/build"
+INSTALL_DIR="${MAC_TELEMETRY_INSTALL_DIR:-$HOME/Applications}"
+DEVELOPMENT_TEAM_ID="${MAC_TELEMETRY_DEVELOPMENT_TEAM:-2VTXNMR2GL}"
+trap 'rm -rf "$STAGING_DIR"' EXIT
 
 Tools/generate-icons.sh
 
@@ -14,23 +18,18 @@ xcodebuild \
   -configuration Release \
   -derivedDataPath "$DERIVED_DATA" \
   "CONFIGURATION_BUILD_DIR=$OUTPUT_DIR" \
-  CODE_SIGNING_ALLOWED=NO \
+  "DEVELOPMENT_TEAM=$DEVELOPMENT_TEAM_ID" \
+  CODE_SIGN_STYLE=Automatic \
+  CODE_SIGNING_ALLOWED=YES \
+  CODE_SIGNING_REQUIRED=YES \
+  "CODE_SIGN_IDENTITY=Apple Development" \
+  -allowProvisioningUpdates \
   build
 
-# Produce a locally runnable bundle even before a paid-team certificate is
-# selected in Xcode. For distribution, use Product > Archive in Xcode instead.
 APP_BUNDLE="$OUTPUT_DIR/Mac Telemetry Hub.app"
-for attempt in 1 2 3; do
-  xattr -cr "$APP_BUNDLE"
-  xattr -d com.apple.FinderInfo "$APP_BUNDLE" 2>/dev/null || true
-  xattr -d 'com.apple.fileprovider.fpfs#P' "$APP_BUNDLE" 2>/dev/null || true
-  if codesign --force --deep --sign - "$APP_BUNDLE" && codesign --verify --deep --strict "$APP_BUNDLE"; then
-    break
-  fi
-  if [[ "$attempt" == 3 ]]; then
-    echo "Could not sign the app after clearing FileProvider metadata." >&2
-    exit 1
-  fi
-done
+INSTALLED_APP="$INSTALL_DIR/Mac Telemetry Hub.app"
+mkdir -p "$INSTALL_DIR"
+ditto --norsrc "$APP_BUNDLE" "$INSTALLED_APP"
+codesign --verify --deep --strict "$INSTALLED_APP"
 
-echo "Built: $OUTPUT_DIR/Mac Telemetry Hub.app"
+echo "Built and installed: $INSTALLED_APP"
