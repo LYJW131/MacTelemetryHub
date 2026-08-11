@@ -403,7 +403,23 @@ struct SettingsView: View {
                             NumericField(title: "请求超时", unit: "秒", placeholder: "10", value: $settings.postTimeout)
                         }
 
+                        fieldTitle("前台应用图标直传 R2", detail: "可选；密钥保存在钥匙串")
+                        TextField("https://<account-id>.r2.cloudflarestorage.com", text: $settings.r2Endpoint)
+                            .textFieldStyle(.roundedBorder)
+                        HStack(spacing: 14) {
+                            TextField("R2 Bucket", text: $settings.r2Bucket)
+                                .textFieldStyle(.roundedBorder)
+                            TextField("Access Key ID", text: $settings.r2AccessKeyID)
+                                .textFieldStyle(.roundedBorder)
+                        }
+                        SecureField("R2 Secret Access Key", text: $settings.r2SecretAccessKey)
+                            .font(.body.monospaced())
+                            .textFieldStyle(.roundedBorder)
+
                         Label("模块按字段部分更新；上报失败不会中断本地采集。", systemImage: "shield.checkered")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                        Label("配置完整后，图标由本机直接 PUT 到 R2；网站只接收图标哈希。", systemImage: "arrow.up.right.square")
                             .font(.caption)
                             .foregroundStyle(.secondary)
                     }

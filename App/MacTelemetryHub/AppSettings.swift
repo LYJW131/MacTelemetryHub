@@ -23,6 +23,10 @@ final class AppSettings: ObservableObject {
         static let codingSessionRefreshInterval = "codingSessionRefreshInterval"
         static let codexBarCostRefreshInterval = "codexBarCostRefreshInterval"
         static let agentLimitsRefreshInterval = "agentLimitsRefreshInterval"
+        static let r2Endpoint = "r2Endpoint"
+        static let r2Bucket = "r2Bucket"
+        static let r2AccessKeyAccount = "r2-access-key-id"
+        static let r2SecretAccessKeyAccount = "r2-secret-access-key"
         static let userIDAccount = "anker-user-id"
         static let telemetrySecretAccount = "telemetry-ingest-secret"
     }
@@ -47,6 +51,10 @@ final class AppSettings: ObservableObject {
     @Published var codingSessionRefreshInterval: Double
     @Published var codexBarCostRefreshInterval: Double
     @Published var agentLimitsRefreshInterval: Double
+    @Published var r2Endpoint: String
+    @Published var r2Bucket: String
+    @Published var r2AccessKeyID: String
+    @Published var r2SecretAccessKey: String
     @Published var launchAtLoginEnabled = false
 
     private let defaults: UserDefaults
@@ -111,6 +119,18 @@ final class AppSettings: ObservableObject {
         codexBarCostRefreshInterval = storedCostInterval == 0 ? 600 : storedCostInterval
         let storedAgentLimitsInterval = defaults.double(forKey: Key.agentLimitsRefreshInterval)
         agentLimitsRefreshInterval = storedAgentLimitsInterval == 0 ? 600 : storedAgentLimitsInterval
+        r2Endpoint = defaults.string(forKey: Key.r2Endpoint)
+            ?? environment["R2_ENDPOINT"]
+            ?? ""
+        r2Bucket = defaults.string(forKey: Key.r2Bucket)
+            ?? environment["R2_BUCKET"]
+            ?? ""
+        r2AccessKeyID = environment["R2_ACCESS_KEY_ID"]
+            ?? keychain.read(account: Key.r2AccessKeyAccount)
+            ?? ""
+        r2SecretAccessKey = environment["R2_SECRET_ACCESS_KEY"]
+            ?? keychain.read(account: Key.r2SecretAccessKeyAccount)
+            ?? ""
         launchAtLoginEnabled = SMAppService.mainApp.status == .enabled
 
         // Explicitly saving Settings is the point where an environment-provided ID
@@ -167,6 +187,16 @@ final class AppSettings: ObservableObject {
             guard codexBarCostRefreshInterval >= 60 else { throw SettingsError.invalidCodexBarCostInterval }
             guard agentLimitsRefreshInterval >= 60 else { throw SettingsError.invalidAgentLimitsInterval }
         }
+        let r2Values = [r2Endpoint, r2Bucket, r2AccessKeyID, r2SecretAccessKey]
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+        if r2Values.contains(where: { !$0.isEmpty }) {
+            guard r2Values.allSatisfy({ !$0.isEmpty }),
+                  let endpoint = URL(string: r2Values[0]),
+                  endpoint.scheme?.lowercased() == "https",
+                  endpoint.host != nil else {
+                throw SettingsError.invalidR2Configuration
+            }
+        }
     }
 
     func save() throws {
@@ -179,8 +209,14 @@ final class AppSettings: ObservableObject {
             fileURLWithPath: (codexBarCLIPath as NSString).expandingTildeInPath
         ).resolvingSymlinksInPath().path
         ccusageCLIPath = (ccusageCLIPath as NSString).expandingTildeInPath
+        r2Endpoint = r2Endpoint.trimmingCharacters(in: .whitespacesAndNewlines)
+        r2Bucket = r2Bucket.trimmingCharacters(in: .whitespacesAndNewlines)
+        r2AccessKeyID = r2AccessKeyID.trimmingCharacters(in: .whitespacesAndNewlines)
+        r2SecretAccessKey = r2SecretAccessKey.trimmingCharacters(in: .whitespacesAndNewlines)
         try keychain.write(userID, account: Key.userIDAccount)
         try keychain.write(telemetrySecret, account: Key.telemetrySecretAccount)
+        try keychain.write(r2AccessKeyID, account: Key.r2AccessKeyAccount)
+        try keychain.write(r2SecretAccessKey, account: Key.r2SecretAccessKeyAccount)
         defaults.set(peripheralID, forKey: Key.peripheralID)
         defaults.set(httpServerEnabled, forKey: Key.httpServerEnabled)
         defaults.set(httpPort, forKey: Key.httpPort)
@@ -199,6 +235,8 @@ final class AppSettings: ObservableObject {
         defaults.set(codingSessionRefreshInterval, forKey: Key.codingSessionRefreshInterval)
         defaults.set(codexBarCostRefreshInterval, forKey: Key.codexBarCostRefreshInterval)
         defaults.set(agentLimitsRefreshInterval, forKey: Key.agentLimitsRefreshInterval)
+        defaults.set(r2Endpoint, forKey: Key.r2Endpoint)
+        defaults.set(r2Bucket, forKey: Key.r2Bucket)
     }
 
     func setLaunchAtLogin(_ enabled: Bool) throws {
@@ -219,6 +257,7 @@ enum SettingsError: LocalizedError {
     case invalidUserID, invalidPeripheralID, invalidPort, invalidTiming, invalidPostURL
     case invalidCodexBarPath, invalidCcusagePath, invalidCodingSessionInterval
     case invalidCodexBarCostInterval, invalidAgentLimitsInterval
+    case invalidR2Configuration
 
     var errorDescription: String? {
         switch self {
@@ -232,6 +271,7 @@ enum SettingsError: LocalizedError {
         case .invalidCodingSessionInterval: "会话状态刷新间隔不能低于 60 秒。"
         case .invalidCodexBarCostInterval: "本地用量刷新间隔不能低于 60 秒。"
         case .invalidAgentLimitsInterval: "限额刷新间隔不能低于 60 秒。"
+        case .invalidR2Configuration: "R2 直传配置必须同时填写 HTTPS Endpoint、Bucket、Access Key ID 和 Secret Access Key。"
         }
     }
 }
@@ -275,6 +315,6 @@ private struct KeychainStore {
 private enum KeychainError: LocalizedError {
     case status(OSStatus)
     var errorDescription: String? {
-        switch self { case let .status(code): "无法保存用户 ID 到钥匙串（\(code)）。" }
+        switch self { case let .status(code): "无法保存配置到钥匙串（\(code)）。" }
     }
 }

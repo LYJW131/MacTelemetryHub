@@ -192,9 +192,11 @@ private enum CodingSessionCollector {
 struct DesktopActivitySnapshot: Codable, Equatable, Sendable {
     let applicationName: String
     let bundleIdentifier: String?
-    /// 缩放后 PNG 的内容指纹；协议用它引用图标，`iconData` 只负责首次传输。
+    /// 缩放后 PNG 的内容指纹；协议用它引用图标，`iconData` 仅是服务端兼容回退。
     let iconHash: String?
     let iconData: Data?
+    /// 本机直传 R2 后的对象键；有它时上报器不再把二进制塞进遥测 JSON。
+    let iconObjectKey: String?
     let observedAt: Int64
 }
 
@@ -338,6 +340,7 @@ final class DesktopActivityMonitor: ObservableObject {
             bundleIdentifier: app.bundleIdentifier,
             iconHash: iconData.map(Self.sha256Hex),
             iconData: iconData,
+            iconObjectKey: nil,
             observedAt: Self.nowMilliseconds
         )
         onChange?()
@@ -643,12 +646,13 @@ final class AppleMusicMonitor: ObservableObject {
 }
 
 extension DesktopActivitySnapshot {
-    func withIconData(_ iconData: Data?) -> DesktopActivitySnapshot {
+    func withIconData(_ iconData: Data?, iconObjectKey: String? = nil) -> DesktopActivitySnapshot {
         DesktopActivitySnapshot(
             applicationName: applicationName,
             bundleIdentifier: bundleIdentifier,
             iconHash: iconHash,
             iconData: iconData,
+            iconObjectKey: iconObjectKey,
             observedAt: observedAt
         )
     }

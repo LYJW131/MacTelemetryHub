@@ -1,6 +1,171 @@
 import AppKit
+import CryptoKit
 import Foundation
 import MusicKit
+
+private struct R2UploadConfiguration: Sendable {
+    let endpoint: URL
+    let bucket: String
+    let accessKeyID: String
+    let secretAccessKey: String
+}
+
+private enum R2IconUploader {
+    enum UploadError: LocalizedError {
+        case invalidConfiguration
+        case hashMismatch
+        case httpStatus(Int, String)
+
+        var errorDescription: String? {
+            switch self {
+            case .invalidConfiguration: "R2 直传配置无效。"
+            case .hashMismatch: "图标内容哈希不一致。"
+            case let .httpStatus(status, detail):
+                detail.isEmpty ? "R2 上传失败（HTTP \(status)）。" : "R2 上传失败（HTTP \(status)：\(detail)）。"
+            }
+        }
+    }
+
+    @MainActor
+    static func configuration(settings: AppSettings) -> R2UploadConfiguration? {
+        let endpointText = settings.r2Endpoint.trimmingCharacters(in: .whitespacesAndNewlines)
+        let bucket = settings.r2Bucket.trimmingCharacters(in: .whitespacesAndNewlines)
+        let accessKeyID = settings.r2AccessKeyID.trimmingCharacters(in: .whitespacesAndNewlines)
+        let secretAccessKey = settings.r2SecretAccessKey.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !endpointText.isEmpty, !bucket.isEmpty, !accessKeyID.isEmpty,
+              !secretAccessKey.isEmpty,
+              let endpoint = URL(string: endpointText),
+              endpoint.scheme?.lowercased() == "https", endpoint.host != nil else {
+            return nil
+        }
+        return R2UploadConfiguration(
+            endpoint: endpoint,
+            bucket: bucket,
+            accessKeyID: accessKeyID,
+            secretAccessKey: secretAccessKey
+        )
+    }
+
+    static func upload(
+        data: Data,
+        contentHash: String,
+        objectKey: String,
+        configuration: R2UploadConfiguration,
+        timeout: TimeInterval
+    ) async throws {
+        let actualHash = sha256Hex(data)
+        guard actualHash == contentHash else { throw UploadError.hashMismatch }
+
+        let objectURL = try objectURL(
+            endpoint: configuration.endpoint,
+            bucket: configuration.bucket,
+            objectKey: objectKey
+        )
+        let host = hostHeader(for: objectURL)
+        let payloadHash = actualHash
+        let amzDate = timestamp()
+        let shortDate = String(amzDate.prefix(8))
+        let scope = "\(shortDate)/auto/s3/aws4_request"
+        let signedHeaders = "content-type;host;x-amz-content-sha256;x-amz-date"
+        let canonicalPath = URLComponents(url: objectURL, resolvingAgainstBaseURL: false)?.percentEncodedPath
+            ?? objectURL.path
+        let canonicalHeaders = [
+            "content-type:image/png",
+            "host:\(host)",
+            "x-amz-content-sha256:\(payloadHash)",
+            "x-amz-date:\(amzDate)",
+        ].joined(separator: "\n") + "\n"
+        let canonicalRequest = [
+            "PUT",
+            canonicalPath,
+            "",
+            canonicalHeaders,
+            signedHeaders,
+            payloadHash,
+        ].joined(separator: "\n")
+        let stringToSign = [
+            "AWS4-HMAC-SHA256",
+            amzDate,
+            scope,
+            sha256Hex(Data(canonicalRequest.utf8)),
+        ].joined(separator: "\n")
+        let signingKey = hmac(
+            hmac(
+                hmac(
+                    hmac(Data("AWS4\(configuration.secretAccessKey)".utf8), shortDate),
+                    "auto"
+                ),
+                "s3"
+            ),
+            "aws4_request"
+        )
+        let signature = hex(hmac(signingKey, stringToSign))
+
+        var request = URLRequest(url: objectURL)
+        request.httpMethod = "PUT"
+        request.httpBody = data
+        request.timeoutInterval = timeout
+        request.setValue("image/png", forHTTPHeaderField: "Content-Type")
+        request.setValue("public, max-age=31536000, immutable", forHTTPHeaderField: "Cache-Control")
+        request.setValue(payloadHash, forHTTPHeaderField: "x-amz-content-sha256")
+        request.setValue(amzDate, forHTTPHeaderField: "x-amz-date")
+        request.setValue(
+            "AWS4-HMAC-SHA256 Credential=\(configuration.accessKeyID)/\(scope), SignedHeaders=\(signedHeaders), Signature=\(signature)",
+            forHTTPHeaderField: "Authorization"
+        )
+
+        let (responseData, response) = try await URLSession.shared.data(for: request)
+        guard let http = response as? HTTPURLResponse else {
+            throw UploadError.httpStatus(0, "R2 返回了无效响应")
+        }
+        guard (200..<300).contains(http.statusCode) else {
+            let detail = String(data: responseData.prefix(512), encoding: .utf8) ?? ""
+            throw UploadError.httpStatus(http.statusCode, detail)
+        }
+    }
+
+    private static func objectURL(endpoint: URL, bucket: String, objectKey: String) throws -> URL {
+        guard var components = URLComponents(url: endpoint, resolvingAgainstBaseURL: false) else {
+            throw UploadError.invalidConfiguration
+        }
+        let basePath = components.percentEncodedPath.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+        let bucketPath = bucket.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? bucket
+        let keyPath = objectKey.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? objectKey
+        let path = [basePath, bucketPath, keyPath].filter { !$0.isEmpty }.joined(separator: "/")
+        components.percentEncodedPath = "/\(path)"
+        guard let url = components.url else { throw UploadError.invalidConfiguration }
+        return url
+    }
+
+    private static func hostHeader(for url: URL) -> String {
+        var host = url.host ?? ""
+        if let port = url.port { host += ":\(port)" }
+        return host
+    }
+
+    private static func timestamp() -> String {
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.timeZone = TimeZone(secondsFromGMT: 0)
+        formatter.dateFormat = "yyyyMMdd'T'HHmmss'Z'"
+        return formatter.string(from: Date())
+    }
+
+    private static func sha256Hex(_ data: Data) -> String {
+        hex(Data(SHA256.hash(data: data)))
+    }
+
+    private static func hmac(_ key: Data, _ message: String) -> Data {
+        Data(HMAC<SHA256>.authenticationCode(
+            for: Data(message.utf8),
+            using: SymmetricKey(data: key)
+        ))
+    }
+
+    private static func hex(_ data: Data) -> String {
+        data.map { String(format: "%02x", $0) }.joined()
+    }
+}
 
 enum TelemetryModule: String, CaseIterable, Hashable, Sendable {
     case desktop
@@ -751,11 +916,32 @@ final class ServiceController: ObservableObject {
                     let shouldPost = Date() >= backoffUntil && (manualMode || urgent || Date() >= nextPostAt)
 
                     if let url, anythingChanged, shouldPost {
-                        let desktopPayload = desktop.map { snapshot in
-                            let shouldSendIcon = snapshot.iconHash.map {
+                        let desktopPayload: DesktopActivitySnapshot?
+                        if let desktop {
+                            let shouldSendIcon = desktop.iconHash.map {
                                 !uploadedDesktopIconHashes.contains($0)
                             } ?? false
-                            return snapshot.withIconData(shouldSendIcon ? snapshot.iconData : nil)
+                            if let iconHash = desktop.iconHash,
+                               let iconData = desktop.iconData,
+                               let r2Configuration = R2IconUploader.configuration(settings: settings) {
+                                let iconObjectKey = "\(iconHash).png"
+                                if shouldSendIcon {
+                                    try await R2IconUploader.upload(
+                                        data: iconData,
+                                        contentHash: iconHash,
+                                        objectKey: iconObjectKey,
+                                        configuration: r2Configuration,
+                                        timeout: timeout
+                                    )
+                                }
+                                // R2 已经由本机直传；网站端只接收对象键，不再接收图片二进制。
+                                desktopPayload = desktop.withIconData(nil, iconObjectKey: iconObjectKey)
+                            } else {
+                                // 未配置本机 R2 时保留旧链路，兼容现有安装和临时降级。
+                                desktopPayload = desktop.withIconData(shouldSendIcon ? desktop.iconData : nil)
+                            }
+                        } else {
+                            desktopPayload = nil
                         }
                         // 封面不再由这边送：网页那边为了拿曲目链接本来就要查一次
                         // Apple Music 目录，那次查询的结果自带封面 URL。
