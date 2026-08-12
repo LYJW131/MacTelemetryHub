@@ -10,6 +10,30 @@ private struct R2UploadConfiguration: Sendable {
     let secretAccessKey: String
 }
 
+/**
+ * 上报请求不能共用 `URLSession.shared` 的长连接池。
+ *
+ * 本机代理会让一条已经失活的 HTTP/2/HTTP/3 连接继续留在池里；下一次 POST
+ * 复用它以后，请求体已经写出，却要等到 CFNetwork 的 stall recovery 才失败。
+ * 一次性 session 让每次请求都重新建连，请求结束后随即丢掉对应连接池。
+ */
+private enum IsolatedHTTPClient {
+    static func session(for request: URLRequest) -> URLSession {
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.requestCachePolicy = .reloadIgnoringLocalCacheData
+        configuration.urlCache = nil
+        configuration.timeoutIntervalForRequest = request.timeoutInterval
+        configuration.timeoutIntervalForResource = request.timeoutInterval
+        return URLSession(configuration: configuration)
+    }
+
+    static func data(for request: URLRequest) async throws -> (Data, URLResponse) {
+        let session = session(for: request)
+        defer { session.finishTasksAndInvalidate() }
+        return try await session.data(for: request)
+    }
+}
+
 private enum R2IconUploader {
     enum UploadError: LocalizedError {
         case invalidConfiguration
@@ -57,20 +81,26 @@ private enum R2IconUploader {
         objectKey: String,
         configuration: R2UploadConfiguration,
         timeout: TimeInterval
-    ) async -> Bool {
-        guard let url = try? objectURL(
+    ) async throws -> Bool {
+        let url = try objectURL(
             endpoint: configuration.endpoint,
             bucket: configuration.bucket,
             objectKey: objectKey
-        ) else { return false }
+        )
         var request = URLRequest(url: url)
         request.httpMethod = "HEAD"
         request.timeoutInterval = timeout
         sign(&request, payloadHash: emptyPayloadHash, contentType: nil,
              method: "HEAD", url: url, configuration: configuration)
-        guard let (_, response) = try? await URLSession.shared.data(for: request),
-              let http = response as? HTTPURLResponse else { return false }
-        return (200..<300).contains(http.statusCode)
+        let (_, response) = try await IsolatedHTTPClient.data(for: request)
+        guard let http = response as? HTTPURLResponse else {
+            throw UploadError.httpStatus(0, "R2 返回了无效响应")
+        }
+        if http.statusCode == 404 { return false }
+        guard (200..<300).contains(http.statusCode) else {
+            throw UploadError.httpStatus(http.statusCode, "检查图标对象失败")
+        }
+        return true
     }
 
     static func upload(
@@ -97,7 +127,7 @@ private enum R2IconUploader {
         sign(&request, payloadHash: actualHash, contentType: contentType(for: objectKey),
              method: "PUT", url: objectURL, configuration: configuration)
 
-        let (responseData, response) = try await URLSession.shared.data(for: request)
+        let (responseData, response) = try await IsolatedHTTPClient.data(for: request)
         guard let http = response as? HTTPURLResponse else {
             throw UploadError.httpStatus(0, "R2 返回了无效响应")
         }
@@ -1003,10 +1033,10 @@ final class ServiceController: ObservableObject {
                                 do {
                                     if uploadedDesktopIconHashes.contains(iconHash) {
                                         iconObjectKey = objectKey
-                                    } else if await R2IconUploader.exists(
+                                    } else if try await R2IconUploader.exists(
                                         objectKey: objectKey,
                                         configuration: r2Configuration,
-                                        timeout: timeout
+                                        timeout: min(timeout, 3)
                                     ) {
                                         iconObjectKey = objectKey
                                     } else {
@@ -1015,7 +1045,7 @@ final class ServiceController: ObservableObject {
                                             contentHash: R2IconUploader.contentHash(of: iconData),
                                             objectKey: objectKey,
                                             configuration: r2Configuration,
-                                            timeout: timeout
+                                            timeout: min(timeout, 3)
                                         )
                                         iconObjectKey = objectKey
                                     }
@@ -1053,7 +1083,7 @@ final class ServiceController: ObservableObject {
                         }
                         request.timeoutInterval = timeout
                         attemptedAppleMusicCredentials = credentialsToSend != nil
-                        let (responseData, response) = try await URLSession.shared.data(for: request)
+                        let (responseData, response) = try await IsolatedHTTPClient.data(for: request)
                         if let response = response as? HTTPURLResponse, !(200..<300).contains(response.statusCode) {
                             throw ReporterError.httpStatus(response.statusCode)
                         }
@@ -1232,7 +1262,7 @@ final class ServiceController: ObservableObject {
         request.timeoutInterval = 3
 
         guard blocking else {
-            URLSession.shared.dataTask(with: request).resume()
+            Task { _ = try? await IsolatedHTTPClient.data(for: request) }
             return
         }
         /**
@@ -1243,7 +1273,11 @@ final class ServiceController: ObservableObject {
          * 上限 3 秒，且 URLSession 的回调在后台队列，不会和主线程互锁。
          */
         let done = DispatchSemaphore(value: 0)
-        URLSession.shared.dataTask(with: request) { _, _, _ in done.signal() }.resume()
+        let session = IsolatedHTTPClient.session(for: request)
+        session.dataTask(with: request) { _, _, _ in
+            session.finishTasksAndInvalidate()
+            done.signal()
+        }.resume()
         _ = done.wait(timeout: .now() + 3)
     }
 
