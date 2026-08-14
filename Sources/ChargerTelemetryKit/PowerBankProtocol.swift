@@ -63,6 +63,9 @@ public struct PowerBankState: Codable, Equatable, Sendable {
 
     public var pomodoroSeconds: Int?
     public var pomodoroEnabled: Bool?
+    /// 电池健康度，整数百分比。**只在 0x0200 快照里出现** —— 每次连接发一次，
+    /// 不是每帧都有，所以它靠 state 自己留着，不能指望实时帧刷新它。
+    public var batteryHealthPercent: Int?
 
     public var updatedAt: TimeInterval?
 
@@ -100,6 +103,9 @@ public enum PowerBankProtocol {
     static let snapshotTimeLeft: UInt8 = 0xA7
     static let snapshotPomodoroSeconds: UInt8 = 0xAC
     static let snapshotPomodoroEnable: UInt8 = 0xE2
+    /// 电池健康度。它和隔壁 0xAA（屏幕亮度）在所有抓包里都读作 100 —— 单看录像
+    /// 分不出谁是谁，是把 App 里的亮度调到 30% 之后 0xAA 跟着动、这个不动，才定下来的。
+    static let snapshotBatteryHealth: UInt8 = 0xA9
 
     // MARK: - 解码
 
@@ -169,6 +175,11 @@ public enum PowerBankProtocol {
                 if decoded.payload.count >= 3 {
                     state.pomodoroEnabled = decoded.payload[decoded.payload.startIndex] != 0
                     state.pomodoroSeconds = Int(decoded.payload.readUInt16LE(at: 1))
+                }
+                continue
+            case snapshotBatteryHealth:
+                if let unsigned = TypedValue(field.value).unsigned {
+                    state.batteryHealthPercent = Int(unsigned)
                 }
                 continue
             case snapshotPomodoroSeconds:
@@ -274,7 +285,8 @@ public extension ChargingDevicePayload {
                 percent: state.batteryPercent,
                 charging: state.charging,
                 timeToFullMinutes: minutes,
-                thermalLimited: state.isThermallyLimited
+                thermalLimited: state.isThermallyLimited,
+                healthPercent: state.batteryHealthPercent
             ),
             temperaturesC: state.temperatures.isEmpty ? nil : state.temperatures,
             ports: ports

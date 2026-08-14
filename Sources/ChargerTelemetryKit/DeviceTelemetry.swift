@@ -82,12 +82,22 @@ public struct BatteryPayload: Codable, Equatable, Sendable {
     /// 机身过热、拒绝充电。插着线也不进电，所以这个要单独暴露，
     /// 否则站点只会看到「插着但功率是 0」，看起来像故障。
     public let thermalLimited: Bool?
+    /// 电池健康度（剩余容量 / 出厂容量）。设备只在连接时发一次，之后不会再变，
+    /// 所以它按整数百分比发，也不参与「有没有变化」的判断。
+    public let healthPercent: Int?
 
-    public init(percent: Double?, charging: Bool?, timeToFullMinutes: Int?, thermalLimited: Bool?) {
+    public init(
+        percent: Double?,
+        charging: Bool?,
+        timeToFullMinutes: Int?,
+        thermalLimited: Bool?,
+        healthPercent: Int? = nil
+    ) {
         self.percent = percent
         self.charging = charging
         self.timeToFullMinutes = timeToFullMinutes
         self.thermalLimited = thermalLimited
+        self.healthPercent = healthPercent
     }
 }
 

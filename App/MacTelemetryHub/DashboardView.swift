@@ -375,7 +375,14 @@ struct DashboardView: View {
 
             LazyVGrid(columns: [GridItem(.flexible(), spacing: 18), GridItem(.flexible(), spacing: 18)], alignment: .leading, spacing: 14) {
                 DeviceFact(title: "序列号", value: state.serialNumber, icon: "number")
+                DeviceFact(title: "MAC 地址", value: state.macAddress, icon: "antenna.radiowaves.left.and.right")
                 DeviceFact(title: "固件版本", value: state.firmwareVersion, icon: "cpu")
+                // 只在连上时读一次，之后整个会话都是同一个值
+                DeviceFact(
+                    title: "电池健康",
+                    value: state.batteryHealthPercent.map { "\($0)%" },
+                    icon: "heart.text.square"
+                )
                 DeviceFact(
                     title: "温度",
                     value: state.temperatures.isEmpty

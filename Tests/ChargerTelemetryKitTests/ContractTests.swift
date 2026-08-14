@@ -41,6 +41,7 @@ private struct FixtureState: Decodable {
     let temperature_1_c: Int?
     let temperature_2_c: Int?
     let pomodoro_seconds: Int?
+    let battery_health_percent: Int?
     let pomodoro_enabled: Bool?
     let ports: [FixturePort]
 }
@@ -120,6 +121,29 @@ private func expectClose(_ actual: Double?, _ expected: Double?, _ label: String
     }
 }
 
+/**
+ * 电池健康度走到线上的名字。
+ *
+ * 站点按 `battery.healthPercent` 取值，改了这个键名它就静默变成「未知」——
+ * 不会报错，只会永远显示一个破折号。所以键名本身要有测试钉着。
+ */
+@Test func batteryHealthReachesThePayloadUnderItsWireName() throws {
+    var state = PowerBankState()
+    for (command, payload) in try Contract.decodedFrames("powerbank-01.jsonl") {
+        if PowerBankProtocol.snapshotCommands.contains(command) {
+            PowerBankProtocol.parseSnapshot(payload, state: &state)
+        }
+    }
+    #expect(state.batteryHealthPercent == 100, "抓包里这台的健康度是 100%")
+
+    let encoded = try JSONCoding.encoder().encode(
+        ChargingDevicePayload(powerBank: state, connected: true)
+    )
+    let object = try #require(JSONSerialization.jsonObject(with: encoded) as? [String: Any])
+    let battery = try #require(object["battery"] as? [String: Any])
+    #expect(battery["healthPercent"] as? Int == 100)
+}
+
 @Test func powerBankMatchesRecordedContract() throws {
     let fixtures = try Contract.fixtures(device: "powerbank")
     #expect(!fixtures.isEmpty, "no power bank fixtures — run Tools/sync-protocol-contract.sh")
@@ -159,6 +183,10 @@ private func expectClose(_ actual: Double?, _ expected: Double?, _ label: String
             #expect(state.temperature1C == expected.temperature_1_c, "\(where_) temp1")
             #expect(state.temperature2C == expected.temperature_2_c, "\(where_) temp2")
             #expect(state.pomodoroSeconds == expected.pomodoro_seconds, "\(where_) pomodoro")
+            #expect(
+                state.batteryHealthPercent == expected.battery_health_percent,
+                "\(where_) battery health"
+            )
             #expect(state.pomodoroEnabled == expected.pomodoro_enabled, "\(where_) pomodoroOn")
 
             let expectedPorts = expected.ports.filter { $0.name != "DOCK" }
