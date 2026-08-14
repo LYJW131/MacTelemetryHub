@@ -558,6 +558,19 @@ final class ServiceController: ObservableObject {
     /// 用来照顾没有事件放行的活：充电器功率滚动这类按节流窗口发的变化、
     /// 30 秒心跳、CodexBar 的刷新间隔检查。
     private static let tickInterval = Duration.seconds(5)
+    /**
+     * 充电设备结构变化后的追发。
+     *
+     * 插上负载的头几十秒功率还在剧烈变化 —— PD 协商完成、设备自己调整取电，
+     * 都要一会儿才稳。即时上报只发出去插拔那一瞬间的那一帧，那一帧往往还是
+     * 0W 或者一个中间值，然后要等满一个节流窗口（本机 30 秒）才更新，站点上
+     * 就会挂着一个明显不对的读数。
+     *
+     * 所以结构变化后按这个节奏追发几次。次数是有限的：功率滚动本来就该等节流
+     * 窗口，追发只是覆盖「刚接入」这段不稳定期，不是把上报变成 5 秒一次的轮询。
+     */
+    private static let chargingBurstInterval: TimeInterval = 5
+    private static let chargingBurstCount = 5
 
     /// MusicKit 读取失败后的退避。
     private static let appleMusicRetryDelay: TimeInterval = 60
@@ -1018,6 +1031,9 @@ final class ServiceController: ObservableObject {
             var nextPostAt = Date.distantPast
             /// 上报失败后的退避截止时刻，只用来挡住即时上报的绕行
             var backoffUntil = Date.distantPast
+            /// 充电设备追发还剩几次、下一次什么时候到点
+            var chargingBurstRemaining = 0
+            var chargingBurstAt = Date.distantPast
             while !Task.isCancelled {
                 var manualModulesForAttempt: Set<TelemetryModule> = []
                 var attemptedAppleMusicCredentials = false
@@ -1172,8 +1188,28 @@ final class ServiceController: ObservableObject {
                     // 插拔和换设备也是用户正盯着的事，跟播放/前台应用同一档。
                     // 只认结构性指纹：功率、电压、电流的滚动照旧等节流窗口，
                     // 否则充电中每一轮都「有变化」，即时上报就退化成 5 秒一次的轮询。
-                    let chargerUrgent = !manualMode && chargerStructural != nil &&
-                        chargerStructural != lastPostedChargingStructural
+                    let chargerStructuralChanged =
+                        chargerStructural != nil && chargerStructural != lastPostedChargingStructural
+                    /**
+                     * 追发的排期。
+                     *
+                     * 结构一变就把计数重置满 —— 拔了又插算两次独立的接入，第二次
+                     * 同样需要完整的观察窗口，不该沿用上一次剩下的额度。
+                     *
+                     * 到点就扣，不管这一圈最后有没有真发出去（比如退避期内）。
+                     * 否则服务端一直失败时，这个计数会一直挂着，等退避结束后突然
+                     * 补发一串早就过时的追发。
+                     */
+                    if chargerStructuralChanged {
+                        chargingBurstRemaining = Self.chargingBurstCount
+                        chargingBurstAt = Date().addingTimeInterval(Self.chargingBurstInterval)
+                    }
+                    let chargingBurstDue = chargingBurstRemaining > 0 && Date() >= chargingBurstAt
+                    if chargingBurstDue {
+                        chargingBurstRemaining -= 1
+                        chargingBurstAt = Date().addingTimeInterval(Self.chargingBurstInterval)
+                    }
+                    let chargerUrgent = !manualMode && (chargerStructuralChanged || chargingBurstDue)
                     // 退避期内一律不放行。否则服务端挂掉时，未推进的 lastPosted 会让
                     // urgent 一直为真，即时上报就变成每圈一次的重试风暴。
                     let urgent = (manualMode || musicUrgent || desktopUrgent || timezoneUrgent ||
