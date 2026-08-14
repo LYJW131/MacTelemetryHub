@@ -347,10 +347,7 @@ private struct ChargingDevicesStructuralSignature: Equatable {
         let kind: ChargingDeviceKind
         let connected: Bool
         let thermalLimited: Bool?
-        /// 有没有在通过充电底座进电。上下底座是插拔的一种，只是没有线 ——
-        /// 漏了它的话，把充电宝放上底座、拿下来，指纹一个字节都不变，站点只能
-        /// 等下一个节流窗口才知道，即时上报对这件事完全失效。
-        let onDock: Bool
+        /// 底座现在作为 B 口混在 ports 里，上下底座自然被端口那一项覆盖。
         let ports: [Port]
 
         init(_ device: ChargingDevicePayload) {
