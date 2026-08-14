@@ -272,42 +272,48 @@ struct SettingsView: View {
 
     private var chargerSettings: some View {
         VStack(alignment: .leading, spacing: 0) {
+            // 账号 ID 是两台设备共用的，所以它自己一段，排在两个模块前面。
+            // 塞在「充电头遥测」里会让人以为只有充电头要 —— 充电宝没有它也能连上，
+            // 但会话 26 秒后就断，那种失败很难往这里想。
+            settingSection(
+                "Anker 账号",
+                detail: "充电头和充电宝共用。两台设备都要它才能建立持久会话。",
+                icon: "person.badge.key"
+            ) {
+                VStack(alignment: .leading, spacing: 12) {
+                    fieldTitle("Anker 用户 ID", detail: "40 个 ASCII 字符")
+                    HStack(spacing: 8) {
+                        Group {
+                            if revealUserID {
+                                TextField("40 位 Anker 用户 ID", text: $settings.userID)
+                            } else {
+                                SecureField("40 位 Anker 用户 ID", text: $settings.userID)
+                            }
+                        }
+                        .font(.body.monospaced())
+                        .textFieldStyle(.roundedBorder)
+
+                        Button {
+                            revealUserID.toggle()
+                        } label: {
+                            Image(systemName: revealUserID ? "eye.slash" : "eye")
+                                .frame(width: 16, height: 16)
+                        }
+                        .buttonStyle(.bordered)
+                        .help(revealUserID ? "隐藏用户 ID" : "显示用户 ID")
+                    }
+                    Text("该 ID 同时决定屏保个性化状态；使用其他账户的值会导致锁屏图片消失。")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+
             settingSection("充电头遥测", detail: "启用后连接 Anker Prime，并接收端口级实时数据。", icon: "bolt.horizontal") {
                 Toggle("启用充电头模块", isOn: $settings.chargerModuleEnabled)
                     .toggleStyle(.switch)
 
                 if settings.chargerModuleEnabled {
-                    VStack(alignment: .leading, spacing: 12) {
-                        fieldTitle("Anker 用户 ID", detail: "40 个 ASCII 字符")
-                        HStack(spacing: 8) {
-                            Group {
-                                if revealUserID {
-                                    TextField("40 位 Anker 用户 ID", text: $settings.userID)
-                                } else {
-                                    SecureField("40 位 Anker 用户 ID", text: $settings.userID)
-                                }
-                            }
-                            .font(.body.monospaced())
-                            .textFieldStyle(.roundedBorder)
-
-                            Button {
-                                revealUserID.toggle()
-                            } label: {
-                                Image(systemName: revealUserID ? "eye.slash" : "eye")
-                                    .frame(width: 16, height: 16)
-                            }
-                            .buttonStyle(.bordered)
-                            .help(revealUserID ? "隐藏用户 ID" : "显示用户 ID")
-                        }
-                        Text("该 ID 同时决定屏保个性化状态；使用其他账户的值会导致锁屏图片消失。")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                            .fixedSize(horizontal: false, vertical: true)
-                    }
-                    .padding(.top, 4)
-
-                    Divider().padding(.vertical, 3)
-
                     fieldTitle("配对的充电头", detail: settings.normalizedPeripheralID == nil ? "未配对" : "已配对")
                     if settings.normalizedPeripheralID == nil {
                         pairingPicker(bluetooth)
@@ -319,7 +325,7 @@ struct SettingsView: View {
 
             settingSection(
                 "充电宝遥测",
-                detail: "启用后连接 Anker Prime 充电宝，接收电量、温度、每口功率与热控状态。和充电头共用上面那个 Anker 用户 ID。",
+                detail: "启用后连接 Anker Prime 充电宝，接收电量、温度、每口功率与热控状态。",
                 icon: "minus.plus.batteryblock"
             ) {
                 Toggle("启用充电宝模块", isOn: $settings.powerBankModuleEnabled)

@@ -244,11 +244,6 @@ struct DashboardView: View {
             sectionHeading("数据源", detail: "每个模块独立运行，状态变化会在这里反映")
             moduleGrid
 
-            if service.settings.chargerModuleEnabled {
-                sectionHeading("充电摘要", detail: "当前连接设备的实时输出")
-                overviewCard(now: Date())
-            }
-
             footer(now: Date())
         }
     }
