@@ -311,6 +311,16 @@ private struct ChargerUploadSignature: Equatable {
  * 该立刻发的是插拔、连断、设备换了。所以这里只收会「跳变」的字段，功率电压电流
  * 一概不进 —— 否则每帧都判定为变化，循环就从 5 秒一转变成 1 秒一转。
  */
+/**
+ * 电量**不进**这份指纹。
+ *
+ * 曾经按整数百分比收过，理由是「跳一格该立刻发」。它会跳得比想象中厉害：90W
+ * 输出时电压下垂、电量计重算，实测四秒内从 34.32% 掉到 33.32%，而按电池容量算
+ * 一个百分点要三十秒。于是整数每跳一格就算一次结构变化，即时上报退化成五秒一
+ * 次的轮询 —— 加上追发之后更糟，每一格都把追发计数重置满，循环再也停不下来。
+ *
+ * 电量是滚动读数，它该走节流窗口，和功率电压一样。
+ */
 private struct ChargingDevicesStructuralSignature: Equatable {
     private struct Port: Equatable {
         let name: String
@@ -336,9 +346,6 @@ private struct ChargingDevicesStructuralSignature: Equatable {
         let id: String
         let kind: ChargingDeviceKind
         let connected: Bool
-        /// 电量取整到整数百分比。原始值有两位小数，每几秒就动一次，
-        /// 那是「滚动」不是「结构变化」。
-        let batteryPercent: Int?
         let thermalLimited: Bool?
         /// 有没有在通过充电底座进电。上下底座是插拔的一种，只是没有线 ——
         /// 漏了它的话，把充电宝放上底座、拿下来，指纹一个字节都不变，站点只能
@@ -350,7 +357,6 @@ private struct ChargingDevicesStructuralSignature: Equatable {
             id = device.id
             kind = device.kind
             connected = device.connected
-            batteryPercent = device.battery?.percent.map { Int($0) }
             thermalLimited = device.battery?.thermalLimited
             onDock = device.dock?.active ?? false
             ports = device.ports.map(Port.init)
