@@ -44,6 +44,7 @@ struct SettingsView: View {
     @ObservedObject var service: ServiceController
     @ObservedObject private var settings: AppSettings
     @ObservedObject private var bluetooth: BluetoothService
+    @ObservedObject private var powerBankLink: BluetoothService
     @ObservedObject private var appleMusicAuthorization: AppleMusicAuthorizationManager
     @Environment(\.dismiss) private var dismiss
     @State private var selection: SettingsCategory = .general
@@ -54,7 +55,8 @@ struct SettingsView: View {
     init(service: ServiceController) {
         self.service = service
         settings = service.settings
-        bluetooth = service.bluetooth
+        bluetooth = service.chargerLink
+        powerBankLink = service.powerBankLink
         appleMusicAuthorization = service.appleMusicAuthorization
     }
 
@@ -308,10 +310,36 @@ struct SettingsView: View {
 
                     fieldTitle("配对的充电头", detail: settings.normalizedPeripheralID == nil ? "未配对" : "已配对")
                     if settings.normalizedPeripheralID == nil {
-                        pairingPicker
+                        pairingPicker(bluetooth)
                     } else {
-                        pairedRow
+                        pairedRow(bluetooth)
                     }
+                }
+            }
+
+            settingSection(
+                "充电宝遥测",
+                detail: "启用后连接 Anker Prime 充电宝，接收电量、温度、每口功率与热控状态。不需要 Anker 用户 ID。",
+                icon: "minus.plus.batteryblock"
+            ) {
+                Toggle("启用充电宝模块", isOn: $settings.powerBankModuleEnabled)
+                    .toggleStyle(.switch)
+
+                if settings.powerBankModuleEnabled {
+                    fieldTitle(
+                        "配对的充电宝",
+                        detail: settings.normalizedPowerBankPeripheralID == nil ? "未配对" : "已配对"
+                    )
+                    if settings.normalizedPowerBankPeripheralID == nil {
+                        pairingPicker(powerBankLink)
+                    } else {
+                        pairedRow(powerBankLink)
+                    }
+                    Text("充电宝空闲时会自己休眠并停止广播；手机 App 连着它的时候本机也连不上。扫不到就先按一下机身按钮。")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .padding(.top, 4)
                 }
             }
 
@@ -481,28 +509,28 @@ struct SettingsView: View {
         }
     }
 
-    private var pairingPicker: some View {
+    private func pairingPicker(_ link: BluetoothService) -> some View {
         VStack(alignment: .leading, spacing: 9) {
             HStack(spacing: 8) {
                 Button {
-                    bluetooth.startPairingScan()
+                    link.startPairingScan()
                 } label: {
-                    Label(bluetooth.isPairingScan ? "正在扫描…" : "扫描充电头", systemImage: "dot.radiowaves.left.and.right")
+                    Label(link.isPairingScan ? "正在扫描…" : "扫描\(link.slot.displayName)", systemImage: "dot.radiowaves.left.and.right")
                 }
                 .buttonStyle(.bordered)
-                .disabled(bluetooth.isPairingScan)
+                .disabled(link.isPairingScan)
 
-                if bluetooth.isPairingScan {
+                if link.isPairingScan {
                     ProgressView().controlSize(.small)
-                    Button("停止", systemImage: "stop.fill") { bluetooth.stopPairingScan() }
+                    Button("停止", systemImage: "stop.fill") { link.stopPairingScan() }
                         .buttonStyle(.borderless)
                 }
             }
 
-            ForEach(bluetooth.discovered) { charger in
+            ForEach(link.discovered) { charger in
                 Button {
-                    settings.peripheralID = charger.id.uuidString
-                    bluetooth.stopPairingScan()
+                    link.slot.storePeripheralID(charger.id.uuidString, in: settings)
+                    link.stopPairingScan()
                     save()
                 } label: {
                     HStack(spacing: 8) {
@@ -528,8 +556,8 @@ struct SettingsView: View {
                 .buttonStyle(.plain)
             }
 
-            if bluetooth.discovered.isEmpty {
-                Text(bluetooth.isPairingScan
+            if link.discovered.isEmpty {
+                Text(link.isPairingScan
                     ? "正在找附近的 A2687，让充电头保持通电。"
                     : "扫描一次并选择设备后，应用会记住它，以后只连接这一台。")
                     .font(.caption)
@@ -539,23 +567,23 @@ struct SettingsView: View {
         }
     }
 
-    private var pairedRow: some View {
+    private func pairedRow(_ link: BluetoothService) -> some View {
         VStack(alignment: .leading, spacing: 8) {
             HStack(spacing: 8) {
-                Text(settings.peripheralID)
+                Text(link.slot == .charger ? settings.peripheralID : settings.powerBankPeripheralID)
                     .font(.caption.monospaced())
                     .textSelection(.enabled)
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
                 Spacer()
                 Button("重新配对", systemImage: "arrow.triangle.2.circlepath") {
-                    settings.peripheralID = ""
+                    link.slot.storePeripheralID("", in: settings)
                     save()
                 }
                 .buttonStyle(.bordered)
                 .controlSize(.small)
             }
-            Text("只会尝试连接这一台设备；请求会保持等待，充电头上电后自动接入。")
+            Text("只会尝试连接这一台设备；请求会保持等待，\(link.slot.displayName)上电后自动接入。")
                 .font(.caption)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)

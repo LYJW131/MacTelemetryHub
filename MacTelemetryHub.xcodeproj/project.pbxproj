@@ -24,6 +24,8 @@
 		B10000000000000000000020 /* DeviceTelemetry.swift in Sources */ = {isa = PBXBuildFile; fileRef = F10000000000000000000020 /* DeviceTelemetry.swift */; };
 		B10000000000000000000021 /* PowerBankProtocol.swift in Sources */ = {isa = PBXBuildFile; fileRef = F10000000000000000000021 /* PowerBankProtocol.swift */; };
 		B10000000000000000000022 /* AnkerPrimeSpec.swift in Sources */ = {isa = PBXBuildFile; fileRef = F10000000000000000000022 /* AnkerPrimeSpec.swift */; };
+		B10000000000000000000023 /* ChargingDeviceDecoder.swift in Sources */ = {isa = PBXBuildFile; fileRef = F10000000000000000000023 /* ChargingDeviceDecoder.swift */; };
+		B10000000000000000000024 /* ChargingDeviceSlot.swift in Sources */ = {isa = PBXBuildFile; fileRef = F10000000000000000000024 /* ChargingDeviceSlot.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -47,6 +49,8 @@
 		F10000000000000000000020 /* DeviceTelemetry.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DeviceTelemetry.swift; sourceTree = "<group>"; };
 		F10000000000000000000021 /* PowerBankProtocol.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PowerBankProtocol.swift; sourceTree = "<group>"; };
 		F10000000000000000000022 /* AnkerPrimeSpec.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AnkerPrimeSpec.swift; sourceTree = "<group>"; };
+		F10000000000000000000023 /* ChargingDeviceDecoder.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChargingDeviceDecoder.swift; sourceTree = "<group>"; };
+		F10000000000000000000024 /* ChargingDeviceSlot.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChargingDeviceSlot.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -84,9 +88,7 @@
 				F1000000000000000000000D /* Info.plist */,
 				F1000000000000000000000F /* Assets.xcassets */,
 				A10000000000000000000013 /* Resources */,
-				F10000000000000000000020 /* DeviceTelemetry.swift */,
-				F10000000000000000000021 /* PowerBankProtocol.swift */,
-				F10000000000000000000022 /* AnkerPrimeSpec.swift */,
+				F10000000000000000000024 /* ChargingDeviceSlot.swift */,
 			);
 			path = App/MacTelemetryHub;
 			sourceTree = SOURCE_ROOT;
@@ -97,6 +99,10 @@
 				F10000000000000000000009 /* A2687Crypto.swift */,
 				F1000000000000000000000A /* A2687Protocol.swift */,
 				F1000000000000000000000B /* Models.swift */,
+				F10000000000000000000023 /* ChargingDeviceDecoder.swift */,
+				F10000000000000000000020 /* DeviceTelemetry.swift */,
+				F10000000000000000000021 /* PowerBankProtocol.swift */,
+				F10000000000000000000022 /* AnkerPrimeSpec.swift */,
 			);
 			path = Sources/ChargerTelemetryKit;
 			sourceTree = SOURCE_ROOT;
@@ -188,6 +194,8 @@
 				B10000000000000000000020 /* DeviceTelemetry.swift in Sources */,
 				B10000000000000000000021 /* PowerBankProtocol.swift in Sources */,
 				B10000000000000000000022 /* AnkerPrimeSpec.swift in Sources */,
+				B10000000000000000000023 /* ChargingDeviceDecoder.swift in Sources */,
+				B10000000000000000000024 /* ChargingDeviceSlot.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

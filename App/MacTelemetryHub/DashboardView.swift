@@ -4,13 +4,15 @@ import SwiftUI
 private enum DashboardSection: String, CaseIterable, Identifiable {
     case overview
     case charger
+    case powerBank
 
     var id: Self { self }
 
     var title: String {
         switch self {
         case .overview: "总览"
-        case .charger: "充电设备"
+        case .charger: "充电头"
+        case .powerBank: "充电宝"
         }
     }
 
@@ -18,6 +20,7 @@ private enum DashboardSection: String, CaseIterable, Identifiable {
         switch self {
         case .overview: "查看所有已启用的数据源"
         case .charger: "端口、电流与设备状态"
+        case .powerBank: "电量、温度与每口收放电"
         }
     }
 
@@ -25,6 +28,7 @@ private enum DashboardSection: String, CaseIterable, Identifiable {
         switch self {
         case .overview: "rectangle.grid.2x2"
         case .charger: "bolt.horizontal"
+        case .powerBank: "minus.plus.batteryblock"
         }
     }
 }
@@ -32,6 +36,7 @@ private enum DashboardSection: String, CaseIterable, Identifiable {
 struct DashboardView: View {
     @ObservedObject var service: ServiceController
     @ObservedObject private var bluetooth: BluetoothService
+    @ObservedObject private var powerBankLink: BluetoothService
     @ObservedObject private var httpServer: LocalHTTPServer
     @ObservedObject private var appleMusic: AppleMusicMonitor
     @ObservedObject private var codexBarCost: CodexBarCostMonitor
@@ -44,7 +49,8 @@ struct DashboardView: View {
 
     init(service: ServiceController) {
         self.service = service
-        bluetooth = service.bluetooth
+        bluetooth = service.chargerLink
+        powerBankLink = service.powerBankLink
         httpServer = service.httpServer
         appleMusic = service.appleMusic
         codexBarCost = service.codexBarCost
@@ -146,6 +152,8 @@ struct DashboardView: View {
                         overviewContent
                     case .charger:
                         chargerContent(now: now)
+                    case .powerBank:
+                        powerBankContent(now: now)
                     }
                 }
                 .frame(maxWidth: 980, alignment: .topLeading)
@@ -257,7 +265,7 @@ struct DashboardView: View {
                 sectionHeading("端口", detail: "实时电压、电流、功率与识别到的设备")
                 LazyVGrid(columns: [GridItem(.flexible(), spacing: 12), GridItem(.flexible(), spacing: 12), GridItem(.flexible(), spacing: 12)], spacing: 12) {
                     ForEach(["C1", "C2", "C3"], id: \.self) { key in
-                        PortCard(key: key, port: bluetooth.state.ports[key] ?? PortState())
+                        PortCard(key: key, port: bluetooth.chargerStateForDisplay.ports[key] ?? PortState())
                             .frame(minHeight: 248)
                     }
                 }
@@ -268,6 +276,97 @@ struct DashboardView: View {
                     icon: "bolt.horizontal"
                 )
             }
+        }
+    }
+
+    @ViewBuilder
+    private func powerBankContent(now: Date) -> some View {
+        if service.settings.powerBankModuleEnabled {
+            VStack(alignment: .leading, spacing: 18) {
+                if let error = powerBankLink.lastError, !powerBankLink.isConnected {
+                    errorBanner(error)
+                }
+
+                HStack(spacing: 8) {
+                    Button("断开充电宝", systemImage: "bolt.slash") { powerBankLink.disconnect() }
+                        .disabled(!powerBankLink.isConnected)
+                    Button("重连充电宝", systemImage: "arrow.clockwise") { powerBankLink.reconnect() }
+                        .disabled(powerBankLink.phase == .handshaking)
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+
+                if let state = powerBankLink.powerBankState, powerBankLink.hasTelemetry {
+                    powerBankSummary(state)
+                    sectionHeading("端口", detail: "C1 与 C2 双向，A 口只出。空闲端口不显示功率 —— 那个读数是过期的")
+                    LazyVGrid(
+                        columns: [GridItem(.flexible(), spacing: 12), GridItem(.flexible(), spacing: 12), GridItem(.flexible(), spacing: 12)],
+                        spacing: 12
+                    ) {
+                        ForEach(state.ports, id: \.name) { port in
+                            PowerBankPortCard(port: port).frame(minHeight: 180)
+                        }
+                    }
+                } else {
+                    EmptyModuleView(
+                        title: powerBankLink.phase.label,
+                        detail: "充电宝空闲时会休眠并停止广播，手机 App 连着它时本机也连不上。按一下机身按钮再等片刻。",
+                        icon: "minus.plus.batteryblock"
+                    )
+                }
+            }
+        } else {
+            EmptyModuleView(
+                title: "充电宝模块未启用",
+                detail: "在设置的“充电设备”中启用充电宝模块并完成一次配对。",
+                icon: "minus.plus.batteryblock"
+            )
+        }
+    }
+
+    private func powerBankSummary(_ state: PowerBankState) -> some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(alignment: .firstTextBaseline, spacing: 10) {
+                Text(state.batteryPercent.map { String(format: "%.2f%%", $0) } ?? "—")
+                    .font(.system(size: 32, weight: .semibold, design: .rounded))
+                if state.isThermallyLimited {
+                    Label("过热受限", systemImage: "thermometer.high")
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(.orange)
+                } else if state.charging == true {
+                    Label("充电中", systemImage: "bolt.fill")
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(.green)
+                }
+                Spacer()
+                if let serial = state.serialNumber {
+                    Text(serial).font(.caption.monospaced()).foregroundStyle(.secondary)
+                }
+            }
+            HStack(spacing: 18) {
+                metric("输入", String(format: "%.1f W", state.inputPowerW ?? 0))
+                metric("输出", String(format: "%.1f W", state.outputPowerW ?? 0))
+                if let hours = state.timeToFullHours, let minutes = state.timeToFullMinutes,
+                   hours * 60 + minutes > 0 {
+                    metric("充满还需", "\(hours)h\(String(format: "%02d", minutes))m")
+                }
+                if !state.temperatures.isEmpty {
+                    metric("温度", state.temperatures.map { "\($0)°C" }.joined(separator: " / "))
+                }
+                if let seconds = state.pomodoroSeconds, seconds > 0 {
+                    metric("番茄钟", "\(seconds / 60) 分钟")
+                }
+            }
+        }
+        .padding(16)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 12))
+    }
+
+    private func metric(_ title: String, _ value: String) -> some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Text(title).font(.caption).foregroundStyle(.secondary)
+            Text(value).font(.callout.weight(.medium).monospacedDigit())
         }
     }
 
@@ -370,7 +469,7 @@ struct DashboardView: View {
                 icon: "bolt.fill",
                 enabled: service.settings.chargerModuleEnabled,
                 value: service.settings.chargerModuleEnabled ? bluetooth.phase.label : "已关闭",
-                detail: bluetooth.state.totalOutputPowerW.map { String(format: "%.2f W", $0) },
+                detail: bluetooth.chargerStateForDisplay.totalOutputPowerW.map { String(format: "%.2f W", $0) },
                 action: { _ = service.requestImmediateReport(.charger) },
                 actionEnabled: service.canRequestImmediateReport(.charger),
                 isReporting: service.isManualReportInFlight(.charger),
@@ -415,7 +514,7 @@ struct DashboardView: View {
                     .foregroundStyle(.secondary)
 
                 HStack(alignment: .firstTextBaseline, spacing: 6) {
-                    Text(number(bluetooth.state.totalOutputPowerW, digits: 2))
+                    Text(number(bluetooth.chargerStateForDisplay.totalOutputPowerW, digits: 2))
                         .font(.system(size: 44, weight: .semibold, design: .rounded))
                         .contentTransition(.numericText())
                     Text("W")
@@ -424,7 +523,7 @@ struct DashboardView: View {
                 }
 
                 HStack(spacing: 10) {
-                    ProgressView(value: min(max((bluetooth.state.totalOutputPowerW ?? 0) / 250, 0), 1))
+                    ProgressView(value: min(max((bluetooth.chargerStateForDisplay.totalOutputPowerW ?? 0) / 250, 0), 1))
                         .tint(.blue)
                     Text("250 W MAX")
                         .font(.caption2.monospacedDigit().weight(.medium))
@@ -437,9 +536,9 @@ struct DashboardView: View {
             Divider().frame(height: 100)
 
             LazyVGrid(columns: [GridItem(.flexible(), spacing: 18), GridItem(.flexible(), spacing: 18)], alignment: .leading, spacing: 14) {
-                DeviceFact(title: "序列号", value: bluetooth.state.device.serialNumber, icon: "number")
-                DeviceFact(title: "MAC 地址", value: bluetooth.state.device.macAddress, icon: "antenna.radiowaves.left.and.right")
-                DeviceFact(title: "固件版本", value: bluetooth.state.device.firmwareVersion, icon: "cpu")
+                DeviceFact(title: "序列号", value: bluetooth.chargerStateForDisplay.device.serialNumber, icon: "number")
+                DeviceFact(title: "MAC 地址", value: bluetooth.chargerStateForDisplay.device.macAddress, icon: "antenna.radiowaves.left.and.right")
+                DeviceFact(title: "固件版本", value: bluetooth.chargerStateForDisplay.device.firmwareVersion, icon: "cpu")
                 DeviceFact(title: "数据更新", value: ageText(now: now), icon: "clock.arrow.circlepath")
             }
             .frame(maxWidth: .infinity)
@@ -526,12 +625,12 @@ struct DashboardView: View {
     }
 
     private func isStale(now: Date) -> Bool {
-        guard let updatedAt = bluetooth.state.updatedAt else { return bluetooth.isConnected }
+        guard let updatedAt = bluetooth.chargerStateForDisplay.updatedAt else { return bluetooth.isConnected }
         return now.timeIntervalSince1970 - updatedAt > 15
     }
 
     private func ageText(now: Date) -> String? {
-        bluetooth.state.updatedAt.map { String(format: "%.1f 秒前", max(0, now.timeIntervalSince1970 - $0)) }
+        bluetooth.chargerStateForDisplay.updatedAt.map { String(format: "%.1f 秒前", max(0, now.timeIntervalSince1970 - $0)) }
     }
 }
 

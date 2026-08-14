@@ -262,6 +262,7 @@ enum TelemetryModule: String, CaseIterable, Hashable, Sendable {
     case desktop
     case appleMusic
     case charger
+    case powerBank
     case timezone
     case vibeCoding
 
@@ -269,7 +270,8 @@ enum TelemetryModule: String, CaseIterable, Hashable, Sendable {
         switch self {
         case .desktop: "前台应用"
         case .appleMusic: "Apple Music"
-        case .charger: "充电设备"
+        case .charger: "充电头"
+        case .powerBank: "充电宝"
         case .timezone: "Mac 时区"
         case .vibeCoding: "Vibe Coding"
         }
@@ -289,6 +291,74 @@ private struct ChargerUploadSignature: Equatable {
         ports = payload.ports
     }
 }
+
+/**
+ * 只包含「插拔 / 换设备」这类结构性变化的指纹，用来决定要不要即时上报。
+ *
+ * `mode` 是充电头自己给的端口开关位（0xA5/0xA6/0xA7 结构体的第一个字节），
+ * 不是从功率推出来的 —— 实测插着线不取电的口是 `Output` + 0.00W，功率阈值
+ * 那套会把它误判成关。所以它是最直接的插拔信号，比设备身份还灵：插一个
+ * 表里没有的设备，身份查不出名字，但开关位一定会翻。
+ *
+ * 读 `PortState` 而不是上报载荷，是因为载荷里的 `model` / `vendor` 是查表查出来
+ * 的显示名，表里没有的设备就是 nil、跟空口分不出来。`vendorID` / `productID`
+ * 是原始值，没这个问题。
+ */
+/**
+ * 「结构变了没有」的指纹 —— 决定要不要立刻叫醒上报循环。
+ *
+ * 采集是 1 Hz 推流，但绝大多数帧只是功率在滚动，那种变化等节流窗口就行。真正
+ * 该立刻发的是插拔、连断、设备换了。所以这里只收会「跳变」的字段，功率电压电流
+ * 一概不进 —— 否则每帧都判定为变化，循环就从 5 秒一转变成 1 秒一转。
+ */
+private struct ChargingDevicesStructuralSignature: Equatable {
+    private struct Port: Equatable {
+        let name: String
+        let active: Bool
+        let direction: String?
+        let attached: Bool?
+        let cable: String?
+        let deviceModel: String?
+        let vendor: String?
+
+        init(_ port: DevicePortPayload) {
+            name = port.name
+            active = port.active
+            direction = port.direction
+            attached = port.attached
+            cable = port.cable
+            deviceModel = port.attachedDevice?.model
+            vendor = port.attachedDevice?.vendor
+        }
+    }
+
+    private struct Device: Equatable {
+        let id: String
+        let kind: ChargingDeviceKind
+        let connected: Bool
+        /// 电量取整到整数百分比。原始值有两位小数，每几秒就动一次，
+        /// 那是「滚动」不是「结构变化」。
+        let batteryPercent: Int?
+        let thermalLimited: Bool?
+        let ports: [Port]
+
+        init(_ device: ChargingDevicePayload) {
+            id = device.id
+            kind = device.kind
+            connected = device.connected
+            batteryPercent = device.battery?.percent.map { Int($0) }
+            thermalLimited = device.battery?.thermalLimited
+            ports = device.ports.map(Port.init)
+        }
+    }
+
+    private let devices: [Device]
+
+    init(_ payload: ChargingDevicesPayload) {
+        devices = payload.devices.map(Device.init)
+    }
+}
+
 
 /**
  * 只包含「插拔 / 换设备」这类结构性变化的指纹，用来决定要不要即时上报。
@@ -412,7 +482,12 @@ private struct AppleMusicPositionAnchor {
 @MainActor
 final class ServiceController: ObservableObject {
     let settings: AppSettings
-    let bluetooth: BluetoothService
+    /// 每台设备一条独立链路：各自的 CBCentralManager、各自的配对 UUID、各自的
+    /// 重连退避。充电头一直通电、断了就是拔了插座；充电宝空闲会自己睡、还会被
+    /// 手机 app 抢走连接 —— 共用一套超时必然有一边不合适。
+    let chargingLinks: [BluetoothService]
+    var chargerLink: BluetoothService { chargingLinks[0] }
+    var powerBankLink: BluetoothService { chargingLinks[1] }
     let desktopActivity = DesktopActivityMonitor()
     let timeZone = TimeZoneMonitor()
     let appleMusic = AppleMusicMonitor()
@@ -451,9 +526,9 @@ final class ServiceController: ObservableObject {
     private var lastPostedVibeCodingUsageAt: Date?
     private var lastPostedVibeCodingLimitsAt: Date?
     private var lastPostedVibeCodingSessionsAt: Date?
-    private var lastPostedCharger: ChargerUploadSignature?
+    private var lastPostedChargingDevices: ChargingDevicesPayload?
     /// 只跟结构性变化比，管的是「要不要即时发」，不管「要不要带 charger 模块」
-    private var lastPostedChargerStructural: ChargerStructuralSignature?
+    private var lastPostedChargingStructural: ChargingDevicesStructuralSignature?
     private var lastPostedDesktop: DesktopUploadSignature?
     /// 这个上报会话里服务端已经确认保存的图标内容指纹。
     private var uploadedDesktopIconHashes: Set<String> = []
@@ -505,7 +580,10 @@ final class ServiceController: ObservableObject {
     init() {
         let settings = AppSettings()
         self.settings = settings
-        bluetooth = BluetoothService(settings: settings)
+        chargingLinks = [
+            BluetoothService(settings: settings, slot: .charger),
+            BluetoothService(settings: settings, slot: .powerBank),
+        ]
     }
 
     deinit {
@@ -542,7 +620,7 @@ final class ServiceController: ObservableObject {
         agentLimits.stop()
         codingSessions.stop()
         httpServer.stop()
-        bluetooth.shutdown()
+        chargerLink.shutdown()
     }
 
     /**
@@ -721,6 +799,7 @@ final class ServiceController: ObservableObject {
         case .desktop: settings.desktopModuleEnabled
         case .appleMusic: settings.appleMusicModuleEnabled
         case .charger: settings.chargerModuleEnabled
+        case .powerBank: settings.powerBankModuleEnabled
         case .timezone: settings.timezoneModuleEnabled
         case .vibeCoding: settings.codexBarModuleEnabled
         }
@@ -730,7 +809,8 @@ final class ServiceController: ObservableObject {
         switch module {
         case .desktop: desktopActivity.snapshot != nil
         case .appleMusic: appleMusic.snapshot != nil
-        case .charger: statusPayload.updatedAt != nil
+        case .charger: chargerLink.hasTelemetry
+        case .powerBank: powerBankLink.hasTelemetry
         case .timezone: timeZone.snapshot != nil
         // 三份任一有值就能发。从前只看用量那份，于是那个扫描一失败，
         // 刚取到的限额连发都发不出去。
@@ -741,8 +821,42 @@ final class ServiceController: ObservableObject {
         }
     }
 
+    /// 所有已启用、且真的收到过遥测的充电设备。一台都没有就返回 nil，
+    /// 上报信封里那个键整个不出现。
+    var chargingDevicesPayload: ChargingDevicesPayload? {
+        let devices = chargingLinks.compactMap { link -> ChargingDevicePayload? in
+            guard link.slot.isEnabled(settings) else { return nil }
+            return link.devicePayload
+        }
+        return devices.isEmpty ? nil : ChargingDevicesPayload(devices: devices)
+    }
+
+    /// 本地 HTTP 的充电头视图。它服务的是本机状态页，那页只画充电头。
     var statusPayload: StatusPayload {
-        StatusPayload(connected: bluetooth.isConnected, state: bluetooth.state)
+        StatusPayload(connected: chargerLink.isConnected, state: chargerLink.chargerStateForDisplay)
+    }
+
+    /**
+     * 挂上或摘掉一条充电设备链路。
+     *
+     * 只有结构性变化才叫醒循环：采集是 1 Hz 推流，每帧都叫醒的话循环会从 5 秒
+     * 一转变成 1 秒一转，而其中绝大多数帧只是功率在滚动，本来就该等节流窗口。
+     * 指纹比对是纯本地的，1 Hz 跑它远比白转一圈循环便宜。
+     */
+    private func configure(link: BluetoothService) {
+        guard link.slot.isEnabled(settings) else {
+            link.onStateChange = nil
+            link.disconnect()
+            return
+        }
+        link.onStateChange = { [weak self] in
+            guard let self, let payload = chargingDevicesPayload else { return }
+            let signature = ChargingDevicesStructuralSignature(payload)
+            guard signature != lastPostedChargingStructural else { return }
+            wakeReporter()
+        }
+        link.start()
+        link.reconnect()
     }
 
     private func wakeReporter() {
@@ -773,29 +887,8 @@ final class ServiceController: ObservableObject {
     }
 
     private func configureModules() {
-        if settings.chargerModuleEnabled {
-            /**
-             * 只有结构性变化才叫醒循环。
-             *
-             * 采集层是设备主动推流，约 1 Hz —— 每帧都叫醒的话循环就从 5 秒一转
-             * 变成 1 秒一转，而其中绝大多数帧只是功率在滚动，本来就该等节流窗口。
-             * 这里先拿结构指纹比一次，插拔和换设备才放行；比对是纯本地的，
-             * 1 Hz 跑它的代价远小于白转一圈循环。
-             */
-            bluetooth.onStateChange = { [weak self] in
-                guard let self else { return }
-                let signature = ChargerStructuralSignature(
-                    connected: bluetooth.isConnected,
-                    state: bluetooth.state
-                )
-                guard signature != lastPostedChargerStructural else { return }
-                wakeReporter()
-            }
-            bluetooth.start()
-            bluetooth.reconnect()
-        } else {
-            bluetooth.onStateChange = nil
-            bluetooth.disconnect()
+        for link in chargingLinks {
+            configure(link: link)
         }
 
         if settings.desktopModuleEnabled {
@@ -898,8 +991,8 @@ final class ServiceController: ObservableObject {
         lastPostedVibeCodingUsageAt = nil
         lastPostedVibeCodingLimitsAt = nil
         lastPostedVibeCodingSessionsAt = nil
-        lastPostedCharger = nil
-        lastPostedChargerStructural = nil
+        lastPostedChargingDevices = nil
+        lastPostedChargingStructural = nil
         lastPostedDesktop = nil
         uploadedDesktopIconHashes.removeAll(keepingCapacity: true)
         uploadedDesktopIconOrder.removeAll(keepingCapacity: true)
@@ -937,16 +1030,10 @@ final class ServiceController: ObservableObject {
                     await refreshAppleMusicCredentialsIfNeeded()
 
                     // 变化判断全是本地计算，每圈都做；nextPostAt 只管「什么时候允许发」。
-                    let charger = settings.chargerModuleEnabled && statusPayload.updatedAt != nil
-                        ? statusPayload
-                        : nil
-                    let chargerSignature = charger.map(ChargerUploadSignature.init)
-                    let chargerStructural = charger.map { _ in
-                        ChargerStructuralSignature(
-                            connected: bluetooth.isConnected,
-                            state: bluetooth.state
-                        )
-                    }
+                    // 两台设备一起算：任意一台插拔都该立刻发，功率滚动都该等窗口。
+                    let charger = chargingDevicesPayload
+                    let chargerSignature = charger
+                    let chargerStructural = charger.map(ChargingDevicesStructuralSignature.init)
                     let desktop = settings.desktopModuleEnabled ? desktopActivity.snapshot : nil
                     let desktopSignature = desktop.map(DesktopUploadSignature.init)
                     let timezone = settings.timezoneModuleEnabled ? timeZone.snapshot : nil
@@ -960,7 +1047,7 @@ final class ServiceController: ObservableObject {
                     let musicUserTokenChanged = credentials.map {
                         $0.musicUserToken != lastPostedAppleMusicUserToken
                     } ?? false
-                    let chargerChanged = chargerSignature != nil && chargerSignature != lastPostedCharger
+                    let chargerChanged = chargerSignature != nil && chargerSignature != lastPostedChargingDevices
                     let desktopChanged = desktopSignature != nil && desktopSignature != lastPostedDesktop
                     let timezoneChanged = timezoneSignature != nil && timezoneSignature != lastPostedTimeZone
                     // 进度不参与变化判断，只在它偏离网页的预测值时才重新对锚点，
@@ -1081,7 +1168,7 @@ final class ServiceController: ObservableObject {
                     // 只认结构性指纹：功率、电压、电流的滚动照旧等节流窗口，
                     // 否则充电中每一轮都「有变化」，即时上报就退化成 5 秒一次的轮询。
                     let chargerUrgent = !manualMode && chargerStructural != nil &&
-                        chargerStructural != lastPostedChargerStructural
+                        chargerStructural != lastPostedChargingStructural
                     // 退避期内一律不放行。否则服务端挂掉时，未推进的 lastPosted 会让
                     // urgent 一直为真，即时上报就变成每圈一次的重试风暴。
                     let urgent = (manualMode || musicUrgent || desktopUrgent || timezoneUrgent ||
@@ -1143,7 +1230,7 @@ final class ServiceController: ObservableObject {
                         // Apple Music 目录，那次查询的结果自带封面 URL。
                         let musicPayload = music
                         let envelope = makeTelemetryEnvelope(
-                            charger: chargerToSend ? charger : nil,
+                            chargingDevices: chargerToSend ? charger : nil,
                             desktop: desktopToSend ? desktopPayload : nil,
                             timezone: timezoneToSend ? timezone : nil,
                             appleMusic: musicToSend ? musicPayload : nil,
@@ -1177,10 +1264,10 @@ final class ServiceController: ObservableObject {
                         reporterLastSuccess = Date()
                         reporterLastError = nil
                         lastHeartbeatAt = Date()
-                        if chargerToSend { lastPostedCharger = chargerSignature }
+                        if chargerToSend { lastPostedChargingDevices = chargerSignature }
                         // 结构指纹跟着每次成功发送推进，跟 chargerChanged 无关：
                         // 结构变了完整指纹必然也变，反过来不成立。
-                        if let chargerStructural { lastPostedChargerStructural = chargerStructural }
+                        if let chargerStructural { lastPostedChargingStructural = chargerStructural }
                         if desktopToSend {
                             if desktopIconAvailable == false, let iconHash = desktop?.iconHash {
                                 forgetUploadedDesktopIcon(iconHash)
@@ -1273,7 +1360,7 @@ final class ServiceController: ObservableObject {
             )
         }
         return makeTelemetryEnvelope(
-            charger: settings.chargerModuleEnabled && statusPayload.updatedAt != nil ? statusPayload : nil,
+            chargingDevices: chargingDevicesPayload,
             desktop: settings.desktopModuleEnabled ? desktopActivity.snapshot : nil,
             timezone: settings.timezoneModuleEnabled ? timeZone.snapshot : nil,
             appleMusic: settings.appleMusicModuleEnabled ? appleMusic.snapshot : nil,
@@ -1287,7 +1374,7 @@ final class ServiceController: ObservableObject {
     }
 
     private func makeTelemetryEnvelope(
-        charger: StatusPayload?,
+        chargingDevices: ChargingDevicesPayload?,
         desktop: DesktopActivitySnapshot?,
         timezone: TimeZoneSnapshot?,
         appleMusic: AppleMusicSnapshot?,
@@ -1303,7 +1390,7 @@ final class ServiceController: ObservableObject {
             heartbeatAt: Int64(Date().timeIntervalSince1970 * 1_000),
             activeModules: activeModuleNames,
             modules: TelemetryModulesPayload(
-                charger: charger,
+                chargingDevices: chargingDevices,
                 desktop: desktop,
                 appleMusic: appleMusic,
                 appleMusicCredentials: appleMusicCredentials,
@@ -1334,7 +1421,7 @@ final class ServiceController: ObservableObject {
         request.httpMethod = "POST"
         request.httpBody = try? JSONCoding.encoder().encode(
             makeTelemetryEnvelope(
-                charger: nil,
+                chargingDevices: nil,
                 desktop: nil,
                 timezone: nil,
                 appleMusic: nil,
@@ -1377,6 +1464,7 @@ final class ServiceController: ObservableObject {
     private var activeModuleNames: [String] {
         var names: [String] = []
         if settings.chargerModuleEnabled { names.append(TelemetryModule.charger.rawValue) }
+        if settings.powerBankModuleEnabled { names.append(TelemetryModule.powerBank.rawValue) }
         if settings.desktopModuleEnabled { names.append(TelemetryModule.desktop.rawValue) }
         if settings.appleMusicModuleEnabled { names.append(TelemetryModule.appleMusic.rawValue) }
         if settings.timezoneModuleEnabled { names.append(TelemetryModule.timezone.rawValue) }
@@ -1413,18 +1501,18 @@ final class ServiceController: ObservableObject {
         case ("GET", "/health"):
             return encode(HealthPayload(
                 ok: true,
-                connected: bluetooth.isConnected,
-                autoConnect: bluetooth.desiredConnection,
-                lastError: bluetooth.lastError,
-                updatedAt: bluetooth.state.updatedAt
+                connected: chargerLink.isConnected,
+                autoConnect: chargerLink.desiredConnection,
+                lastError: chargerLink.lastError,
+                updatedAt: chargerLink.chargerStateForDisplay.updatedAt
             ))
         case ("GET", "/debug/status"):
             return encode(DebugPayload(
-                connected: bluetooth.isConnected,
-                autoConnect: bluetooth.desiredConnection,
-                lastError: bluetooth.lastError,
-                phase: bluetooth.phase.label,
-                state: bluetooth.state
+                connected: chargerLink.isConnected,
+                autoConnect: chargerLink.desiredConnection,
+                lastError: chargerLink.lastError,
+                phase: chargerLink.phase.label,
+                state: chargerLink.chargerStateForDisplay
             ))
         /**
          * 采集侧各模块最近一次的失败原因。
@@ -1438,7 +1526,7 @@ final class ServiceController: ObservableObject {
                 "codexbar": codexBarCost.lastError,
                 "ccusageSessions": codingSessions.lastError,
                 "appleMusic": appleMusic.lastError,
-                "bluetooth": bluetooth.lastError,
+                "bluetooth": chargerLink.lastError,
                 "reporter": reporterLastError,
             ])
         case ("GET", "/ports"):
@@ -1452,11 +1540,11 @@ final class ServiceController: ObservableObject {
         case ("GET", "/metrics"):
             return .text(metrics(), contentType: "text/plain; version=0.0.4; charset=utf-8")
         case ("POST", "/disconnect"):
-            bluetooth.disconnect()
-            return encode(ActionPayload(ok: true, connected: false, autoConnect: false, lastError: bluetooth.lastError))
+            chargerLink.disconnect()
+            return encode(ActionPayload(ok: true, connected: false, autoConnect: false, lastError: chargerLink.lastError))
         case ("POST", "/reconnect"):
-            bluetooth.reconnect()
-            return encode(ActionPayload(ok: true, connected: bluetooth.isConnected, autoConnect: true, lastError: bluetooth.lastError))
+            chargerLink.reconnect()
+            return encode(ActionPayload(ok: true, connected: chargerLink.isConnected, autoConnect: true, lastError: chargerLink.lastError))
         default:
             return .text("{\"detail\":\"not found\"}", contentType: "application/json", status: 404, reason: "Not Found")
         }

@@ -35,7 +35,7 @@ private struct MenuBarView: View {
 
     init(service: ServiceController) {
         self.service = service
-        bluetooth = service.bluetooth
+        bluetooth = service.chargerLink
         desktopActivity = service.desktopActivity
     }
 
@@ -51,7 +51,7 @@ private struct MenuBarView: View {
             }
         }
         Text(bluetooth.phase.label)
-        if let power = bluetooth.state.totalOutputPowerW {
+        if let power = bluetooth.chargerStateForDisplay.totalOutputPowerW {
             Text(String(format: "总输出 %.2f W", power))
         }
         Divider()

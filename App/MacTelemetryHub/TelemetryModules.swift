@@ -281,7 +281,7 @@ struct TimeZoneSnapshot: Codable, Equatable, Sendable {
 }
 
 struct TelemetryModulesPayload: Encodable, Sendable {
-    let charger: StatusPayload?
+    let chargingDevices: ChargingDevicesPayload?
     let desktop: DesktopActivitySnapshot?
     let appleMusic: AppleMusicSnapshot?
     let appleMusicCredentials: AppleMusicCredentialsPayload?
@@ -304,13 +304,13 @@ struct TelemetryModulesPayload: Encodable, Sendable {
     let includeAppleMusic: Bool
 
     private enum CodingKeys: String, CodingKey {
-        case charger, desktop, appleMusic, appleMusicCredentials, timezone
+        case chargingDevices, desktop, appleMusic, appleMusicCredentials, timezone
         case vibeCodingUsage, vibeCodingLimits, vibeCodingSessions
     }
 
     func encode(to encoder: Encoder) throws {
         var container = encoder.container(keyedBy: CodingKeys.self)
-        try container.encodeIfPresent(charger, forKey: .charger)
+        try container.encodeIfPresent(chargingDevices, forKey: .chargingDevices)
         if includeDesktop { try container.encode(desktop, forKey: .desktop) }
         if includeAppleMusic { try container.encode(appleMusic, forKey: .appleMusic) }
         try container.encodeIfPresent(appleMusicCredentials, forKey: .appleMusicCredentials)

@@ -183,9 +183,17 @@ public enum A2687Protocol {
         ]
     }
 
-    public static func postSessionSteps(userID: String, date: Date = Date()) throws -> [HandshakeStep] {
-        let encoded = try validateUserID(userID)
-        return [
+    /**
+     * 会话密钥就绪后要发的命令。
+     *
+     * `userID` 传 nil 就只发 0x0022 —— 充电宝那样就够了，握完手它自己开始 1 Hz
+     * 推 0x0300。充电头不行：不发 0x0027 带上账号 ID，它一帧都不推。
+     */
+    public static func postSessionSteps(
+        userID: String?,
+        date: Date = Date()
+    ) throws -> [HandshakeStep] {
+        var steps = [
             HandshakeStep(
                 command: 0x0022,
                 fields: [
@@ -194,13 +202,19 @@ public enum A2687Protocol {
                     TLVField(0xA5, Data("CST-8".utf8)),
                 ],
                 expectsResponse: false
-            ),
-            HandshakeStep(
-                command: 0x0027,
-                fields: [TLVField(0xA1, epochBytes(date: date)), TLVField(0xA2, encoded)],
-                expectsResponse: false
-            ),
+            )
         ]
+        if let userID {
+            let encoded = try validateUserID(userID)
+            steps.append(
+                HandshakeStep(
+                    command: 0x0027,
+                    fields: [TLVField(0xA1, epochBytes(date: date)), TLVField(0xA2, encoded)],
+                    expectsResponse: false
+                )
+            )
+        }
+        return steps
     }
 
     public static func statusProbe(date: Date = Date()) -> [TLVField] {

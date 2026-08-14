@@ -18,7 +18,7 @@ final class BluetoothService: NSObject, ObservableObject {
             switch self {
             case .stopped: "已停止"
             case let .bluetoothUnavailable(reason): reason
-            case .awaitingPairing: "未配对充电头"
+            case .awaitingPairing: "未配对"
             case .connecting: "正在连接"
             case .handshaking: "正在认证"
             case .connected: "已连接"
@@ -34,7 +34,21 @@ final class BluetoothService: NSObject, ObservableObject {
         var rssi: Int
     }
 
-    @Published private(set) var state = ChargerState()
+    /// 这条链路对面是哪台设备。决定用哪个解码器、读哪个配对 UUID、超时怎么配。
+    let slot: ChargingDeviceSlot
+    /// 解码器自己持有状态。它是个类，改动不会触发 @Published，所以每次解出新
+    /// 数据都要显式 objectWillChange.send() —— 和原来手动发通知的做法一致。
+    private(set) var decoder: ChargingDeviceDecoder
+
+    /// 给仪表盘和本地 HTTP 用的具体状态；类型不对就是 nil。
+    var chargerState: ChargerState? { (decoder as? ChargerDecoder)?.state }
+    var powerBankState: PowerBankState? { (decoder as? PowerBankDecoder)?.state }
+    /// 给充电头那几张卡片用。这条链路不是充电头就给个空状态 —— 那些视图只会
+    /// 挂在充电头链路上，真取到空值说明调用点接错了，空状态会立刻显示出来。
+    var chargerStateForDisplay: ChargerState { chargerState ?? ChargerState() }
+    /// 上报用的通用负载。没收到过遥测就是 nil，不塞空壳。
+    var devicePayload: ChargingDevicePayload? { decoder.payload(connected: isConnected) }
+    var hasTelemetry: Bool { decoder.hasTelemetry }
     /**
      * 解出新的端口数据时通知上报循环。
      *
@@ -73,12 +87,8 @@ final class BluetoothService: NSObject, ObservableObject {
     private var peripheral: CBPeripheral?
     private var writeCharacteristic: CBCharacteristic?
     private var notifyCharacteristic: CBCharacteristic?
-    /// Silence that means the pushed stream needs a nudge. The charger pushes
-    /// at ~1 Hz with a measured worst-case gap of 1.24 s, so this sits far
-    /// outside normal jitter.
-    private static let streamIdleTimeout = Duration.seconds(10)
-    /// Silence that means the session is not coming back on its own.
-    private static let streamStallTimeout = Duration.seconds(20)
+    private var streamIdleTimeout: Duration { slot.streamIdleTimeout }
+    private var streamStallTimeout: Duration { slot.streamStallTimeout }
 
     private var crypto = A2687CryptoContext()
     private var assembler = FrameAssembler()
@@ -95,12 +105,12 @@ final class BluetoothService: NSObject, ObservableObject {
     private var isSystemSleeping = false
     /// 配对扫描开着的时长。够走完一轮广播间隔，又不至于让用户对着列表干等。
     private static let pairingScanWindow = Duration.seconds(15)
-    /// 掉线后重新挂起定向连接前的喘息。定向连接本身不花电，这个间隔只是防止
-    /// 充电头反复接上又立刻断开时打转。
-    private static let reconnectDelay = Duration.seconds(5)
+    private var reconnectDelay: Duration { slot.reconnectDelay }
 
-    init(settings: AppSettings) {
+    init(settings: AppSettings, slot: ChargingDeviceSlot) {
         self.settings = settings
+        self.slot = slot
+        decoder = slot.makeDecoder()
         super.init()
     }
 
@@ -262,13 +272,13 @@ final class BluetoothService: NSObject, ObservableObject {
 
         retryTask?.cancel()
         retryTask = nil
-        guard let identifier = settings.normalizedPeripheralID else {
+        guard let identifier = slot.peripheralID(settings) else {
             phase = .awaitingPairing  // 还没配对过，这是正常状态，不算错误
             return
         }
         guard let known = central.retrievePeripherals(withIdentifiers: [identifier]).first else {
             phase = .awaitingPairing
-            lastError = "系统里没有这台充电头的记录，请在设置里重新扫描配对"
+            lastError = "系统里没有这台\(slot.displayName)的记录，请在设置里重新扫描配对"
             return
         }
         connect(to: known)
@@ -336,14 +346,15 @@ final class BluetoothService: NSObject, ObservableObject {
     }
 
     private func performHandshake() async throws {
-        let userID = settings.userID.trimmingCharacters(in: .whitespacesAndNewlines)
-        _ = try A2687Protocol.realtimeProbe(userID: userID)
+        // 账号 ID 只有充电头需要。先验一次，免得走完整个握手才在最后一步炸。
+        let userID = decoder.needsAccountID ? accountID() : nil
+        if let userID { _ = try A2687Protocol.realtimeProbe(userID: userID) }
 
         for step in A2687Protocol.handshakeSteps() {
             if step.expectsResponse {
                 let payload = try await sendExpect(group: A2687Protocol.groupSession, command: step.command, fields: step.fields)
                 if step.command == 0x0029 {
-                    A2687Protocol.parseHandshakeInfo(payload, device: &state.device)
+                    decoder.handleHandshakeInfo(payload)
                     objectWillChange.send()
                 }
             } else {
@@ -379,13 +390,23 @@ final class BluetoothService: NSObject, ObservableObject {
     /// pushing `0x0300` at ~1 Hz on its own once `0x0022`/`0x0027` have armed
     /// it, so nothing has to be requested to keep telemetry flowing.
     private func armTelemetry() throws {
-        let userID = settings.userID.trimmingCharacters(in: .whitespacesAndNewlines)
-        try send(group: A2687Protocol.groupTelemetry, command: A2687Protocol.commandStatus, fields: A2687Protocol.statusProbe())
+        try send(
+            group: A2687Protocol.groupTelemetry,
+            command: A2687Protocol.commandStatus,
+            fields: A2687Protocol.statusProbe()
+        )
+        // 0x020A 的请求体里必须带账号 ID，没有就构造不出来。充电宝不需要它，
+        // 0x0022 之后就自己推 0x0300 了。
+        guard decoder.needsAccountID else { return }
         try send(
             group: A2687Protocol.groupTelemetry,
             command: A2687Protocol.commandRealtime,
-            fields: A2687Protocol.realtimeProbe(userID: userID)
+            fields: A2687Protocol.realtimeProbe(userID: accountID())
         )
+    }
+
+    private func accountID() -> String {
+        settings.userID.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
     /// Watch for the pushed stream going quiet.
@@ -405,11 +426,11 @@ final class BluetoothService: NSObject, ObservableObject {
                 guard !Task.isCancelled, let self else { return }
                 let idle = ContinuousClock.now - lastFrameAt
 
-                if idle < Self.streamIdleTimeout {
+                if idle < streamIdleTimeout {
                     rearmed = false
                     continue
                 }
-                if idle >= Self.streamStallTimeout {
+                if idle >= streamStallTimeout {
                     lastError = "充电器已停止推送，正在重建蓝牙会话"
                     if let peripheral { central?.cancelPeripheralConnection(peripheral) }
                     return
@@ -460,16 +481,9 @@ final class BluetoothService: NSObject, ObservableObject {
                 // handshake replies and the bare 0x020A ack that carries no
                 // port data.
                 lastFrameAt = .now
-                if frame.command == 0x0200 || frame.command == 0x0A00 {
-                    A2687Protocol.parseStatusSnapshot(payload, state: &state)
-                    _ = A2687Protocol.parseRealtime(payload, command: frame.command, state: &state)
+                if decoder.handleFrame(command: frame.command, payload: payload) {
                     objectWillChange.send()
                     onStateChange?()
-                } else if [0x020A, 0x0207, 0x0206, 0x4300, 0x0300, 0x0303, 0x0410].contains(frame.command) {
-                    if A2687Protocol.parseRealtime(payload, command: frame.command, state: &state) {
-                        objectWillChange.send()
-                        onStateChange?()
-                    }
                 }
                 if let pending, pending.command == frame.command {
                     pending.timeout.cancel()
@@ -521,7 +535,13 @@ extension BluetoothService: @preconcurrency CBCentralManagerDelegate {
         let advertisedName = advertisementData[CBAdvertisementDataLocalNameKey] as? String
         let name = peripheral.name ?? advertisedName ?? ""
         let services = advertisementData[CBAdvertisementDataServiceUUIDsKey] as? [CBUUID] ?? []
-        guard name.hasPrefix(A2687Protocol.deviceNamePrefix) || services.contains(CBUUID(string: A2687Protocol.advertisedServiceUUID)) else { return }
+        // 整条 Prime 产品线都播 ff09，所以服务 UUID 只能说明「是台 Anker 设备」。
+        // 充电头有稳定的名字前缀，认前缀；充电宝直接播序列号、没有前缀，只能反过来
+        // 把充电头排除掉。两边都列出来会让用户在配对时选错设备。
+        guard services.contains(CBUUID(string: A2687Protocol.advertisedServiceUUID))
+            || name.hasPrefix(A2687Protocol.deviceNamePrefix) else { return }
+        let looksLikeCharger = name.hasPrefix(A2687Protocol.deviceNamePrefix)
+        guard looksLikeCharger == (slot == .charger) else { return }
         // 只列出来给用户挑，不自己连。allowDuplicates 关着也可能重复送达，按 UUID 去重。
         let entry = DiscoveredCharger(id: peripheral.identifier, name: name.isEmpty ? peripheral.identifier.uuidString : name, rssi: RSSI.intValue)
         if let index = discovered.firstIndex(where: { $0.id == entry.id }) {
@@ -542,7 +562,7 @@ extension BluetoothService: @preconcurrency CBCentralManagerDelegate {
         guard central === self.central else { return }
         phase = .disconnected
         lastError = error?.localizedDescription ?? "无法连接充电器"
-        scheduleRetry(after: Self.reconnectDelay)
+        scheduleRetry(after: reconnectDelay)
     }
 
     func centralManager(_ central: CBCentralManager, didDisconnectPeripheral peripheral: CBPeripheral, error: Error?) {
@@ -553,7 +573,7 @@ extension BluetoothService: @preconcurrency CBCentralManagerDelegate {
         phase = .disconnected
         if desiredConnection, !isSystemSleeping {
             lastError = error?.localizedDescription ?? "连接已断开"
-            scheduleRetry(after: Self.reconnectDelay)
+            scheduleRetry(after: reconnectDelay)
         } else if isSystemSleeping {
             lastError = "Mac 正在睡眠，已释放蓝牙连接"
         } else {

@@ -63,7 +63,10 @@ def add(relative: str) -> None:
         f"sourceTree = \"<group>\"; }};\n/* End PBXFileReference section */",
     )
     # Group children: insert before the closing paren of that group's list.
-    marker = f"{group_id} /* "
+    # Match the group *definition*, not the reference to it inside the root
+    # group's own children — that reference comes first in the file and would
+    # land the new file in whichever group happens to be defined next.
+    marker = f"{group_id} /* {pathlib.Path(group_dir).name} */ = {{"
     start = text.index(marker)
     children = text.index("children = (", start)
     close = text.index("\t\t\t);", children)

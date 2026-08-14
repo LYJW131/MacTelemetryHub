@@ -5,7 +5,11 @@ import ServiceManagement
 @MainActor
 final class AppSettings: ObservableObject {
     private enum Key {
+        /// 充电头的配对 UUID。键名是历史遗留 —— 当年只有一台设备，
+        /// 改键会让老用户的配对丢失，不值得。
         static let peripheralID = "peripheralID"
+        static let powerBankPeripheralID = "powerBankPeripheralID"
+        static let powerBankModuleEnabled = "powerBankModuleEnabled"
         static let httpServerEnabled = "httpServerEnabled"
         static let httpPort = "httpPort"
         static let postEnabled = "postEnabled"
@@ -33,6 +37,7 @@ final class AppSettings: ObservableObject {
 
     @Published var userID: String
     @Published var peripheralID: String
+    @Published var powerBankPeripheralID: String
     @Published var httpServerEnabled: Bool
     @Published var httpPort: Int
     @Published var postEnabled: Bool
@@ -42,6 +47,7 @@ final class AppSettings: ObservableObject {
     @Published var deviceID: String
     @Published var telemetrySecret: String
     @Published var chargerModuleEnabled: Bool
+    @Published var powerBankModuleEnabled: Bool
     @Published var desktopModuleEnabled: Bool
     @Published var appleMusicModuleEnabled: Bool
     @Published var timezoneModuleEnabled: Bool
@@ -69,6 +75,8 @@ final class AppSettings: ObservableObject {
         let storedUserID = environmentUserID.isEmpty ? (keychain.read(account: Key.userIDAccount) ?? "") : ""
         userID = environmentUserID.isEmpty ? storedUserID : environmentUserID
         peripheralID = defaults.string(forKey: Key.peripheralID) ?? environment["A2687_ADDRESS"] ?? ""
+        powerBankPeripheralID = defaults.string(forKey: Key.powerBankPeripheralID)
+            ?? environment["ANKER_POWERBANK_ADDRESS"] ?? ""
         httpServerEnabled = defaults.object(forKey: Key.httpServerEnabled) as? Bool ?? false
         let storedPort = defaults.integer(forKey: Key.httpPort)
         httpPort = storedPort == 0 ? Int(environment["A2687_PORT"] ?? "8787") ?? 8787 : storedPort
@@ -91,6 +99,8 @@ final class AppSettings: ObservableObject {
             ?? keychain.read(account: Key.telemetrySecretAccount)
             ?? ""
         chargerModuleEnabled = defaults.object(forKey: Key.chargerModuleEnabled) as? Bool ?? true
+        // 默认关：没配对过的机器打开它只会一直停在「未配对」。
+        powerBankModuleEnabled = defaults.object(forKey: Key.powerBankModuleEnabled) as? Bool ?? false
         desktopModuleEnabled = defaults.object(forKey: Key.desktopModuleEnabled) as? Bool ?? true
         appleMusicModuleEnabled = defaults.object(forKey: Key.appleMusicModuleEnabled) as? Bool ?? true
         timezoneModuleEnabled = defaults.object(forKey: Key.timezoneModuleEnabled) as? Bool ?? true
@@ -150,11 +160,21 @@ final class AppSettings: ObservableObject {
     }
 
     var normalizedPeripheralID: UUID? {
-        let value = peripheralID.trimmingCharacters(in: .whitespacesAndNewlines)
+        Self.normalizedUUID(peripheralID)
+    }
+
+    var normalizedPowerBankPeripheralID: UUID? {
+        Self.normalizedUUID(powerBankPeripheralID)
+    }
+
+    private static func normalizedUUID(_ raw: String) -> UUID? {
+        let value = raw.trimmingCharacters(in: .whitespacesAndNewlines)
         return value.isEmpty ? nil : UUID(uuidString: value)
     }
 
     func validate() throws {
+        // 账号 ID 只有充电头需要 —— 没有它那台设备根本不推流。充电宝握完手就开始
+        // 推，所以别把它也卡在这个校验上。
         if chargerModuleEnabled {
             let trimmedUserID = userID.trimmingCharacters(in: .whitespacesAndNewlines)
             guard trimmedUserID.utf8.count == 40, trimmedUserID.unicodeScalars.allSatisfy(\.isASCII) else {
@@ -164,6 +184,11 @@ final class AppSettings: ObservableObject {
                normalizedPeripheralID == nil {
                 throw SettingsError.invalidPeripheralID
             }
+        }
+        if powerBankModuleEnabled,
+           !powerBankPeripheralID.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+           normalizedPowerBankPeripheralID == nil {
+            throw SettingsError.invalidPeripheralID
         }
         if httpServerEnabled {
             guard (1...65535).contains(httpPort) else { throw SettingsError.invalidPort }
@@ -203,6 +228,7 @@ final class AppSettings: ObservableObject {
         try validate()
         userID = userID.trimmingCharacters(in: .whitespacesAndNewlines)
         peripheralID = peripheralID.trimmingCharacters(in: .whitespacesAndNewlines)
+        powerBankPeripheralID = powerBankPeripheralID.trimmingCharacters(in: .whitespacesAndNewlines)
         postURL = postURL.trimmingCharacters(in: .whitespacesAndNewlines)
         telemetrySecret = telemetrySecret.trimmingCharacters(in: .whitespacesAndNewlines)
         codexBarCLIPath = URL(
@@ -218,6 +244,7 @@ final class AppSettings: ObservableObject {
         try keychain.write(r2AccessKeyID, account: Key.r2AccessKeyAccount)
         try keychain.write(r2SecretAccessKey, account: Key.r2SecretAccessKeyAccount)
         defaults.set(peripheralID, forKey: Key.peripheralID)
+        defaults.set(powerBankPeripheralID, forKey: Key.powerBankPeripheralID)
         defaults.set(httpServerEnabled, forKey: Key.httpServerEnabled)
         defaults.set(httpPort, forKey: Key.httpPort)
         defaults.set(postEnabled, forKey: Key.postEnabled)
@@ -226,6 +253,7 @@ final class AppSettings: ObservableObject {
         defaults.set(postTimeout, forKey: Key.postTimeout)
         defaults.set(deviceID, forKey: Key.deviceID)
         defaults.set(chargerModuleEnabled, forKey: Key.chargerModuleEnabled)
+        defaults.set(powerBankModuleEnabled, forKey: Key.powerBankModuleEnabled)
         defaults.set(desktopModuleEnabled, forKey: Key.desktopModuleEnabled)
         defaults.set(appleMusicModuleEnabled, forKey: Key.appleMusicModuleEnabled)
         defaults.set(timezoneModuleEnabled, forKey: Key.timezoneModuleEnabled)
