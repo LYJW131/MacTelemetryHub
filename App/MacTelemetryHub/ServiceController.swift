@@ -887,13 +887,27 @@ final class ServiceController: ObservableObject {
     }
 
     /// 等到下一个周期，或者被事件提前叫醒 —— 谁先来算谁
-    private func waitForNextTick() async {
+    /**
+     * 等到下一个周期，或者被事件提前叫醒 —— 谁先来算谁。
+     *
+     * `cycleStart` 是本轮开始的时刻，睡眠时间从它算起扣掉本轮已经花掉的时间。
+     * 原来是「干完活再睡满 5 秒」，于是实际周期变成 5 秒加上本轮耗时 —— 一次
+     * 上报要一两秒，追发就从 5 秒一次变成 7 秒一次。要求是 5 秒，那就得按周期
+     * 算而不是按间隔算。
+     *
+     * 本轮耗时超过一个周期时不补睡，直接进入下一轮：追进度没有意义，只会让
+     * 循环一直欠着时间往前赶。
+     */
+    private func waitForNextTick(since cycleStart: ContinuousClock.Instant) async {
         if pendingWake {
             pendingWake = false
             return
         }
+        let elapsed = ContinuousClock.now - cycleStart
+        let remaining = Self.tickInterval - elapsed
+        guard remaining > .zero else { return }
         let timer = Task { [weak self] in
-            try? await Task.sleep(for: Self.tickInterval)
+            try? await Task.sleep(for: remaining)
             // 被 cancel 说明已经有事件把循环叫醒了，别再多放行一次
             guard !Task.isCancelled else { return }
             self?.wakeReporter()
@@ -1035,6 +1049,7 @@ final class ServiceController: ObservableObject {
             var chargingBurstRemaining = 0
             var chargingBurstAt = Date.distantPast
             while !Task.isCancelled {
+                let cycleStart = ContinuousClock.now
                 var manualModulesForAttempt: Set<TelemetryModule> = []
                 var attemptedAppleMusicCredentials = false
                 do {
@@ -1371,7 +1386,7 @@ final class ServiceController: ObservableObject {
                 // 采集和发送解耦：前台应用和音乐由各自的通知驱动，变化时会把
                 // 这里提前叫醒；没有事件时按 tickInterval 转一圈照顾充电器和心跳。
                 // 远端 POST 仍按用户设置的 interval 节流。
-                await waitForNextTick()
+                await waitForNextTick(since: cycleStart)
             }
         }
     }
