@@ -168,6 +168,13 @@ struct DashboardView: View {
 
             Spacer(minLength: 16)
 
+            if service.settings.postEnabled {
+                Label(lastReportText(now: now), systemImage: "paperplane.fill")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+            }
+
             StatusBadge(
                 text: service.reporterLastError == nil ? "遥测运行中" : "上报异常",
                 style: service.reporterLastError == nil ? .success : .warning
@@ -183,6 +190,25 @@ struct DashboardView: View {
         .controlSize(.regular)
         .padding(.horizontal, 22)
         .padding(.vertical, 14)
+    }
+
+    /**
+     * 顶栏那句「上次上报多久之前」。
+     *
+     * 取的是 reporterLastSuccess，所以心跳也算 —— 它就是「最后一次成功发出去」。
+     * 用相对时刻而不是钟点：想知道的是「还活着吗」，那是个时长问题。整个视图
+     * 本来就挂在 1 秒一转的 TimelineView 上，这行跟着一起走，不用另开计时器。
+     */
+    private func lastReportText(now: Date) -> String {
+        guard let last = service.reporterLastSuccess else { return "尚未上报" }
+        let seconds = Int(max(0, now.timeIntervalSince(last)))
+        return switch seconds {
+        case ..<5: "刚刚上报"
+        case ..<60: "上次上报 \(seconds) 秒前"
+        case ..<3_600: "上次上报 \(seconds / 60) 分钟前"
+        case ..<86_400: "上次上报 \(seconds / 3_600) 小时前"
+        default: "上次上报 \(seconds / 86_400) 天前"
+        }
     }
 
     private var overviewContent: some View {
@@ -589,15 +615,15 @@ private struct ModuleStatusCard: View {
                 .font(.caption2)
                 .foregroundStyle(.secondary)
                 .lineLimit(1)
-            if let feedback {
-                Text(feedback)
-                    .font(.caption2)
-                    .foregroundStyle(feedbackIsError ? .red : .secondary)
-                    .lineLimit(1)
-            }
+            // 这一行永远占位，没反馈时留一个空行。写成 if-let 的话，按一下上报
+            // 卡片就会长高一行、整格网格跟着跳一下，上报完又缩回去。
+            Text(feedback ?? " ")
+                .font(.caption2)
+                .foregroundStyle(feedbackIsError ? .red : .secondary)
+                .lineLimit(1)
         }
         .padding(13)
-        .frame(maxWidth: .infinity, minHeight: 88, alignment: .leading)
+        .frame(maxWidth: .infinity, minHeight: 101, alignment: .leading)
         .background(Color(nsColor: .controlBackgroundColor))
         .overlay(RoundedRectangle(cornerRadius: 8).stroke(.primary.opacity(0.08), lineWidth: 1))
         .clipShape(RoundedRectangle(cornerRadius: 8))
