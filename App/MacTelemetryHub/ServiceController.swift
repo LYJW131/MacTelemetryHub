@@ -446,6 +446,8 @@ final class ServiceController: ObservableObject {
     @Published private(set) var lastManualReportAt: [TelemetryModule: Date] = [:]
 
     private var reporterTask: Task<Void, Never>?
+    /// vibe coding 的采集循环，跟上报循环各转各的
+    private var vibeCodingCollectionTask: Task<Void, Never>?
     private var lastPostedVibeCodingUsageAt: Date?
     private var lastPostedVibeCodingLimitsAt: Date?
     private var lastPostedVibeCodingSessionsAt: Date?
@@ -531,6 +533,8 @@ final class ServiceController: ObservableObject {
         reporterTask = nil
         desktopSettleTask?.cancel()
         desktopSettleTask = nil
+        vibeCodingCollectionTask?.cancel()
+        vibeCodingCollectionTask = nil
         desktopActivity.stop()
         timeZone.stop()
         appleMusic.stop()
@@ -829,10 +833,57 @@ final class ServiceController: ObservableObject {
             appleMusic.onChange = nil
             appleMusic.stop()
         }
-        if !settings.codexBarModuleEnabled {
+        if settings.codexBarModuleEnabled {
+            codingSessions.onChange = { [weak self] in self?.wakeReporter() }
+            agentLimits.onChange = { [weak self] in self?.wakeReporter() }
+            codexBarCost.onChange = { [weak self] in self?.wakeReporter() }
+            startVibeCodingCollection()
+        } else {
+            codingSessions.onChange = nil
+            agentLimits.onChange = nil
+            codexBarCost.onChange = nil
+            vibeCodingCollectionTask?.cancel()
+            vibeCodingCollectionTask = nil
             codexBarCost.stop()
             agentLimits.stop()
             codingSessions.stop()
+        }
+    }
+
+    /**
+     * vibe coding 那三条 CLI 自己转一条循环，不再挂在上报循环上。
+     *
+     * 从前它们在上报循环发包之前被 await 掉，而最慢那条（`cost --days 365 --refresh`）
+     * 实测要 25 秒 —— 这 25 秒里循环停在原地，切换应用的通知只能立个 pendingWake
+     * 的旗，切过去又切走的那个应用根本发不出去，不是晚发是没发。
+     *
+     * 现在采集完由各自的 onChange 叫醒循环，跟前台应用、音乐同一条路：循环只读
+     * 它们留下的载荷，唯一还会阻塞的就是那次 POST 本身。
+     *
+     * 这里按 tickInterval 转只是「问一句该不该采」，真正的节流是采集器自己的
+     * 间隔门闩；单飞门闩也在采集器里，所以问得勤一点是安全的。
+     */
+    private func startVibeCodingCollection() {
+        vibeCodingCollectionTask?.cancel()
+        vibeCodingCollectionTask = Task { [weak self] in
+            while !Task.isCancelled {
+                guard let self, settings.codexBarModuleEnabled else { return }
+                // 三份互不喂料，所以并发跑
+                async let sessions: Void = self.codingSessions.refreshIfNeeded(
+                    cliPath: settings.ccusageCLIPath,
+                    interval: settings.codingSessionRefreshInterval
+                )
+                async let limits: Void = self.agentLimits.refreshIfNeeded(
+                    codexBarPath: settings.codexBarCLIPath,
+                    interval: settings.agentLimitsRefreshInterval
+                )
+                async let usage: Void = self.codexBarCost.refreshIfNeeded(
+                    cliPath: settings.codexBarCLIPath,
+                    interval: settings.codexBarCostRefreshInterval
+                )
+                _ = await (sessions, limits, usage)
+                try? await Task.sleep(for: Self.tickInterval)
+            }
         }
     }
 
@@ -878,23 +929,9 @@ final class ServiceController: ObservableObject {
                     // 的激活通知驱动，后者由 Music.app 的 playerInfo 跨进程通知驱动、
                     // 另带一个兜底重读补上不发通知的 seek。循环只管读它们留下的
                     // snapshot —— 变化时它们会把循环叫醒，没事件时按 tickInterval 转。
-                    if settings.codexBarModuleEnabled {
-                        // 三份互不喂料，所以并发跑。从前必须先刷限额再刷用量 ——
-                        // 用量载荷要把 plan/limits 烤进去，顺序是那份耦合的产物。
-                        async let sessions: Void = self.codingSessions.refreshIfNeeded(
-                            cliPath: settings.ccusageCLIPath,
-                            interval: settings.codingSessionRefreshInterval
-                        )
-                        async let limits: Void = self.agentLimits.refreshIfNeeded(
-                            codexBarPath: settings.codexBarCLIPath,
-                            interval: settings.agentLimitsRefreshInterval
-                        )
-                        async let usage: Void = self.codexBarCost.refreshIfNeeded(
-                            cliPath: settings.codexBarCLIPath,
-                            interval: settings.codexBarCostRefreshInterval
-                        )
-                        _ = await (sessions, limits, usage)
-                    }
+                    // vibe coding 那三条 CLI 不在这里采：它们在 startVibeCodingCollection
+                    // 里自己转，采完叫醒这条循环。最慢那条要 25 秒，等它跑完的话这
+                    // 25 秒内切换的应用会被合并掉。
 
                     // token 检测属于这条主循环，但用五分钟闸门避免每圈都问 MusicKit。
                     await refreshAppleMusicCredentialsIfNeeded()

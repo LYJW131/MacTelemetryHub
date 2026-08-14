@@ -52,6 +52,9 @@ final class CodingSessionMonitor: ObservableObject {
     @Published private(set) var payloadUpdatedAt: Date?
     @Published private(set) var lastSuccess: Date?
     @Published private(set) var lastError: String?
+    /// 载荷变化时叫醒上报循环。采集不再挂在那条循环上，所以得跟前台应用、
+    /// 音乐一样自己回头敲一下门。
+    var onChange: (() -> Void)?
     private var refreshing = false
     private var lastAttempt: Date?
 
@@ -89,6 +92,7 @@ final class CodingSessionMonitor: ObservableObject {
         if uploadPayload != payload {
             uploadPayload = payload
             payloadUpdatedAt = Date()
+            onChange?()
         }
         lastError = outcome.errors.isEmpty ? nil : outcome.errors.joined(separator: "；")
         if !fresh.isEmpty { lastSuccess = Date() }
@@ -839,6 +843,8 @@ final class AgentLimitsMonitor: ObservableObject {
     @Published private(set) var payloadUpdatedAt: Date?
     @Published private(set) var lastSuccess: Date?
     @Published private(set) var lastError: String?
+    /// 载荷变化时叫醒上报循环，理由同 CodingSessionMonitor。
+    var onChange: (() -> Void)?
     /// 按 agent 分开的限额失败原因，随载荷发给网页 —— 页面要能把「没配」和「取不到」分开
     @Published private(set) var limitErrors: [String: String] = [:]
 
@@ -920,6 +926,7 @@ final class AgentLimitsMonitor: ObservableObject {
         if uploadPayload != payload {
             uploadPayload = payload
             payloadUpdatedAt = Date()
+            onChange?()
         }
         if !fresh.isEmpty { lastSuccess = Date() }
     }
@@ -1209,6 +1216,8 @@ final class CodexBarCostMonitor: ObservableObject {
     @Published private(set) var payloadUpdatedAt: Date?
     @Published private(set) var lastSuccess: Date?
     @Published private(set) var lastError: String?
+    /// 载荷变化时叫醒上报循环，理由同 CodingSessionMonitor。
+    var onChange: (() -> Void)?
     private var refreshing = false
     /// 上一次**尝试**采集的时刻。间隔门闩看它而不是 lastSuccess：失败或被判废
     /// 时 lastSuccess 不动，光看它的话 2 秒一圈的主循环会每圈都重跑一次 CodexBar。
@@ -1244,6 +1253,7 @@ final class CodexBarCostMonitor: ObservableObject {
             if uploadPayload != collection.uploadPayload {
                 uploadPayload = collection.uploadPayload
                 payloadUpdatedAt = Date()
+                onChange?()
             }
             lastSuccess = Date()
             lastError = nil
