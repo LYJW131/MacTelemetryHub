@@ -1101,8 +1101,8 @@ private enum AgentLimitsCollector {
     }
 
     /// 附加 provider 在网页上只占一行“总限额”。Cursor 明确把 primary 叫 Total；
-    /// OpenCode Go 的最长窗口是 Monthly，代表套餐总周期；Antigravity 没有合并总量，
-    /// 只有 Gemini 与 Claude/GPT 两个池，因此取使用率较高者，避免低估剩余压力。
+    /// OpenCode Go 的最长窗口是 Monthly，代表套餐总周期；Antigravity 取周窗口
+    /// —— 见 antigravityWeekly。
     nonisolated private static func parseTotalLimit(
         provider: String,
         usage: [String: Any]
@@ -1121,22 +1121,50 @@ private enum AgentLimitsCollector {
                     (($1.value["windowMinutes"] as? NSNumber)?.intValue ?? 0)
             }
         case "antigravity":
-            selected = slots.max {
-                (($0.value["usedPercent"] as? NSNumber)?.doubleValue ?? 0) <
-                    (($1.value["usedPercent"] as? NSNumber)?.doubleValue ?? 0)
-            }
+            // 周窗口只在 extraRateWindows 里；退回槽位时拿到的是 5 小时那档。
+            selected = antigravityWeekly(usage: usage).map { ("weekly", $0) }
+                ?? slots.max {
+                    (($0.value["usedPercent"] as? NSNumber)?.doubleValue ?? 0) <
+                        (($1.value["usedPercent"] as? NSNumber)?.doubleValue ?? 0)
+                }
         default:
             selected = nil
         }
         guard let window = selected?.value else { return [] }
         return [AgentLimitWindow(
             key: "\(provider).total",
-            label: "Total",
+            label: selected?.name == "weekly" ? "Weekly" : "Total",
             group: nil,
             windowMinutes: (window["windowMinutes"] as? NSNumber)?.intValue,
             usedPercent: (window["usedPercent"] as? NSNumber)?.doubleValue ?? 0,
             resetsAt: unixSeconds(window["resetsAt"] as? String)
         )]
+    }
+
+    /**
+     * Antigravity 的周窗口。
+     *
+     * `primary` / `secondary` 是 Gemini 和 Claude/GPT 的**5 小时**窗口，一天要刷
+     * 好几遍，代表不了「这周还剩多少」。周窗口只出现在 `extraRateWindows` 里
+     * （windowMinutes = 10080），带着 `Gemini weekly` / `Claude/GPT weekly` 的标题。
+     *
+     * 所以先按窗口长度挑出最长的那一档，同档里再取用量高的那个池 —— 这个
+     * provider 没有合并总量，只有两个池，取高的免得低估剩余压力。
+     *
+     * 拿不到 extraRateWindows 时返回 nil，调用方退回原来的槽位逻辑（老版本
+     * CodexBar 没有这个键）。
+     */
+    nonisolated private static func antigravityWeekly(usage: [String: Any]) -> [String: Any]? {
+        let windows = (usage["extraRateWindows"] as? [[String: Any]] ?? [])
+            .compactMap { $0["window"] as? [String: Any] }
+        func minutes(_ window: [String: Any]) -> Int {
+            (window["windowMinutes"] as? NSNumber)?.intValue ?? 0
+        }
+        func used(_ window: [String: Any]) -> Double {
+            (window["usedPercent"] as? NSNumber)?.doubleValue ?? 0
+        }
+        guard let longest = windows.map(minutes).max(), longest > 0 else { return nil }
+        return windows.filter { minutes($0) == longest }.max { used($0) < used($1) }
     }
 
     nonisolated private static func parseWebLimits(

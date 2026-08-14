@@ -465,7 +465,7 @@ public enum ProtocolError: LocalizedError, Equatable {
     }
 }
 
-private struct TypedValue {
+struct TypedValue {
     let tag: UInt8
     let payload: Data
     let text: String?
@@ -495,7 +495,7 @@ private struct TypedValue {
     }
 }
 
-private enum A2687ProtocolText {
+enum A2687ProtocolText {
     static func ascii(_ data: Data) -> String {
         String(data.map { (0x20..<0x7F).contains($0) ? Character(UnicodeScalar($0)) : "." })
     }
@@ -511,7 +511,7 @@ extension Data {
         append(UInt8((value >> 16) & 0xFF)); append(UInt8((value >> 24) & 0xFF))
     }
 
-    fileprivate func readUInt16LE(at offset: Int) -> UInt16 {
+    func readUInt16LE(at offset: Int) -> UInt16 {
         let first = self[index(startIndex, offsetBy: offset)]
         let second = self[index(startIndex, offsetBy: offset + 1)]
         return UInt16(first) | UInt16(second) << 8

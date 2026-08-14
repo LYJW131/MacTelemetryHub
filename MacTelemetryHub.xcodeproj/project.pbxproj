@@ -21,6 +21,9 @@
 		B1000000000000000000000B /* Models.swift in Sources */ = {isa = PBXBuildFile; fileRef = F1000000000000000000000B /* Models.swift */; };
 		B1000000000000000000000C /* index.html in Resources */ = {isa = PBXBuildFile; fileRef = F1000000000000000000000C /* index.html */; };
 		B1000000000000000000000D /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = F1000000000000000000000F /* Assets.xcassets */; };
+		B10000000000000000000020 /* DeviceTelemetry.swift in Sources */ = {isa = PBXBuildFile; fileRef = F10000000000000000000020 /* DeviceTelemetry.swift */; };
+		B10000000000000000000021 /* PowerBankProtocol.swift in Sources */ = {isa = PBXBuildFile; fileRef = F10000000000000000000021 /* PowerBankProtocol.swift */; };
+		B10000000000000000000022 /* AnkerPrimeSpec.swift in Sources */ = {isa = PBXBuildFile; fileRef = F10000000000000000000022 /* AnkerPrimeSpec.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -41,6 +44,9 @@
 		F1000000000000000000000D /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
 		F1000000000000000000000E /* Mac Telemetry Hub.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = "Mac Telemetry Hub.app"; sourceTree = BUILT_PRODUCTS_DIR; };
 		F1000000000000000000000F /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
+		F10000000000000000000020 /* DeviceTelemetry.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DeviceTelemetry.swift; sourceTree = "<group>"; };
+		F10000000000000000000021 /* PowerBankProtocol.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PowerBankProtocol.swift; sourceTree = "<group>"; };
+		F10000000000000000000022 /* AnkerPrimeSpec.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AnkerPrimeSpec.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -78,6 +84,9 @@
 				F1000000000000000000000D /* Info.plist */,
 				F1000000000000000000000F /* Assets.xcassets */,
 				A10000000000000000000013 /* Resources */,
+				F10000000000000000000020 /* DeviceTelemetry.swift */,
+				F10000000000000000000021 /* PowerBankProtocol.swift */,
+				F10000000000000000000022 /* AnkerPrimeSpec.swift */,
 			);
 			path = App/MacTelemetryHub;
 			sourceTree = SOURCE_ROOT;
@@ -176,6 +185,9 @@
 				B10000000000000000000009 /* A2687Crypto.swift in Sources */,
 				B1000000000000000000000A /* A2687Protocol.swift in Sources */,
 				B1000000000000000000000B /* Models.swift in Sources */,
+				B10000000000000000000020 /* DeviceTelemetry.swift in Sources */,
+				B10000000000000000000021 /* PowerBankProtocol.swift in Sources */,
+				B10000000000000000000022 /* AnkerPrimeSpec.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
