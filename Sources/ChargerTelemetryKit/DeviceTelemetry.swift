@@ -104,6 +104,16 @@ public struct ChargingDevicePayload: Codable, Equatable, Sendable {
     public let totalOutputW: Double?
     public let battery: BatteryPayload?
     public let temperaturesC: [Int]?
+    /**
+     * 充电底座（Pogo Pin）。只有正在通过它进电时才有值。
+     *
+     * 它不是「端口」—— 没有线、不协商、用户也插不了别的东西，所以不混进 ports
+     * 数组，免得消费方要在三个 USB 口里过滤掉一个不是口的东西。
+     *
+     * 之所以必须显式报：底座进电时三个 USB 口全是空闲，消费方只能看到「有输入
+     * 功率但没有口在进电」，那是靠排除法猜出来的结论。
+     */
+    public let dock: DevicePortPayload?
     public let ports: [DevicePortPayload]
 
     public init(
@@ -117,6 +127,7 @@ public struct ChargingDevicePayload: Codable, Equatable, Sendable {
         totalOutputW: Double? = nil,
         battery: BatteryPayload? = nil,
         temperaturesC: [Int]? = nil,
+        dock: DevicePortPayload? = nil,
         ports: [DevicePortPayload]
     ) {
         self.id = id
@@ -129,6 +140,7 @@ public struct ChargingDevicePayload: Codable, Equatable, Sendable {
         self.totalOutputW = totalOutputW
         self.battery = battery
         self.temperaturesC = temperaturesC
+        self.dock = dock
         self.ports = ports
     }
 }

@@ -283,6 +283,20 @@ public extension ChargingDevicePayload {
                 thermalLimited: state.isThermallyLimited
             ),
             temperaturesC: state.temperatures.isEmpty ? nil : state.temperatures,
+            // 底座那块和端口块一样是粘滞的：不在用时留着上一次的读数。
+            // 所以只有 mode != 0 才发，否则会报出一个几分钟前的底座功率。
+            dock: state.dock.flatMap { dock in
+                dock.isActive
+                    ? DevicePortPayload(
+                        name: "DOCK",
+                        active: true,
+                        direction: dock.direction,
+                        voltageV: dock.voltageV.map(TelemetryRounding.twoDecimals),
+                        currentA: dock.currentA.map(TelemetryRounding.twoDecimals),
+                        powerW: dock.powerW.map(TelemetryRounding.twoDecimals)
+                    )
+                    : nil
+            },
             ports: ports
         )
     }
