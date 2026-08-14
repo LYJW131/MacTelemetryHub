@@ -173,17 +173,18 @@ final class AppSettings: ObservableObject {
     }
 
     func validate() throws {
-        // 账号 ID 只有充电头需要 —— 没有它那台设备根本不推流。充电宝握完手就开始
-        // 推，所以别把它也卡在这个校验上。
-        if chargerModuleEnabled {
+        // 两台设备都要账号 ID，但表现不同：充电头没有它一帧都不推；充电宝会推，
+        // 然后 26 秒后断链 —— 后者曾经被当成「设备脾气」查了很久。
+        if chargerModuleEnabled || powerBankModuleEnabled {
             let trimmedUserID = userID.trimmingCharacters(in: .whitespacesAndNewlines)
             guard trimmedUserID.utf8.count == 40, trimmedUserID.unicodeScalars.allSatisfy(\.isASCII) else {
                 throw SettingsError.invalidUserID
             }
-            if !peripheralID.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
-               normalizedPeripheralID == nil {
-                throw SettingsError.invalidPeripheralID
-            }
+        }
+        if chargerModuleEnabled,
+           !peripheralID.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+           normalizedPeripheralID == nil {
+            throw SettingsError.invalidPeripheralID
         }
         if powerBankModuleEnabled,
            !powerBankPeripheralID.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,

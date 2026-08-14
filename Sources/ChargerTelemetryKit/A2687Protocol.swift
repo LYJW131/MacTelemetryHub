@@ -338,6 +338,11 @@ public enum A2687Protocol {
         }
     }
 
+    /// 校验账号 ID 格式。握手前先跑一次，免得走到最后一步才失败。
+    public static func validatedAccountID(_ userID: String) throws -> Data {
+        try validateUserID(userID)
+    }
+
     private static func validateUserID(_ userID: String) throws -> Data {
         guard userID.utf8.count == 40, userID.unicodeScalars.allSatisfy({ $0.isASCII }) else {
             throw ProtocolError.invalidUserID

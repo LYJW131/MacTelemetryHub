@@ -18,8 +18,13 @@ public protocol ChargingDeviceDecoder: AnyObject {
     /// 广播里的名字前缀，配对扫描用来过滤。充电宝没有（它直接播序列号），
     /// 那种情况下只能靠 ff09 服务 UUID 认。
     var namePrefix: String? { get }
-    /// 没有 Anker 账号 ID 就不推流。充电头是 true，充电宝不需要。
+    /// 0x0027 是否要带上 Anker 账号 ID。
+    ///
+    /// 两台设备都要，但原因不同：充电头没有它根本不推流；充电宝**会**推，然后
+    /// 26 秒后把链路断掉。带上它会话才能一直维持。
     var needsAccountID: Bool { get }
+    /// 是否发 0x020A 实时探测。充电头要，充电宝从 0x0022 之后就自己推了。
+    var needsRealtimeProbe: Bool { get }
 
     /// 断开重连时清空，避免把上一段会话的读数当成新的。
     func reset()
@@ -43,6 +48,7 @@ public final class ChargerDecoder: ChargingDeviceDecoder {
     public let model = "A2687"
     public let namePrefix: String? = A2687Protocol.deviceNamePrefix
     public let needsAccountID = true
+    public let needsRealtimeProbe = true
 
     public func reset() { state = ChargerState() }
 
@@ -83,7 +89,9 @@ public final class PowerBankDecoder: ChargingDeviceDecoder {
     /// 充电宝广播的是自己的序列号，没有稳定前缀，所以配对扫描只能认 ff09 服务，
     /// 再把名字以充电头前缀开头的排除掉。
     public let namePrefix: String? = nil
-    public let needsAccountID = false
+    /// 不带它只能拿到 26 秒的未认证会话，到点断链。
+    public let needsAccountID = true
+    public let needsRealtimeProbe = false
 
     public func reset() { state = PowerBankState() }
 

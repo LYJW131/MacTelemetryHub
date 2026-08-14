@@ -319,7 +319,7 @@ struct SettingsView: View {
 
             settingSection(
                 "充电宝遥测",
-                detail: "启用后连接 Anker Prime 充电宝，接收电量、温度、每口功率与热控状态。不需要 Anker 用户 ID。",
+                detail: "启用后连接 Anker Prime 充电宝，接收电量、温度、每口功率与热控状态。和充电头共用上面那个 Anker 用户 ID。",
                 icon: "minus.plus.batteryblock"
             ) {
                 Toggle("启用充电宝模块", isOn: $settings.powerBankModuleEnabled)

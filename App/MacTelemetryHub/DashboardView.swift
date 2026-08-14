@@ -313,14 +313,14 @@ struct DashboardView: View {
                 .controlSize(.small)
 
                 if let state = powerBankLink.powerBankState, powerBankLink.hasTelemetry {
-                    powerBankSummary(state)
+                    powerBankOverviewCard(state, now: now)
                     sectionHeading("端口", detail: "C1 与 C2 双向，A 口只出。空闲端口不显示功率 —— 那个读数是过期的")
                     LazyVGrid(
                         columns: [GridItem(.flexible(), spacing: 12), GridItem(.flexible(), spacing: 12), GridItem(.flexible(), spacing: 12)],
                         spacing: 12
                     ) {
                         ForEach(state.ports, id: \.name) { port in
-                            PowerBankPortCard(port: port).frame(minHeight: 180)
+                            PowerBankPortCard(port: port).frame(minHeight: 248)
                         }
                     }
                 } else {
@@ -340,50 +340,114 @@ struct DashboardView: View {
         }
     }
 
-    private func powerBankSummary(_ state: PowerBankState) -> some View {
-        VStack(alignment: .leading, spacing: 10) {
-            HStack(alignment: .firstTextBaseline, spacing: 10) {
-                Text(state.batteryPercent.map { String(format: "%.2f%%", $0) } ?? "—")
-                    .font(.system(size: 32, weight: .semibold, design: .rounded))
-                if state.isThermallyLimited {
-                    Label("过热受限", systemImage: "thermometer.high")
+    /// 和充电头的 overviewCard 同一套版式：左边大数字加进度条，右边设备事实网格。
+    /// 两个页面看起来该是同一个产品的两个页签，而不是两个人写的。
+    private func powerBankOverviewCard(_ state: PowerBankState, now: Date) -> some View {
+        HStack(spacing: 22) {
+            VStack(alignment: .leading, spacing: 10) {
+                HStack(spacing: 8) {
+                    Label("电量", systemImage: "minus.plus.batteryblock.fill")
                         .font(.caption.weight(.semibold))
-                        .foregroundStyle(.orange)
-                } else if state.charging == true {
-                    Label("充电中", systemImage: "bolt.fill")
-                        .font(.caption.weight(.semibold))
-                        .foregroundStyle(.green)
+                        .foregroundStyle(.secondary)
+                    if state.isThermallyLimited {
+                        StatusBadge(text: "过热受限", style: .warning)
+                    } else if state.charging == true {
+                        StatusBadge(text: "充电中", style: .success)
+                    }
                 }
-                Spacer()
-                if let serial = state.serialNumber {
-                    Text(serial).font(.caption.monospaced()).foregroundStyle(.secondary)
+
+                HStack(alignment: .firstTextBaseline, spacing: 6) {
+                    Text(number(state.batteryPercent, digits: 2))
+                        .font(.system(size: 44, weight: .semibold, design: .rounded))
+                        .contentTransition(.numericText())
+                    Text("%")
+                        .font(.title3.weight(.medium))
+                        .foregroundStyle(.tertiary)
+                }
+
+                HStack(spacing: 10) {
+                    ProgressView(value: min(max((state.batteryPercent ?? 0) / 100, 0), 1))
+                        .tint(state.isThermallyLimited ? .orange : .blue)
+                    Text(powerBankFlowText(state))
+                        .font(.caption2.monospacedDigit().weight(.medium))
+                        .foregroundStyle(.tertiary)
+                        .fixedSize()
                 }
             }
-            HStack(spacing: 18) {
-                metric("输入", String(format: "%.1f W", state.inputPowerW ?? 0))
-                metric("输出", String(format: "%.1f W", state.outputPowerW ?? 0))
-                if let hours = state.timeToFullHours, let minutes = state.timeToFullMinutes,
-                   hours * 60 + minutes > 0 {
-                    metric("充满还需", "\(hours)h\(String(format: "%02d", minutes))m")
-                }
-                if !state.temperatures.isEmpty {
-                    metric("温度", state.temperatures.map { "\($0)°C" }.joined(separator: " / "))
-                }
-                if let seconds = state.pomodoroSeconds, seconds > 0 {
-                    metric("番茄钟", "\(seconds / 60) 分钟")
-                }
+            .frame(maxWidth: .infinity, alignment: .leading)
+
+            Divider().frame(height: 100)
+
+            LazyVGrid(columns: [GridItem(.flexible(), spacing: 18), GridItem(.flexible(), spacing: 18)], alignment: .leading, spacing: 14) {
+                DeviceFact(title: "序列号", value: state.serialNumber, icon: "number")
+                DeviceFact(title: "固件版本", value: state.firmwareVersion, icon: "cpu")
+                DeviceFact(
+                    title: "温度",
+                    value: state.temperatures.isEmpty
+                        ? nil : state.temperatures.map { "\($0)°C" }.joined(separator: " / "),
+                    icon: "thermometer.medium"
+                )
+                DeviceFact(title: "充满还需", value: powerBankTimeText(state), icon: "clock.arrow.circlepath")
             }
+            .frame(maxWidth: .infinity)
         }
-        .padding(16)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 12))
+        .padding(18)
+        .background(Color(nsColor: .controlBackgroundColor))
+        .overlay(RoundedRectangle(cornerRadius: 8).stroke(.primary.opacity(0.08), lineWidth: 1))
+        .clipShape(RoundedRectangle(cornerRadius: 8))
     }
 
-    private func metric(_ title: String, _ value: String) -> some View {
-        VStack(alignment: .leading, spacing: 2) {
-            Text(title).font(.caption).foregroundStyle(.secondary)
-            Text(value).font(.callout.weight(.medium).monospacedDigit())
+    /// 进度条右侧那行。充电宝没有「额定上限」可写，写当前收放电更有信息量。
+    private func powerBankFlowText(_ state: PowerBankState) -> String {
+        let input = state.inputPowerW ?? 0
+        let output = state.outputPowerW ?? 0
+        if input > 0.05 { return String(format: "输入 %.1f W", input) }
+        if output > 0.05 { return String(format: "输出 %.1f W", output) }
+        return "待机"
+    }
+
+    private func powerBankTimeText(_ state: PowerBankState) -> String? {
+        guard let hours = state.timeToFullHours, let minutes = state.timeToFullMinutes,
+              hours * 60 + minutes > 0 else { return nil }
+        return hours > 0 ? "\(hours) 小时 \(minutes) 分" : "\(minutes) 分钟"
+    }
+
+    /// 连上了却没有数据，和根本没连上，是两个完全不同的问题。空状态必须能自己
+    /// 说清楚卡在哪一步，否则只能靠猜。
+    private var powerBankWaitingDetail: String {
+        if let error = powerBankLink.lastError { return error }
+        if powerBankLink.isConnected {
+            return "已连接并完成握手，但还没收到遥测帧。正常情况下 1 秒内就该有第一帧。"
         }
+        if powerBankLink.phase == .handshaking {
+            return "正在建立加密会话。"
+        }
+        return "充电宝空闲时会休眠并停止广播，手机 App 连着它时本机也连不上。按一下机身按钮再等片刻。"
+    }
+
+    /// 总览卡片正面：有电量就显示电量，没有就显示连接阶段 —— 那才是这时候
+    /// 用户真正想知道的（在连？在认证？还是根本没配对）。
+    private var powerBankOverviewValue: String {
+        guard service.settings.powerBankModuleEnabled else { return "已关闭" }
+        guard let state = powerBankLink.powerBankState, let percent = state.batteryPercent else {
+            return powerBankLink.phase.label
+        }
+        return String(format: "%.1f%%", percent)
+    }
+
+    private var powerBankOverviewDetail: String? {
+        guard service.settings.powerBankModuleEnabled else { return nil }
+        guard let state = powerBankLink.powerBankState, powerBankLink.hasTelemetry else {
+            return powerBankLink.lastError
+        }
+        if state.isThermallyLimited { return "过热受限，暂不充电" }
+        if let input = state.inputPowerW, input > 0.05 {
+            return String(format: "输入 %.1f W", input)
+        }
+        if let output = state.outputPowerW, output > 0.05 {
+            return String(format: "输出 %.1f W", output)
+        }
+        return "待机"
     }
 
     private var moduleGrid: some View {
@@ -505,44 +569,6 @@ struct DashboardView: View {
                 feedbackIsError: service.manualReportFailed(.powerBank)
             )
         }
-    }
-
-    /// 连上了却没有数据，和根本没连上，是两个完全不同的问题。空状态必须能自己
-    /// 说清楚卡在哪一步，否则只能靠猜。
-    private var powerBankWaitingDetail: String {
-        if let error = powerBankLink.lastError { return error }
-        if powerBankLink.isConnected {
-            return "已连接并完成握手，但还没收到遥测帧。正常情况下 1 秒内就该有第一帧。"
-        }
-        if powerBankLink.phase == .handshaking {
-            return "正在建立加密会话。"
-        }
-        return "充电宝空闲时会休眠并停止广播，手机 App 连着它时本机也连不上。按一下机身按钮再等片刻。"
-    }
-
-    /// 总览卡片正面：有电量就显示电量，没有就显示连接阶段 —— 那才是这时候
-    /// 用户真正想知道的（在连？在认证？还是根本没配对）。
-    private var powerBankOverviewValue: String {
-        guard service.settings.powerBankModuleEnabled else { return "已关闭" }
-        guard let state = powerBankLink.powerBankState, let percent = state.batteryPercent else {
-            return powerBankLink.phase.label
-        }
-        return String(format: "%.1f%%", percent)
-    }
-
-    private var powerBankOverviewDetail: String? {
-        guard service.settings.powerBankModuleEnabled else { return nil }
-        guard let state = powerBankLink.powerBankState, powerBankLink.hasTelemetry else {
-            return powerBankLink.lastError
-        }
-        if state.isThermallyLimited { return "过热受限，暂不充电" }
-        if let input = state.inputPowerW, input > 0.05 {
-            return String(format: "输入 %.1f W", input)
-        }
-        if let output = state.outputPowerW, output > 0.05 {
-            return String(format: "输出 %.1f W", output)
-        }
-        return "待机"
     }
 
     private func sectionHeading(_ title: String, detail: String) -> some View {
@@ -881,6 +907,93 @@ private struct CompactMetric: View {
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding(.horizontal, 8)
+    }
+}
+
+/**
+ * 充电宝的端口卡，版式和充电头的 PortCard 一致。
+ *
+ * 差别只在内容：充电宝的口是双向的，所以徽章要区分输入/输出；空闲口一律不显示
+ * 功率电压电流 —— 固件那个槽位是粘滞的，端口断开后仍留着上一次的读数，照原样画
+ * 出来就是在报几分钟前的数。
+ */
+private struct PowerBankPortCard: View {
+    let port: PowerBankPort
+
+    private var title: String {
+        port.name == "A" ? "USB-A" : "USB-C \(port.name.dropFirst())"
+    }
+
+    private var badge: (String, StatusBadgeStyle) {
+        switch port.direction {
+        case "in": ("输入", .info)
+        case "out": ("输出", .success)
+        default:
+            port.isEnergized ? ("待机", .neutral)
+                : port.attached ? ("已插线", .neutral) : ("空闲", .neutral)
+        }
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack(spacing: 8) {
+                Image(systemName: "cable.connector.horizontal")
+                    .font(.system(size: 14, weight: .semibold))
+                    .foregroundStyle(port.isActive ? .blue : .secondary)
+                    .frame(width: 24, height: 24)
+                VStack(alignment: .leading, spacing: 1) {
+                    Text(title).font(.headline)
+                    Text(port.name)
+                        .font(.caption2.monospaced())
+                        .foregroundStyle(.tertiary)
+                }
+                Spacer()
+                StatusBadge(text: badge.0, style: badge.1)
+            }
+
+            HStack(alignment: .firstTextBaseline, spacing: 5) {
+                Text(port.isActive ? number(port.powerW, digits: 2) : "—")
+                    .font(.system(size: 30, weight: .semibold, design: .rounded))
+                    .contentTransition(.numericText())
+                Text("W")
+                    .font(.callout.weight(.medium))
+                    .foregroundStyle(.tertiary)
+            }
+
+            HStack(spacing: 0) {
+                CompactMetric(
+                    title: "电压",
+                    value: port.isActive || port.isEnergized ? number(port.voltageV, digits: 2) : "—",
+                    unit: "V", icon: "waveform.path", tint: .blue
+                )
+                Divider().frame(height: 30)
+                CompactMetric(
+                    title: "电流",
+                    value: port.isActive ? number(port.currentA, digits: 2) : "—",
+                    unit: "A", icon: "gauge.with.dots.needle.33percent", tint: .purple
+                )
+            }
+            .padding(.vertical, 8)
+            .background(.primary.opacity(0.035))
+
+            VStack(alignment: .leading, spacing: 3) {
+                Label(port.attached ? "已插线" : "未检测到线缆", systemImage: "cable.connector")
+                Text(port.isActive ? (port.direction == "in" ? "正在取电" : "正在供电")
+                     : port.isEnergized ? "已通电，无负载" : "未协商供电")
+                    .foregroundStyle(.secondary)
+                Text(port.name == "A" ? "仅输出" : "支持双向")
+                    .fontWeight(.medium)
+                    .foregroundStyle(.tertiary)
+            }
+            .font(.caption)
+            .lineLimit(1)
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
+        .padding(13)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        .background(Color(nsColor: .controlBackgroundColor))
+        .overlay(RoundedRectangle(cornerRadius: 8).stroke(.primary.opacity(0.08), lineWidth: 1))
+        .clipShape(RoundedRectangle(cornerRadius: 8))
     }
 }
 

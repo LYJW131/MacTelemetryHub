@@ -385,9 +385,10 @@ final class BluetoothService: NSObject, ObservableObject {
     }
 
     private func performHandshake() async throws {
-        // 账号 ID 只有充电头需要。先验一次，免得走完整个握手才在最后一步炸。
+        // 两台设备都要账号 ID：充电头没有它不推流，充电宝没有它 26 秒后断链。
+        // 先验一次格式，免得走完整个握手才在最后一步炸。
         let userID = decoder.needsAccountID ? accountID() : nil
-        if let userID { _ = try A2687Protocol.realtimeProbe(userID: userID) }
+        if let userID { _ = try A2687Protocol.validatedAccountID(userID) }
 
         for step in A2687Protocol.handshakeSteps() {
             if step.expectsResponse {
@@ -434,9 +435,8 @@ final class BluetoothService: NSObject, ObservableObject {
             command: A2687Protocol.commandStatus,
             fields: A2687Protocol.statusProbe()
         )
-        // 0x020A 的请求体里必须带账号 ID，没有就构造不出来。充电宝不需要它，
-        // 0x0022 之后就自己推 0x0300 了。
-        guard decoder.needsAccountID else { return }
+        // 0x020A 只有充电头要。充电宝 0x0022 之后就自己推 0x0300，从来没给它发过。
+        guard decoder.needsRealtimeProbe else { return }
         try send(
             group: A2687Protocol.groupTelemetry,
             command: A2687Protocol.commandRealtime,
@@ -637,7 +637,9 @@ extension BluetoothService: @preconcurrency CBCentralManagerDelegate {
         notifyCharacteristic = nil
         phase = .disconnected
         if desiredConnection, !isSystemSleeping {
-            lastError = error?.localizedDescription ?? "连接已断开"
+            // 充电宝每 26 秒自己断一次，那是固件行为不是故障。把它记成 lastError
+            // 会让界面一直闪红字，也会盖掉真正的错误。
+            lastError = slot == .powerBank ? nil : (error?.localizedDescription ?? "连接已断开")
             scheduleRetry(after: reconnectDelay)
         } else if isSystemSleeping {
             lastError = "Mac 正在睡眠，已释放蓝牙连接"
