@@ -195,3 +195,28 @@ private func expectClose(_ actual: Double?, _ expected: Double?, _ label: String
     #expect(AnkerPrimeSpec.Transport.serviceUUID == A2687Protocol.serviceUUID)
     #expect(AnkerPrimeSpec.Charger.namePrefix == A2687Protocol.deviceNamePrefix)
 }
+
+/**
+ * 充电宝的遥测帧是**明文**的，充电头的是加密的。
+ *
+ * 这条差异曾经让上报器「已连接但一帧数据都没有」：接收路径上有个
+ * `guard frame.encrypted`，把充电宝每一帧都丢掉了，而握手帧确实加密所以连接看
+ * 起来是成功的。fixture 抓不到这类问题 —— 它回放的是已解密的载荷，整个帧层都被
+ * 绕过去了。所以这里直接用一段真实的原始帧钉住这个事实。
+ */
+@Test func powerBankTelemetryFramesArriveUnencrypted() throws {
+    // 真机 0x0300 帧，取自 captures/powerbank-11.jsonl 的 rx.raw
+    let raw = try #require(Data(hex:
+        "FF0973000301110300A10131A203043B55A30404010000A4020101A50404" +
+        "01E803A60404000000A7080400000000000000A80F040000000000E803FF" +
+        "00FFFFFFFF00A90F0400000000000000FF00FFFFFFFF00AC090400000000" +
+        "00000000AF02012DB002012EB103020600FE05030000000000"
+    ))
+    let frame = try #require(A2687Protocol.parseFrame(raw))
+    #expect(frame.command == 0x0300)
+    #expect(frame.encrypted == false, "充电宝的遥测帧不加密；接收路径不能只收加密帧")
+    // 帧体直接就是 TLV，不用解密就能解出电量
+    var state = PowerBankState()
+    PowerBankProtocol.parseRealtime(frame.body, state: &state)
+    #expect(state.batteryPercent != nil, "明文帧体应当能直接解出遥测")
+}

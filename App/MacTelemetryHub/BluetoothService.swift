@@ -107,6 +107,45 @@ final class BluetoothService: NSObject, ObservableObject {
     private static let pairingScanWindow = Duration.seconds(15)
     private var reconnectDelay: Duration { slot.reconnectDelay }
 
+    /**
+     * 诊断用的原始帧抓取。
+     *
+     * 格式和 anker-prime-ble 那边的 `--record` 完全一致，所以抓出来的文件可以直接
+     * 丢给 `python -m anker_prime_ble replay` 去解 —— 排查「设备到底发没发」这类
+     * 问题时，唯一有意义的证据就是原始字节，看代码看不出来。
+     *
+     * 默认关，靠 defaults 开：
+     *   defaults write com.liangyangjunwei.MacTelemetryHub bleCaptureEnabled -bool YES
+     * 写到 ~/Library/Logs/MacTelemetryHub/<设备>.jsonl，重连不清空、追加。
+     */
+    private lazy var captureURL: URL? = {
+        guard UserDefaults.standard.bool(forKey: "bleCaptureEnabled") else { return nil }
+        let directory = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent("Library/Logs/MacTelemetryHub", isDirectory: true)
+        try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        return directory.appendingPathComponent("\(slot.rawValue).jsonl")
+    }()
+
+    private func capture(_ direction: String, command: UInt16, _ extra: [String: Any]) {
+        guard let captureURL else { return }
+        var row: [String: Any] = [
+            "t": Date().timeIntervalSince1970,
+            "dir": direction,
+            "cmd": Int(command),
+        ]
+        row.merge(extra) { _, new in new }
+        guard let data = try? JSONSerialization.data(withJSONObject: row),
+              var line = String(data: data, encoding: .utf8) else { return }
+        line += "\n"
+        if let handle = try? FileHandle(forWritingTo: captureURL) {
+            defer { try? handle.close() }
+            _ = try? handle.seekToEnd()
+            try? handle.write(contentsOf: Data(line.utf8))
+        } else {
+            try? Data(line.utf8).write(to: captureURL)
+        }
+    }
+
     init(settings: AppSettings, slot: ChargingDeviceSlot) {
         self.settings = settings
         self.slot = slot
@@ -449,6 +488,7 @@ final class BluetoothService: NSObject, ObservableObject {
         let plaintext = try A2687Protocol.buildTLV(fields)
         let ciphertext = try crypto.encrypt(plaintext)
         let frame = A2687Protocol.buildFrame(group: group, command: command, ciphertext: ciphertext)
+        capture("tx", command: command, ["group": Int(group), "raw": frame.hexString])
         peripheral.writeValue(frame, for: writeCharacteristic, type: .withoutResponse)
     }
 
@@ -473,25 +513,50 @@ final class BluetoothService: NSObject, ObservableObject {
     }
 
     private func handleNotification(_ data: Data) {
+        // 抓在切帧之前：如果问题出在切帧本身，切完再抓就什么都看不到了。
+        capture("notify", command: 0, ["raw": data.hexString])
         for raw in assembler.feed(data) {
-            guard let frame = A2687Protocol.parseFrame(raw), frame.encrypted else { continue }
-            do {
-                let payload = try crypto.decrypt(frame.body)
-                // Any frame that decrypts proves the session is alive, including
-                // handshake replies and the bare 0x020A ack that carries no
-                // port data.
-                lastFrameAt = .now
-                if decoder.handleFrame(command: frame.command, payload: payload) {
-                    objectWillChange.send()
-                    onStateChange?()
+            guard let frame = A2687Protocol.parseFrame(raw) else {
+                capture("rx", command: 0, ["ok": false, "reason": "unparsed", "raw": raw.hexString])
+                continue
+            }
+            /**
+             * 加密位不是恒真的 —— 两台设备在这里的行为不一样。
+             *
+             * 充电头的遥测是加密的，所以这段代码原本直接 `guard frame.encrypted`，
+             * 把未加密帧全丢掉。**充电宝的 0x0300 是明文发的**：帧头之后直接就是
+             * TLV。那个 guard 于是把它每一帧都吃掉了 —— 握手能成（握手帧确实加密），
+             * 但一帧遥测都进不来，watchdog 判定停流，表现成「已连接但没数据、还偶尔
+             * 断线」。
+             *
+             * 按帧上的标志位走，不要按设备假设走。
+             */
+            let payload: Data
+            if frame.encrypted {
+                do {
+                    payload = try crypto.decrypt(frame.body)
+                } catch {
+                    capture("rx", command: frame.command, ["ok": false, "reason": "decrypt", "raw": raw.hexString])
+                    lastError = "解密 0x\(String(format: "%04X", frame.command)) 失败：\(error.localizedDescription)"
+                    continue
                 }
-                if let pending, pending.command == frame.command {
-                    pending.timeout.cancel()
-                    self.pending = nil
-                    pending.continuation.resume(returning: payload)
-                }
-            } catch {
-                lastError = "解密 0x\(String(format: "%04X", frame.command)) 失败：\(error.localizedDescription)"
+            } else {
+                payload = frame.body
+            }
+            capture("rx", command: frame.command, [
+                "enc": frame.encrypted, "ack": frame.acknowledged, "ok": true,
+                "plain": payload.hexString, "raw": raw.hexString,
+            ])
+            // 任何一帧收到都证明会话还活着，包括握手回复和不带端口数据的空 ack。
+            lastFrameAt = .now
+            if decoder.handleFrame(command: frame.command, payload: payload) {
+                objectWillChange.send()
+                onStateChange?()
+            }
+            if let pending, pending.command == frame.command {
+                pending.timeout.cancel()
+                self.pending = nil
+                pending.continuation.resume(returning: payload)
             }
         }
     }

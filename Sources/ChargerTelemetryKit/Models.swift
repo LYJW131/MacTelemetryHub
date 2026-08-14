@@ -167,3 +167,10 @@ private extension KeyedEncodingContainer {
         else { try encodeNil(forKey: key) }
     }
 }
+
+public extension Data {
+    /// 大写十六进制。抓包文件里用，和 anker-prime-ble 的格式对齐。
+    var hexString: String {
+        map { String(format: "%02X", $0) }.joined()
+    }
+}

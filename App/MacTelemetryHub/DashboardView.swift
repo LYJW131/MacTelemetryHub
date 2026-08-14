@@ -97,7 +97,23 @@ struct DashboardView: View {
                     VStack(alignment: .leading, spacing: 2) {
                         Text(statusText(now: now))
                             .font(.callout.weight(.medium))
-                        Text(service.settings.chargerModuleEnabled ? "充电设备" : "充电模块已关闭")
+                        Text(service.settings.chargerModuleEnabled ? "充电头" : "充电头模块已关闭")
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+                .padding(.vertical, 3)
+
+                HStack(spacing: 8) {
+                    Circle()
+                        .fill(!service.settings.powerBankModuleEnabled ? Color.secondary
+                              : powerBankLink.isConnected ? .green : .orange)
+                        .frame(width: 7, height: 7)
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(service.settings.powerBankModuleEnabled
+                             ? powerBankLink.phase.label : "充电宝模块已关闭")
+                            .font(.callout.weight(.medium))
+                        Text("充电宝")
                             .font(.caption2)
                             .foregroundStyle(.secondary)
                     }
@@ -310,7 +326,7 @@ struct DashboardView: View {
                 } else {
                     EmptyModuleView(
                         title: powerBankLink.phase.label,
-                        detail: "充电宝空闲时会休眠并停止广播，手机 App 连着它时本机也连不上。按一下机身按钮再等片刻。",
+                        detail: powerBankWaitingDetail,
                         icon: "minus.plus.batteryblock"
                     )
                 }
@@ -465,7 +481,7 @@ struct DashboardView: View {
                 feedbackIsError: service.manualReportFailed(.vibeCoding)
             )
             ModuleStatusCard(
-                title: "充电设备",
+                title: "充电头",
                 icon: "bolt.fill",
                 enabled: service.settings.chargerModuleEnabled,
                 value: service.settings.chargerModuleEnabled ? bluetooth.phase.label : "已关闭",
@@ -476,7 +492,57 @@ struct DashboardView: View {
                 feedback: service.manualReportMessage(for: .charger),
                 feedbackIsError: service.manualReportFailed(.charger)
             )
+            ModuleStatusCard(
+                title: "充电宝",
+                icon: "minus.plus.batteryblock.fill",
+                enabled: service.settings.powerBankModuleEnabled,
+                value: powerBankOverviewValue,
+                detail: powerBankOverviewDetail,
+                action: { _ = service.requestImmediateReport(.powerBank) },
+                actionEnabled: service.canRequestImmediateReport(.powerBank),
+                isReporting: service.isManualReportInFlight(.powerBank),
+                feedback: service.manualReportMessage(for: .powerBank),
+                feedbackIsError: service.manualReportFailed(.powerBank)
+            )
         }
+    }
+
+    /// 连上了却没有数据，和根本没连上，是两个完全不同的问题。空状态必须能自己
+    /// 说清楚卡在哪一步，否则只能靠猜。
+    private var powerBankWaitingDetail: String {
+        if let error = powerBankLink.lastError { return error }
+        if powerBankLink.isConnected {
+            return "已连接并完成握手，但还没收到遥测帧。正常情况下 1 秒内就该有第一帧。"
+        }
+        if powerBankLink.phase == .handshaking {
+            return "正在建立加密会话。"
+        }
+        return "充电宝空闲时会休眠并停止广播，手机 App 连着它时本机也连不上。按一下机身按钮再等片刻。"
+    }
+
+    /// 总览卡片正面：有电量就显示电量，没有就显示连接阶段 —— 那才是这时候
+    /// 用户真正想知道的（在连？在认证？还是根本没配对）。
+    private var powerBankOverviewValue: String {
+        guard service.settings.powerBankModuleEnabled else { return "已关闭" }
+        guard let state = powerBankLink.powerBankState, let percent = state.batteryPercent else {
+            return powerBankLink.phase.label
+        }
+        return String(format: "%.1f%%", percent)
+    }
+
+    private var powerBankOverviewDetail: String? {
+        guard service.settings.powerBankModuleEnabled else { return nil }
+        guard let state = powerBankLink.powerBankState, powerBankLink.hasTelemetry else {
+            return powerBankLink.lastError
+        }
+        if state.isThermallyLimited { return "过热受限，暂不充电" }
+        if let input = state.inputPowerW, input > 0.05 {
+            return String(format: "输入 %.1f W", input)
+        }
+        if let output = state.outputPowerW, output > 0.05 {
+            return String(format: "输出 %.1f W", output)
+        }
+        return "待机"
     }
 
     private func sectionHeading(_ title: String, detail: String) -> some View {
