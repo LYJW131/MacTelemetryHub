@@ -36,8 +36,8 @@ public struct PowerBankPort: Codable, Equatable, Sendable {
         default: nil
         }
     }
-    /// 通电但没有负载 —— A 口开涓流模式时就是这个样子。
-    public var isEnergized: Bool { !isActive && (voltageV ?? 0) > 0.1 }
+    /// 通电但没有负载 —— A 口开涓流模式时就是这个样子。底座（B）离座时寄存器残留旧电压，不属于通电。
+    public var isEnergized: Bool { name != "B" && !isActive && (voltageV ?? 0) > 0.1 }
 }
 
 public struct PowerBankState: Codable, Equatable, Sendable {
@@ -56,8 +56,6 @@ public struct PowerBankState: Codable, Equatable, Sendable {
 
     public var inputPowerW: Double?
     public var outputPowerW: Double?
-    /// 充电底座（Pogo Pin）。和 C 口一样会粘滞，`mode == 0` 时读数是过期的。
-    public var dock: PowerBankPort?
     public var ports: [PowerBankPort] = []
 
     public var temperature1C: Int?
@@ -134,15 +132,11 @@ public enum PowerBankProtocol {
         if let raw = fields[tlvOutputTotal] {
             state.outputPowerW = tenths(raw, at: 1)
         }
-        if let raw = fields[tlvDock] {
-            state.dock = port(named: "DOCK", body: raw)
-        }
-
         // 方向取自总输入功率。0xA4 是热控不是方向，底座那块会过期 —— 两个都不能用。
         state.charging = (state.inputPowerW ?? 0) > 0.05
 
         var decoded: [PowerBankPort] = []
-        for (name, type) in [("C1", tlvPortC1), ("C2", tlvPortC2), ("A", tlvPortA)] {
+        for (name, type) in [("C1", tlvPortC1), ("C2", tlvPortC2), ("A", tlvPortA), ("B", tlvDock)] {
             if let raw = fields[type] {
                 decoded.append(port(named: name, body: raw))
             }
@@ -218,7 +212,7 @@ public enum PowerBankProtocol {
         reading.powerW = tenths(body, at: 5)
         if body.count >= 9 {
             // [8] 是插线标志：0x07 有线、0x00 空。这是区分「插着但没协商」和
-            // 「什么都没插」的唯一办法。A 口那个 8 字节块没有这一位。
+            // 「什么都没插」的唯一办法。A 口和底座没有这一位。
             reading.attached = body[base + 8] == 0x07
         }
         return reading
@@ -283,20 +277,6 @@ public extension ChargingDevicePayload {
                 thermalLimited: state.isThermallyLimited
             ),
             temperaturesC: state.temperatures.isEmpty ? nil : state.temperatures,
-            // 底座那块和端口块一样是粘滞的：不在用时留着上一次的读数。
-            // 所以只有 mode != 0 才发，否则会报出一个几分钟前的底座功率。
-            dock: state.dock.flatMap { dock in
-                dock.isActive
-                    ? DevicePortPayload(
-                        name: "DOCK",
-                        active: true,
-                        direction: dock.direction,
-                        voltageV: dock.voltageV.map(TelemetryRounding.twoDecimals),
-                        currentA: dock.currentA.map(TelemetryRounding.twoDecimals),
-                        powerW: dock.powerW.map(TelemetryRounding.twoDecimals)
-                    )
-                    : nil
-            },
             ports: ports
         )
     }

@@ -162,8 +162,9 @@ private func expectClose(_ actual: Double?, _ expected: Double?, _ label: String
             #expect(state.pomodoroEnabled == expected.pomodoro_enabled, "\(where_) pomodoroOn")
 
             let expectedPorts = expected.ports.filter { $0.name != "DOCK" }
-            #expect(state.ports.count == expectedPorts.count, "\(where_) port count")
-            for (port, want) in zip(state.ports, expectedPorts) {
+            let normalPorts = state.ports.filter { $0.name != "B" }
+            #expect(normalPorts.count == expectedPorts.count, "\(where_) port count")
+            for (port, want) in zip(normalPorts, expectedPorts) {
                 let label = "\(where_) \(want.name)"
                 #expect(port.name == want.name, "\(label) name")
                 #expect(Int(port.mode) == want.mode, "\(label) mode")

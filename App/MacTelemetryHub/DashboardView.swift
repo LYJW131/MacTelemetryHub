@@ -309,9 +309,9 @@ struct DashboardView: View {
 
                 if let state = powerBankLink.powerBankState, powerBankLink.hasTelemetry {
                     powerBankOverviewCard(state, now: now)
-                    sectionHeading("端口", detail: "C1 与 C2 双向，A 口只出。空闲端口不显示功率 —— 那个读数是过期的")
+                    sectionHeading("端口", detail: "C1 与 C2 双向，A 口只出，B 为底座输入。空闲端口不显示功率 —— 那个读数是过期的")
                     LazyVGrid(
-                        columns: [GridItem(.flexible(), spacing: 12), GridItem(.flexible(), spacing: 12), GridItem(.flexible(), spacing: 12)],
+                        columns: Array(repeating: GridItem(.flexible(), spacing: 12), count: 4),
                         spacing: 12
                     ) {
                         ForEach(state.ports, id: \.name) { port in
@@ -916,29 +916,43 @@ private struct PowerBankPortCard: View {
     let port: PowerBankPort
 
     private var title: String {
-        port.name == "A" ? "USB-A" : "USB-C \(port.name.dropFirst())"
+        switch port.name {
+        case "A": "USB-A"
+        case "B": "Dock"
+        default: "USB-C \(port.name.dropFirst())"
+        }
     }
 
     private var badge: (String, StatusBadgeStyle) {
         switch port.direction {
-        case "in": ("输入", .info)
-        case "out": ("输出", .success)
+        case "in":
+            return ("输入", .info)
+        case "out":
+            return ("输出", .success)
         default:
-            port.isEnergized ? ("待机", .neutral)
-                : port.attached ? ("已插线", .neutral) : ("空闲", .neutral)
+            if port.name == "B" {
+                return ("空闲", .neutral)
+            }
+            if port.isEnergized {
+                return ("待机", .neutral)
+            }
+            if port.attached {
+                return ("已插线", .neutral)
+            }
+            return ("空闲", .neutral)
         }
     }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             HStack(spacing: 8) {
-                Image(systemName: "cable.connector.horizontal")
+                Image(systemName: port.name == "B" ? "powerplug.fill" : "cable.connector.horizontal")
                     .font(.system(size: 14, weight: .semibold))
                     .foregroundStyle(port.isActive ? .blue : .secondary)
                     .frame(width: 24, height: 24)
                 VStack(alignment: .leading, spacing: 1) {
                     Text(title).font(.headline)
-                    Text(port.name)
+                    Text(port.name == "B" ? "底座" : port.name)
                         .font(.caption2.monospaced())
                         .foregroundStyle(.tertiary)
                 }
@@ -972,13 +986,22 @@ private struct PowerBankPortCard: View {
             .background(.primary.opacity(0.035))
 
             VStack(alignment: .leading, spacing: 3) {
-                Label(port.attached ? "已插线" : "未检测到线缆", systemImage: "cable.connector")
-                Text(port.isActive ? (port.direction == "in" ? "正在取电" : "正在供电")
-                     : port.isEnergized ? "已通电，无负载" : "未协商供电")
-                    .foregroundStyle(.secondary)
-                Text(port.name == "A" ? "仅输出" : "支持双向")
-                    .fontWeight(.medium)
-                    .foregroundStyle(.tertiary)
+                if port.name == "B" {
+                    Label(port.isActive ? "已连接底座" : "未连接底座", systemImage: "powerplug")
+                    Text(port.isActive ? "正在通过底座取电" : "未放置在充电底座上")
+                        .foregroundStyle(.secondary)
+                    Text("仅输入")
+                        .fontWeight(.medium)
+                        .foregroundStyle(.tertiary)
+                } else {
+                    Label(port.attached ? "已插线" : "未检测到线缆", systemImage: "cable.connector")
+                    Text(port.isActive ? (port.direction == "in" ? "正在取电" : "正在供电")
+                         : port.isEnergized ? "已通电，无负载" : "未协商供电")
+                        .foregroundStyle(.secondary)
+                    Text(port.name == "A" ? "仅输出" : "支持双向")
+                        .fontWeight(.medium)
+                        .foregroundStyle(.tertiary)
+                }
             }
             .font(.caption)
             .lineLimit(1)

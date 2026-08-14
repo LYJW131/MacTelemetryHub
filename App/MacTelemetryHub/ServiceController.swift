@@ -358,7 +358,7 @@ private struct ChargingDevicesStructuralSignature: Equatable {
             kind = device.kind
             connected = device.connected
             thermalLimited = device.battery?.thermalLimited
-            onDock = device.dock?.active ?? false
+            onDock = device.ports.first(where: { $0.name == "B" })?.active ?? false
             ports = device.ports.map(Port.init)
         }
     }
