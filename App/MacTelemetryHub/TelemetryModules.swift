@@ -44,6 +44,12 @@ struct CodingSessionSnapshot: Codable, Equatable, Sendable {
 @MainActor
 final class CodingSessionMonitor: ObservableObject {
     @Published private(set) var snapshots: [String: CodingSessionSnapshot] = [:]
+    /// `vibeCodingSessions` 模块的载荷。刻意不带采集时刻：内容没变就不该重发，
+    /// 而 60 秒一轮的扫描里绝大多数轮次什么都没变。
+    @Published private(set) var uploadPayload: JSONValue?
+    /// 载荷**真正变化**的时刻，上报侧的判变门闩看它而不是 lastSuccess ——
+    /// 后者每次成功采集都会动，拿它当门闩会把「扫过一遍、什么都没变」也算成新数据。
+    @Published private(set) var payloadUpdatedAt: Date?
     @Published private(set) var lastSuccess: Date?
     @Published private(set) var lastError: String?
     private var refreshing = false
@@ -51,22 +57,22 @@ final class CodingSessionMonitor: ObservableObject {
 
     func stop() {
         snapshots = [:]
+        uploadPayload = nil
+        payloadUpdatedAt = nil
         lastSuccess = nil
         lastError = nil
         refreshing = false
         lastAttempt = nil
     }
 
-    @discardableResult
-    func refreshIfNeeded(cliPath: String, interval: Double) async -> Bool {
-        guard !refreshing else { return false }
-        if let lastAttempt, Date().timeIntervalSince(lastAttempt) < interval { return false }
-        return await refreshNow(cliPath: cliPath)
+    func refreshIfNeeded(cliPath: String, interval: Double) async {
+        guard !refreshing else { return }
+        if let lastAttempt, Date().timeIntervalSince(lastAttempt) < interval { return }
+        await refreshNow(cliPath: cliPath)
     }
 
-    @discardableResult
-    func refreshNow(cliPath: String) async -> Bool {
-        guard !refreshing else { return false }
+    func refreshNow(cliPath: String) async {
+        guard !refreshing else { return }
         refreshing = true
         lastAttempt = Date()
         defer { refreshing = false }
@@ -78,11 +84,33 @@ final class CodingSessionMonitor: ObservableObject {
         for agent in ["claude", "codex"] where fresh[agent] == nil {
             if let previous = snapshots[agent] { fresh[agent] = previous }
         }
-        let changed = fresh != snapshots
         snapshots = fresh
+        let payload = fresh.isEmpty ? nil : Self.makeUploadPayload(fresh)
+        if uploadPayload != payload {
+            uploadPayload = payload
+            payloadUpdatedAt = Date()
+        }
         lastError = outcome.errors.isEmpty ? nil : outcome.errors.joined(separator: "；")
         if !fresh.isEmpty { lastSuccess = Date() }
-        return changed
+    }
+
+    /// 站点按 `id` 把这几个字段并回用量模块的 agent 上，所以除了 id 只发状态本身。
+    private static func makeUploadPayload(_ snapshots: [String: CodingSessionSnapshot]) -> JSONValue {
+        let agents = ["claude", "codex"].compactMap { id -> JSONValue? in
+            guard let snapshot = snapshots[id] else { return nil }
+            return .object([
+                "id": .string(id),
+                "currentModel": snapshot.currentModel.map(JSONValue.string) ?? .null,
+                "lastActivityAt": snapshot.lastActivityAt.map(JSONValue.string) ?? .null,
+                "active": .bool(snapshot.active),
+            ])
+        }
+        return .object([
+            "agents": .array(agents),
+            "sessionCount": .number(
+                Double(snapshots.values.reduce(0) { $0 + $1.sessionCount })
+            ),
+        ])
     }
 }
 
@@ -254,12 +282,26 @@ struct TelemetryModulesPayload: Encodable, Sendable {
     let appleMusic: AppleMusicSnapshot?
     let appleMusicCredentials: AppleMusicCredentialsPayload?
     let timezone: TimeZoneSnapshot?
-    let vibeCoding: JSONValue?
+    /**
+     * Vibe coding 拆成三个模块，一个采集器一个。
+     *
+     * 从前是一个 `vibeCoding`：CodexBar 的 365 天扫描顺手把限额和会话状态烤进
+     * 自己的载荷里。代价是三件事被绑成一件 —— 限额动一下就要重跑那个十几秒的
+     * 扫描，会话状态变了得靠一个手写的 JSON 补丁器去改冻结的载荷，而扫描一旦
+     * 失败，刚取到的限额连发都发不出去。
+     *
+     * 注意名字和 CodexBar 子命令是**交叉**的：`codexbar cost` 出的是 usage，
+     * `codexbar usage` 出的是 limits。按数据是什么命名，不按产生它的命令命名。
+     */
+    let vibeCodingUsage: JSONValue?
+    let vibeCodingLimits: JSONValue?
+    let vibeCodingSessions: JSONValue?
     let includeDesktop: Bool
     let includeAppleMusic: Bool
 
     private enum CodingKeys: String, CodingKey {
-        case charger, desktop, appleMusic, appleMusicCredentials, timezone, vibeCoding
+        case charger, desktop, appleMusic, appleMusicCredentials, timezone
+        case vibeCodingUsage, vibeCodingLimits, vibeCodingSessions
     }
 
     func encode(to encoder: Encoder) throws {
@@ -269,7 +311,9 @@ struct TelemetryModulesPayload: Encodable, Sendable {
         if includeAppleMusic { try container.encode(appleMusic, forKey: .appleMusic) }
         try container.encodeIfPresent(appleMusicCredentials, forKey: .appleMusicCredentials)
         try container.encodeIfPresent(timezone, forKey: .timezone)
-        try container.encodeIfPresent(vibeCoding, forKey: .vibeCoding)
+        try container.encodeIfPresent(vibeCodingUsage, forKey: .vibeCodingUsage)
+        try container.encodeIfPresent(vibeCodingLimits, forKey: .vibeCodingLimits)
+        try container.encodeIfPresent(vibeCodingSessions, forKey: .vibeCodingSessions)
     }
 }
 
@@ -788,6 +832,11 @@ private let supplementalQuotaProviderIDs = ["cursor", "opencodego", "antigravity
 @MainActor
 final class AgentLimitsMonitor: ObservableObject {
     @Published private(set) var plans: [String: AgentPlanSnapshot] = [:]
+    /// `vibeCodingLimits` 模块的载荷。同样不带采集时刻：限额 600 秒才动一次，
+    /// 没变的那几轮不该白占一次上报。
+    @Published private(set) var uploadPayload: JSONValue?
+    /// 载荷真正变化的时刻，判变门闩看它 —— 理由同 CodingSessionMonitor。
+    @Published private(set) var payloadUpdatedAt: Date?
     @Published private(set) var lastSuccess: Date?
     @Published private(set) var lastError: String?
     /// 按 agent 分开的限额失败原因，随载荷发给网页 —— 页面要能把「没配」和「取不到」分开
@@ -800,6 +849,8 @@ final class AgentLimitsMonitor: ObservableObject {
 
     func stop() {
         plans = [:]
+        uploadPayload = nil
+        payloadUpdatedAt = nil
         lastSuccess = nil
         lastError = nil
         limitErrors = [:]
@@ -861,7 +912,58 @@ final class AgentLimitsMonitor: ObservableObject {
         plans = fresh
         lastError = outcome.errors.isEmpty ? nil : outcome.errors.joined(separator: "；")
         limitErrors = outcome.limitErrors
+        // 全都失败时也要发：空 limits 加上 limitsError 才是「配了但取不到」，
+        // 什么都不发在站点那边和「没配」长得一模一样。
+        let payload = fresh.isEmpty && outcome.limitErrors.isEmpty
+            ? nil
+            : Self.makeUploadPayload(plans: fresh, limitErrors: outcome.limitErrors)
+        if uploadPayload != payload {
+            uploadPayload = payload
+            payloadUpdatedAt = Date()
+        }
         if !fresh.isEmpty { lastSuccess = Date() }
+    }
+
+    /// `vibeCodingLimits` 模块的载荷。展示名（"Claude Code" / "Cursor"）由站点自己给，
+    /// 它那边本来就有一份写死的映射，这里再发一遍只会多一个要对齐的地方。
+    private static func makeUploadPayload(
+        plans: [String: AgentPlanSnapshot],
+        limitErrors: [String: String]
+    ) -> JSONValue {
+        func windows(_ limits: [AgentLimitWindow]) -> JSONValue {
+            .array(limits.map { window in
+                .object([
+                    "key": .string(window.key),
+                    "label": window.label.map(JSONValue.string) ?? .null,
+                    "group": window.group.map(JSONValue.string) ?? .null,
+                    "windowMinutes": window.windowMinutes.map { .number(Double($0)) } ?? .null,
+                    "usedPercent": .number(window.usedPercent),
+                    "resetsAt": window.resetsAt.map { .number(Double($0)) } ?? .null,
+                ])
+            })
+        }
+        let agents: [JSONValue] = ["claude", "codex"].map { id in
+            let plan = plans[id]
+            return .object([
+                "id": .string(id),
+                "plan": plan.map {
+                    JSONValue.object(["tier": .string($0.tier), "label": .string($0.label)])
+                } ?? .null,
+                "limits": windows(plan?.limits ?? []),
+                "limitsError": limitErrors[id].map(JSONValue.string) ?? .null,
+            ])
+        }
+        let quotaProviders: [JSONValue] = supplementalQuotaProviderIDs.map { id in
+            .object([
+                "id": .string(id),
+                "usedPercent": plans[id]?.limits.first.map { .number($0.usedPercent) } ?? .null,
+                "limitsError": limitErrors[id].map(JSONValue.string) ?? .null,
+            ])
+        }
+        return .object([
+            "agents": .array(agents),
+            "quotaProviders": .array(quotaProviders),
+        ])
     }
 }
 
@@ -1102,68 +1204,48 @@ private enum AgentLimitsCollector {
 @MainActor
 final class CodexBarCostMonitor: ObservableObject {
     @Published private(set) var uploadPayload: JSONValue?
+    /// 载荷真正变化的时刻，判变门闩看它 —— 理由同 CodingSessionMonitor。
+    /// 这份载荷带着 `collectedAt`，所以每采一次都算变化，仍是 600 秒发一次。
+    @Published private(set) var payloadUpdatedAt: Date?
     @Published private(set) var lastSuccess: Date?
     @Published private(set) var lastError: String?
     private var refreshing = false
-    private var lastPlans: [String: AgentPlanSnapshot] = [:]
     /// 上一次**尝试**采集的时刻。间隔门闩看它而不是 lastSuccess：失败或被判废
     /// 时 lastSuccess 不动，光看它的话 2 秒一圈的主循环会每圈都重跑一次 CodexBar。
     private var lastAttempt: Date?
 
     func stop() {
         uploadPayload = nil
+        payloadUpdatedAt = nil
         lastSuccess = nil
         lastError = nil
-        lastPlans = [:]
         lastAttempt = nil
         refreshing = false
     }
 
-    func refreshIfNeeded(
-        cliPath: String,
-        interval: Double,
-        plans: [String: AgentPlanSnapshot],
-        limitErrors: [String: String],
-        sessions: [String: CodingSessionSnapshot]
-    ) async {
+    func refreshIfNeeded(cliPath: String, interval: Double) async {
         guard !refreshing else { return }
-        // 套餐变了要立刻重采：plans 是随本地统计一起上报的，光等间隔门闩的话
-        // 换套餐 / 额度跳档最长会被压 60 秒才发出去。
-        if let lastAttempt, Date().timeIntervalSince(lastAttempt) < interval,
-           plans == lastPlans { return }
-        _ = await refreshNow(
-            cliPath: cliPath,
-            plans: plans,
-            limitErrors: limitErrors,
-            sessions: sessions
-        )
+        if let lastAttempt, Date().timeIntervalSince(lastAttempt) < interval { return }
+        _ = await refreshNow(cliPath: cliPath)
     }
 
     /// Bypasses the interval gate for an explicit user refresh, while preserving
     /// the monitor's single-flight guard.
     @discardableResult
-    func refreshNow(
-        cliPath: String,
-        plans: [String: AgentPlanSnapshot],
-        limitErrors: [String: String],
-        sessions: [String: CodingSessionSnapshot]
-    ) async -> Bool {
+    func refreshNow(cliPath: String) async -> Bool {
         guard !refreshing else { return false }
         refreshing = true
         lastAttempt = Date()
         defer { refreshing = false }
         do {
             let collection = try await Task.detached(priority: .utility) {
-                try CodexBarCostCollector.collect(
-                    cliPath: cliPath,
-                    plans: plans,
-                    limitErrors: limitErrors,
-                    sessions: sessions
-                )
+                try CodexBarCostCollector.collect(cliPath: cliPath)
             }.value
-            uploadPayload = collection.uploadPayload
+            if uploadPayload != collection.uploadPayload {
+                uploadPayload = collection.uploadPayload
+                payloadUpdatedAt = Date()
+            }
             lastSuccess = Date()
-            lastPlans = plans
             lastError = nil
             return true
         } catch {
@@ -1171,18 +1253,6 @@ final class CodexBarCostMonitor: ObservableObject {
             return false
         }
     }
-
-    /// 60 秒的 session 扫描只覆盖状态字段与 session 总数，不重跑 365 天 Token 扫描。
-    @discardableResult
-    func applySessions(_ sessions: [String: CodingSessionSnapshot]) -> Bool {
-        guard let uploadPayload else { return false }
-        let merged = CodexBarCostCollector.applyingSessions(sessions, to: uploadPayload)
-        guard merged != uploadPayload else { return false }
-        self.uploadPayload = merged
-        lastSuccess = Date()
-        return true
-    }
-
 }
 
 private struct CodexBarCostCollection: Sendable {
@@ -1190,12 +1260,7 @@ private struct CodexBarCostCollection: Sendable {
 }
 
 private enum CodexBarCostCollector {
-    nonisolated static func collect(
-        cliPath: String,
-        plans: [String: AgentPlanSnapshot],
-        limitErrors: [String: String],
-        sessions: [String: CodingSessionSnapshot]
-    ) throws -> CodexBarCostCollection {
+    nonisolated static func collect(cliPath: String) throws -> CodexBarCostCollection {
         guard FileManager.default.isExecutableFile(atPath: cliPath) else {
             throw TelemetryModuleError.codexBar("CodexBar CLI 路径不可执行：\(cliPath)")
         }
@@ -1218,56 +1283,10 @@ private enum CodexBarCostCollector {
         guard !reports.isEmpty else {
             throw TelemetryModuleError.codexBar("cost 响应里没有 Claude/Codex 报告")
         }
-        let uploadData = try JSONSerialization.data(
-            withJSONObject: makeUploadSummary(
-                reports,
-                plans: plans,
-                limitErrors: limitErrors,
-                sessions: sessions
-            )
-        )
+        let uploadData = try JSONSerialization.data(withJSONObject: makeUploadSummary(reports))
         return CodexBarCostCollection(
             uploadPayload: try JSONDecoder().decode(JSONValue.self, from: uploadData)
         )
-    }
-
-    nonisolated static func applyingSessions(
-        _ sessions: [String: CodingSessionSnapshot],
-        to payload: JSONValue
-    ) -> JSONValue {
-        guard case .object(var root) = payload,
-              case .array(let values) = root["agents"] else { return payload }
-        var changed = false
-        let agents = values.map { value -> JSONValue in
-            guard case .object(var agent) = value,
-                  case let .string(id) = agent["id"],
-                  let session = sessions[id] else { return value }
-            let currentModel = session.currentModel.map(JSONValue.string) ?? .null
-            let lastActivity = session.lastActivityAt.map(JSONValue.string) ?? .null
-            let active = JSONValue.bool(session.active)
-            if agent["currentModel"] != currentModel ||
-                agent["lastActivityAt"] != lastActivity || agent["active"] != active {
-                changed = true
-                agent["currentModel"] = currentModel
-                agent["lastActivityAt"] = lastActivity
-                agent["active"] = active
-            }
-            return .object(agent)
-        }
-        if case .object(var totals) = root["totals"] {
-            let sessionCount = JSONValue.number(
-                Double(sessions.values.reduce(0) { $0 + $1.sessionCount })
-            )
-            if totals["sessionCount"] != sessionCount {
-                changed = true
-                totals["sessionCount"] = sessionCount
-                root["totals"] = .object(totals)
-            }
-        }
-        guard changed else { return payload }
-        root["agents"] = .array(agents)
-        root["collectedAt"] = .string(ISO8601DateFormatter().string(from: Date()))
-        return .object(root)
     }
 
     private static func run(_ executable: String, _ arguments: [String]) throws -> Data {
@@ -1365,8 +1384,8 @@ private enum CodexBarCostCollector {
         }
 
         return [
-            // CodexBar cost JSON 不公开精确最后活动时间，因此这里不伪造；session
-            // 总数由独立的 ccusage 扫描在 makeUploadSummary 中汇总。
+            // CodexBar cost JSON 不公开精确最后活动时间，因此这里不伪造；最后活动
+            // 时刻和 session 总数都由 `vibeCodingSessions` 那个模块单独送。
             "currentModel": currentModel ?? NSNull(),
             "activity": activity,
         ]
@@ -1374,12 +1393,10 @@ private enum CodexBarCostCollector {
 
     /// The website only needs display-ready aggregates. Keep CodexBar's complete
     /// daily/model output on the Mac and send this bounded summary instead.
-    private static func makeUploadSummary(
-        _ reports: [String: Any],
-        plans: [String: AgentPlanSnapshot],
-        limitErrors: [String: String],
-        sessions: [String: CodingSessionSnapshot]
-    ) -> [String: Any] {
+    ///
+    /// 只装本地用量：套餐 / 限额走 `vibeCodingLimits`，会话状态走 `vibeCodingSessions`。
+    /// 三份各发各的，站点按 agent id 并回一起。
+    private static func makeUploadSummary(_ reports: [String: Any]) -> [String: Any] {
         let calendar = Calendar.current
         let today = calendar.startOfDay(for: Date())
         let start30 = calendar.date(byAdding: .day, value: -29, to: today) ?? today
@@ -1408,7 +1425,6 @@ private enum CodexBarCostCollector {
             let todayText = dayString(today)
             let todayRow = preparedDay(recentByDate[todayText] ?? normalizedEmptyDay(date: todayText))
             let summary = report["usageSummary"] as? [String: Any] ?? [:]
-            let session = sessions[agent]
             let totals = normalizeTotals(report["totals"] as? [String: Any] ?? [:])
             let models = Set(allDays.flatMap { $0["models"] as? [String] ?? [] }).sorted()
 
@@ -1417,75 +1433,32 @@ private enum CodexBarCostCollector {
             }
             addTotals(totals, to: &aggregate)
 
-            // 套餐 / 额度走 [String: Any] 这条路。历史原因是编码器当年开着
-            // .convertToSnakeCase，Codable 结构会被转成蛇形、站点白名单读不到；
-            // 现在编码器不转了，这条路只是还没回头改成 Codable。
-            let plan = plans[agent]
-            let planValue: Any = plan.map { ["tier": $0.tier, "label": $0.label] } ?? NSNull()
-            let limitValues: [[String: Any]] = plan?.limits.map { window in
-                [
-                    "key": window.key,
-                    "label": window.label ?? NSNull(),
-                    "group": window.group ?? NSNull(),
-                    "windowMinutes": window.windowMinutes ?? NSNull(),
-                    "usedPercent": window.usedPercent,
-                    "resetsAt": window.resetsAt ?? NSNull(),
-                ]
-            } ?? []
-
-            let currentModelValue: Any = session?.currentModel
-                ?? (summary["currentModel"] as? String) ?? NSNull()
-            let lastActivityValue: Any = session?.lastActivityAt ?? NSNull()
+            // 这里给的是「最近一个有用量日里的主力模型」。ccusage 那个模块会送来
+            // 真正的「此刻在用哪个」，站点优先用它、取不到才落到这个值上。
+            let currentModelValue: Any = (summary["currentModel"] as? String) ?? NSNull()
             let topModelValue: Any = agentModelTotals
                 .filter { $0.value > 0 }
                 .max { $0.value < $1.value }?.key ?? NSNull()
             let activityValue: Any = summary["activity"] ?? []
-            let limitsErrorValue: Any = limitErrors[agent] ?? NSNull()
             let last30DaysTokens = recentDays.reduce(0.0) {
                 $0 + number($1["totalTokens"])
             }
             let agentValue: [String: Any] = [
                 "id": agent,
-                "label": agent == "claude" ? "Claude Code" : "Codex",
                 "models": models,
                 "currentModel": currentModelValue,
-                "lastActivityAt": lastActivityValue,
-                "active": session?.active ?? false,
                 // 零用量的模型只是出现在 daily 里，不代表用过，不参与排名
                 "topModel": topModelValue,
                 "activity": activityValue,
                 "today": todayRow,
                 "last30DaysTokens": last30DaysTokens,
-                "plan": planValue,
-                "limits": limitValues,
-                // 空 limits 有两种含义：这个 agent 没配，或者配了但取不到。
-                // 页面得能分开 —— 前者该整块不渲染，后者该渲染并说明取不到。
-                "limitsError": limitsErrorValue,
             ]
             agents.append(agentValue)
         }
 
         aggregate["activeDays"] = Double(activeDates.count)
-        aggregate["sessionCount"] = Double(
-            sessions.values.reduce(0) { $0 + $1.sessionCount }
-        )
-        let quotaLabels = [
-            "cursor": "Cursor",
-            "opencodego": "OpenCode Go",
-            "antigravity": "Antigravity",
-        ]
-        let quotaProviders: [[String: Any]] = supplementalQuotaProviderIDs.map { provider in
-            let total = plans[provider]?.limits.first
-            return [
-                "id": provider,
-                "label": quotaLabels[provider] ?? provider,
-                "usedPercent": total?.usedPercent ?? NSNull(),
-                "limitsError": limitErrors[provider] ?? NSNull(),
-            ]
-        }
         return [
             "agents": agents,
-            "quotaProviders": quotaProviders,
             "totals": aggregate,
             "topModels": modelTotals
                 .filter { $0.value > 0 }

@@ -35,6 +35,11 @@ struct DashboardView: View {
     @ObservedObject private var httpServer: LocalHTTPServer
     @ObservedObject private var appleMusic: AppleMusicMonitor
     @ObservedObject private var codexBarCost: CodexBarCostMonitor
+    // 三张卡各看一个采集器，三个都得单独订阅：ServiceController 是 ObservableObject，
+    // 但它内部这几个 monitor 的 @Published 不会冒泡上来。从前会话状态那行的错误
+    // 就是这么挂在 service 下面读的，只有别的东西触发重绘时才会跟着变。
+    @ObservedObject private var agentLimits: AgentLimitsMonitor
+    @ObservedObject private var codingSessions: CodingSessionMonitor
     @State private var selection: DashboardSection = .overview
 
     init(service: ServiceController) {
@@ -43,6 +48,8 @@ struct DashboardView: View {
         httpServer = service.httpServer
         appleMusic = service.appleMusic
         codexBarCost = service.codexBarCost
+        agentLimits = service.agentLimits
+        codingSessions = service.codingSessions
     }
 
     var body: some View {
@@ -276,21 +283,59 @@ struct DashboardView: View {
                 feedback: service.manualReportMessage(for: .timezone),
                 feedbackIsError: service.manualReportFailed(.timezone)
             )
+            // Vibe coding 一行拆三行，一个采集器一行：三条命令的失败原因互不相干，
+            // 合成一行时限额取不到这件事在本机根本看不见（从前那条链里就没有它）。
             ModuleStatusCard(
-                title: "CodexBar",
+                title: "会话状态",
                 icon: "terminal",
                 enabled: service.settings.codexBarModuleEnabled,
-                value: codexBarCost.lastSuccess == nil ? "等待统计" : "聚合完成",
-                detail: service.codingSessions.lastError
-                    ?? codexBarCost.lastError
-                    ?? codexBarCost.lastSuccess?.formatted(date: .omitted, time: .standard),
-                action: { Task { await service.refreshCodexBarNow() } },
+                value: codingSessions.lastSuccess == nil ? "等待扫描" : "扫描完成",
+                detail: codingSessions.lastError
+                    ?? codingSessions.lastSuccess?.formatted(date: .omitted, time: .standard),
+                action: { Task { await service.refreshVibeCodingSessionsNow() } },
                 actionIcon: "arrow.clockwise",
-                actionHelp: "重新采集并上报 CodexBar",
+                actionHelp: "重新扫描 ccusage 会话状态并上报",
                 actionEnabled: service.settings.codexBarModuleEnabled,
-                isReporting: service.isRefreshingCodexBar || service.isManualReportInFlight(.vibeCoding),
-                feedback: service.isRefreshingCodexBar
-                    ? "正在重新读取用量与限额…"
+                isReporting: service.isRefreshingVibeCodingSessions
+                    || service.isManualReportInFlight(.vibeCoding),
+                feedback: service.isRefreshingVibeCodingSessions
+                    ? "正在扫描会话状态…"
+                    : service.manualReportMessage(for: .vibeCoding),
+                feedbackIsError: service.manualReportFailed(.vibeCoding)
+            )
+            ModuleStatusCard(
+                title: "Token / 费用",
+                icon: "chart.bar",
+                enabled: service.settings.codexBarModuleEnabled,
+                value: codexBarCost.lastSuccess == nil ? "等待统计" : "聚合完成",
+                detail: codexBarCost.lastError
+                    ?? codexBarCost.lastSuccess?.formatted(date: .omitted, time: .standard),
+                action: { Task { await service.refreshVibeCodingUsageNow() } },
+                actionIcon: "arrow.clockwise",
+                actionHelp: "重新统计 CodexBar 用量与费用并上报",
+                actionEnabled: service.settings.codexBarModuleEnabled,
+                isReporting: service.isRefreshingVibeCodingUsage
+                    || service.isManualReportInFlight(.vibeCoding),
+                feedback: service.isRefreshingVibeCodingUsage
+                    ? "正在重新统计用量…"
+                    : service.manualReportMessage(for: .vibeCoding),
+                feedbackIsError: service.manualReportFailed(.vibeCoding)
+            )
+            ModuleStatusCard(
+                title: "限额",
+                icon: "gauge.with.dots.needle.33percent",
+                enabled: service.settings.codexBarModuleEnabled,
+                value: agentLimits.lastSuccess == nil ? "等待限额" : "限额已取",
+                detail: agentLimits.lastError
+                    ?? agentLimits.lastSuccess?.formatted(date: .omitted, time: .standard),
+                action: { Task { await service.refreshVibeCodingLimitsNow() } },
+                actionIcon: "arrow.clockwise",
+                actionHelp: "重新读取 CodexBar 限额并上报",
+                actionEnabled: service.settings.codexBarModuleEnabled,
+                isReporting: service.isRefreshingVibeCodingLimits
+                    || service.isManualReportInFlight(.vibeCoding),
+                feedback: service.isRefreshingVibeCodingLimits
+                    ? "正在读取限额…"
                     : service.manualReportMessage(for: .vibeCoding),
                 feedbackIsError: service.manualReportFailed(.vibeCoding)
             )
