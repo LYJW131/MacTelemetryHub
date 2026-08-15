@@ -1123,7 +1123,6 @@ private enum TotalWindowPick {
 
 private let supplementalQuotaProviders: [SupplementalQuotaProvider] = [
     .init(id: "cursor", label: "Cursor", icon: "cursor", totalWindow: .primarySlot),
-    .init(id: "opencodego", label: "OpenCode Go", icon: "opencode", totalWindow: .longestSlot),
     .init(id: "antigravity", label: "Antigravity", icon: "antigravity", totalWindow: .weeklyExtra),
 ]
 
