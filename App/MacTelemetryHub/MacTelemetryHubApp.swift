@@ -45,7 +45,8 @@ private struct MenuBarView: View {
         // 读到的仍是用户真正在用的那个。
         if service.settings.desktopModuleEnabled {
             Label {
-                Text(desktopActivity.snapshot?.applicationName ?? "等待活动")
+                Text(foregroundActivityLabel)
+                    .lineLimit(1)
             } icon: {
                 foregroundAppIcon
             }
@@ -82,5 +83,11 @@ private struct MenuBarView: View {
         } else {
             Image(systemName: "macwindow")
         }
+    }
+
+    private var foregroundActivityLabel: String {
+        let appName = desktopActivity.snapshot?.applicationName ?? "等待活动"
+        guard let title = desktopActivity.windowTitle else { return appName }
+        return "\(appName) — \(title)"
     }
 }

@@ -38,6 +38,7 @@ struct DashboardView: View {
     @ObservedObject private var bluetooth: BluetoothService
     @ObservedObject private var powerBankLink: BluetoothService
     @ObservedObject private var httpServer: LocalHTTPServer
+    @ObservedObject private var desktopActivity: DesktopActivityMonitor
     @ObservedObject private var appleMusic: AppleMusicMonitor
     @ObservedObject private var codexBarCost: CodexBarCostMonitor
     // 三张卡各看一个采集器，三个都得单独订阅：ServiceController 是 ObservableObject，
@@ -52,6 +53,7 @@ struct DashboardView: View {
         bluetooth = service.chargerLink
         powerBankLink = service.powerBankLink
         httpServer = service.httpServer
+        desktopActivity = service.desktopActivity
         appleMusic = service.appleMusic
         codexBarCost = service.codexBarCost
         agentLimits = service.agentLimits
@@ -458,8 +460,8 @@ struct DashboardView: View {
                 title: "前台应用",
                 icon: "macwindow",
                 enabled: service.settings.desktopModuleEnabled,
-                value: service.desktopActivity.snapshot?.applicationName ?? "等待活动",
-                detail: service.desktopActivity.snapshot?.bundleIdentifier,
+                value: desktopActivity.snapshot?.applicationName ?? "等待活动",
+                detail: desktopActivityDetail,
                 action: { _ = service.requestImmediateReport(.desktop) },
                 actionEnabled: service.canRequestImmediateReport(.desktop),
                 isReporting: service.isManualReportInFlight(.desktop),
@@ -571,6 +573,19 @@ struct DashboardView: View {
                 feedbackIsError: service.manualReportFailed(.powerBank)
             )
         }
+    }
+
+    private var desktopActivityDetail: String? {
+        var parts: [String] = []
+        if let title = desktopActivity.windowTitle, !title.isEmpty { parts.append(title) }
+        if let bundleIdentifier = desktopActivity.snapshot?.bundleIdentifier,
+           !bundleIdentifier.isEmpty {
+            parts.append(bundleIdentifier)
+        }
+        if service.currentDesktopReportingIsBlocked {
+            parts.append("远端已隐藏")
+        }
+        return parts.isEmpty ? nil : parts.joined(separator: " · ")
     }
 
     private func sectionHeading(_ title: String, detail: String) -> some View {

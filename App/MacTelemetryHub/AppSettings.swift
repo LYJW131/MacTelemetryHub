@@ -19,6 +19,8 @@ final class AppSettings: ObservableObject {
         static let deviceID = "telemetryDeviceID"
         static let chargerModuleEnabled = "chargerModuleEnabled"
         static let desktopModuleEnabled = "desktopModuleEnabled"
+        static let desktopReportingBlacklist = "desktopReportingBlacklist"
+        static let windowTitleApplicationWhitelist = "windowTitleApplicationWhitelist"
         static let appleMusicModuleEnabled = "appleMusicModuleEnabled"
         static let timezoneModuleEnabled = "timezoneModuleEnabled"
         static let codexBarModuleEnabled = "codexBarModuleEnabled"
@@ -49,6 +51,8 @@ final class AppSettings: ObservableObject {
     @Published var chargerModuleEnabled: Bool
     @Published var powerBankModuleEnabled: Bool
     @Published var desktopModuleEnabled: Bool
+    @Published var desktopReportingBlacklist: String
+    @Published var windowTitleApplicationWhitelist: String
     @Published var appleMusicModuleEnabled: Bool
     @Published var timezoneModuleEnabled: Bool
     @Published var codexBarModuleEnabled: Bool
@@ -102,6 +106,10 @@ final class AppSettings: ObservableObject {
         // 默认关：没配对过的机器打开它只会一直停在「未配对」。
         powerBankModuleEnabled = defaults.object(forKey: Key.powerBankModuleEnabled) as? Bool ?? false
         desktopModuleEnabled = defaults.object(forKey: Key.desktopModuleEnabled) as? Bool ?? true
+        desktopReportingBlacklist = defaults.string(forKey: Key.desktopReportingBlacklist) ?? ""
+        windowTitleApplicationWhitelist = defaults.string(
+            forKey: Key.windowTitleApplicationWhitelist
+        ) ?? ""
         appleMusicModuleEnabled = defaults.object(forKey: Key.appleMusicModuleEnabled) as? Bool ?? true
         timezoneModuleEnabled = defaults.object(forKey: Key.timezoneModuleEnabled) as? Bool ?? true
         codexBarModuleEnabled = defaults.object(forKey: Key.codexBarModuleEnabled) as? Bool ?? false
@@ -165,6 +173,31 @@ final class AppSettings: ObservableObject {
 
     var normalizedPowerBankPeripheralID: UUID? {
         Self.normalizedUUID(powerBankPeripheralID)
+    }
+
+    var normalizedDesktopReportingBlacklist: DesktopReportingBlacklist {
+        DesktopReportingBlacklist(rawValue: desktopReportingBlacklist)
+    }
+
+    var normalizedWindowTitleApplicationWhitelist: BundleIdentifierList {
+        BundleIdentifierList(rawValue: windowTitleApplicationWhitelist)
+    }
+
+    func isDesktopReportingBlocked(bundleIdentifier: String?) -> Bool {
+        normalizedDesktopReportingBlacklist.contains(bundleIdentifier: bundleIdentifier)
+    }
+
+    func addToDesktopReportingBlacklist(bundleIdentifier: String) {
+        let current = normalizedDesktopReportingBlacklist
+        guard !current.contains(bundleIdentifier: bundleIdentifier) else { return }
+        desktopReportingBlacklist = (current.bundleIdentifiers + [bundleIdentifier]).joined(separator: "\n")
+    }
+
+    func addToWindowTitleApplicationWhitelist(bundleIdentifier: String) {
+        let current = normalizedWindowTitleApplicationWhitelist
+        guard !current.contains(bundleIdentifier: bundleIdentifier) else { return }
+        windowTitleApplicationWhitelist = (current.bundleIdentifiers + [bundleIdentifier])
+            .joined(separator: "\n")
     }
 
     private static func normalizedUUID(_ raw: String) -> UUID? {
@@ -238,6 +271,8 @@ final class AppSettings: ObservableObject {
         ccusageCLIPath = (ccusageCLIPath as NSString).expandingTildeInPath
         r2Endpoint = r2Endpoint.trimmingCharacters(in: .whitespacesAndNewlines)
         r2Bucket = r2Bucket.trimmingCharacters(in: .whitespacesAndNewlines)
+        desktopReportingBlacklist = normalizedDesktopReportingBlacklist.normalizedRawValue
+        windowTitleApplicationWhitelist = normalizedWindowTitleApplicationWhitelist.normalizedRawValue
         r2AccessKeyID = r2AccessKeyID.trimmingCharacters(in: .whitespacesAndNewlines)
         r2SecretAccessKey = r2SecretAccessKey.trimmingCharacters(in: .whitespacesAndNewlines)
         try keychain.write(userID, account: Key.userIDAccount)
@@ -256,6 +291,8 @@ final class AppSettings: ObservableObject {
         defaults.set(chargerModuleEnabled, forKey: Key.chargerModuleEnabled)
         defaults.set(powerBankModuleEnabled, forKey: Key.powerBankModuleEnabled)
         defaults.set(desktopModuleEnabled, forKey: Key.desktopModuleEnabled)
+        defaults.set(desktopReportingBlacklist, forKey: Key.desktopReportingBlacklist)
+        defaults.set(windowTitleApplicationWhitelist, forKey: Key.windowTitleApplicationWhitelist)
         defaults.set(appleMusicModuleEnabled, forKey: Key.appleMusicModuleEnabled)
         defaults.set(timezoneModuleEnabled, forKey: Key.timezoneModuleEnabled)
         defaults.set(codexBarModuleEnabled, forKey: Key.codexBarModuleEnabled)

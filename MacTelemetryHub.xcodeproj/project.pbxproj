@@ -26,6 +26,7 @@
 		B10000000000000000000022 /* AnkerPrimeSpec.swift in Sources */ = {isa = PBXBuildFile; fileRef = F10000000000000000000022 /* AnkerPrimeSpec.swift */; };
 		B10000000000000000000023 /* ChargingDeviceDecoder.swift in Sources */ = {isa = PBXBuildFile; fileRef = F10000000000000000000023 /* ChargingDeviceDecoder.swift */; };
 		B10000000000000000000024 /* ChargingDeviceSlot.swift in Sources */ = {isa = PBXBuildFile; fileRef = F10000000000000000000024 /* ChargingDeviceSlot.swift */; };
+		B10000000000000000000025 /* DesktopReportingBlacklist.swift in Sources */ = {isa = PBXBuildFile; fileRef = F10000000000000000000025 /* DesktopReportingBlacklist.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -51,6 +52,7 @@
 		F10000000000000000000022 /* AnkerPrimeSpec.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AnkerPrimeSpec.swift; sourceTree = "<group>"; };
 		F10000000000000000000023 /* ChargingDeviceDecoder.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChargingDeviceDecoder.swift; sourceTree = "<group>"; };
 		F10000000000000000000024 /* ChargingDeviceSlot.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChargingDeviceSlot.swift; sourceTree = "<group>"; };
+		F10000000000000000000025 /* DesktopReportingBlacklist.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DesktopReportingBlacklist.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -103,6 +105,7 @@
 				F10000000000000000000020 /* DeviceTelemetry.swift */,
 				F10000000000000000000021 /* PowerBankProtocol.swift */,
 				F10000000000000000000022 /* AnkerPrimeSpec.swift */,
+				F10000000000000000000025 /* DesktopReportingBlacklist.swift */,
 			);
 			path = Sources/ChargerTelemetryKit;
 			sourceTree = SOURCE_ROOT;
@@ -196,6 +199,7 @@
 				B10000000000000000000022 /* AnkerPrimeSpec.swift in Sources */,
 				B10000000000000000000023 /* ChargingDeviceDecoder.swift in Sources */,
 				B10000000000000000000024 /* ChargingDeviceSlot.swift in Sources */,
+				B10000000000000000000025 /* DesktopReportingBlacklist.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -247,6 +251,7 @@
 				CODE_SIGN_STYLE = Automatic;
 				COMBINE_HIDPI_IMAGES = YES;
 				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = 2VTXNMR2GL;
 				ENABLE_APP_SANDBOX = NO;
 				ENABLE_HARDENED_RUNTIME = YES;
 				GENERATE_INFOPLIST_FILE = NO;
@@ -254,7 +259,7 @@
 				LD_RUNPATH_SEARCH_PATHS = "$(inherited) @executable_path/../Frameworks";
 				MACOSX_DEPLOYMENT_TARGET = 14.0;
 				MARKETING_VERSION = 1.0.0;
-				PRODUCT_BUNDLE_IDENTIFIER = com.liangyangjunwei.MacTelemetryHub;
+				PRODUCT_BUNDLE_IDENTIFIER = com.liangyangjunwei.MacTelemetryHub.debug;
 				PRODUCT_NAME = "Mac Telemetry Hub";
 				SWIFT_EMIT_LOC_STRINGS = YES;
 				SWIFT_STRICT_CONCURRENCY = complete;
@@ -269,6 +274,7 @@
 				CODE_SIGN_STYLE = Automatic;
 				COMBINE_HIDPI_IMAGES = YES;
 				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = 2VTXNMR2GL;
 				ENABLE_APP_SANDBOX = NO;
 				ENABLE_HARDENED_RUNTIME = YES;
 				GENERATE_INFOPLIST_FILE = NO;

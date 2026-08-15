@@ -1,4 +1,5 @@
 import AppKit
+import ApplicationServices
 import CryptoKit
 import Foundation
 import Security
@@ -348,10 +349,20 @@ struct TelemetryEnvelope: Encodable, Sendable {
 @MainActor
 final class DesktopActivityMonitor: ObservableObject {
     @Published private(set) var snapshot: DesktopActivitySnapshot?
+    /// 只供本机 UI 展示。它不属于 DesktopActivitySnapshot，因此任何遥测或本地
+    /// JSON 端点都无法把窗口标题编码出去。
+    @Published private(set) var windowTitle: String?
+    @Published private(set) var windowTitleAccessGranted = AXIsProcessTrusted()
     /// snapshot 变化时通知上报循环，让它别干等到下一个周期
     var onChange: (() -> Void)?
     private var observer: NSObjectProtocol?
     private var pollTask: Task<Void, Never>?
+    private var accessibilityObserver: AXObserver?
+    private var accessibilityObserverIdentity: UInt?
+    private var observedApplicationElement: AXUIElement?
+    private var observedWindowElement: AXUIElement?
+    private var observedApplicationPID: pid_t?
+    private var windowTitleApplicationWhitelist = BundleIdentifierList(rawValue: "")
     private static let fallbackPollInterval = Duration.seconds(5)
     /// 一个应用的图标：身份指纹 + 待上传的 PNG（编码失败时 png 为 nil）
     struct IconEntry {
@@ -395,7 +406,30 @@ final class DesktopActivityMonitor: ObservableObject {
         pollTask = nil
         if let observer { NSWorkspace.shared.notificationCenter.removeObserver(observer) }
         observer = nil
+        detachAccessibilityObserver()
         snapshot = nil
+        windowTitle = nil
+    }
+
+    func setWindowTitleApplicationWhitelist(_ whitelist: BundleIdentifierList) {
+        guard windowTitleApplicationWhitelist != whitelist else { return }
+        windowTitleApplicationWhitelist = whitelist
+        // 尚未 start 时留给 start() 的首次 capture；运行中则立刻停止旧观察或启用新观察。
+        if observer != nil || pollTask != nil { capture() }
+    }
+
+    /// 权限提示只允许由设置页上的明确操作触发；后台启动和轮询都只做无副作用检查。
+    func requestWindowTitleAccess() {
+        let options = ["AXTrustedCheckOptionPrompt": true] as CFDictionary
+        windowTitleAccessGranted = AXIsProcessTrustedWithOptions(options)
+        if windowTitleAccessGranted { capture() }
+    }
+
+    func openWindowTitlePrivacySettings() {
+        guard let url = URL(
+            string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility"
+        ) else { return }
+        NSWorkspace.shared.open(url)
     }
 
     private func startFallbackPoll() {
@@ -412,6 +446,7 @@ final class DesktopActivityMonitor: ObservableObject {
     /// 传 nil 表示「自己去问当前前台是谁」：启动时的第一次采集，以及兜底轮询。
     func capture(_ activated: NSRunningApplication? = nil) {
         guard let app = activated ?? NSWorkspace.shared.frontmostApplication else { return }
+        updateWindowTitleMonitoring(for: app)
         let iconKey = app.bundleIdentifier ?? app.bundleURL?.path ?? app.localizedName ?? "unknown"
         let previous = snapshot
 
@@ -449,6 +484,181 @@ final class DesktopActivityMonitor: ObservableObject {
         guard identityChanged else { return }
         snapshot = next
         onChange?()
+    }
+
+    private func updateWindowTitleMonitoring(for app: NSRunningApplication) {
+        guard windowTitleApplicationWhitelist.contains(bundleIdentifier: app.bundleIdentifier) else {
+            detachAccessibilityObserver()
+            if windowTitle != nil { windowTitle = nil }
+            return
+        }
+        refreshWindowTitle(for: app)
+        attachAccessibilityObserver(to: app)
+    }
+
+    private func refreshWindowTitle(for app: NSRunningApplication) {
+        guard windowTitleApplicationWhitelist.contains(bundleIdentifier: app.bundleIdentifier) else {
+            if windowTitle != nil { windowTitle = nil }
+            return
+        }
+        let granted = AXIsProcessTrusted()
+        if windowTitleAccessGranted != granted { windowTitleAccessGranted = granted }
+        guard granted else {
+            if windowTitle != nil { windowTitle = nil }
+            return
+        }
+
+        let next = Self.normalizedWindowTitle(Self.windowTitle(forPID: app.processIdentifier))
+        if windowTitle != next { windowTitle = next }
+    }
+
+    private func attachAccessibilityObserver(to app: NSRunningApplication) {
+        guard windowTitleApplicationWhitelist.contains(bundleIdentifier: app.bundleIdentifier),
+              windowTitleAccessGranted else {
+            detachAccessibilityObserver()
+            return
+        }
+        guard observedApplicationPID != app.processIdentifier || accessibilityObserver == nil else {
+            return
+        }
+
+        detachAccessibilityObserver()
+        var observer: AXObserver?
+        guard AXObserverCreate(
+            app.processIdentifier,
+            Self.accessibilityNotificationCallback,
+            &observer
+        ) == .success, let observer else { return }
+
+        let applicationElement = AXUIElementCreateApplication(app.processIdentifier)
+        let context = Unmanaged.passUnretained(self).toOpaque()
+        guard AXObserverAddNotification(
+            observer,
+            applicationElement,
+            kAXFocusedWindowChangedNotification as CFString,
+            context
+        ) == .success else { return }
+
+        accessibilityObserver = observer
+        accessibilityObserverIdentity = Self.identity(of: observer)
+        observedApplicationElement = applicationElement
+        observedApplicationPID = app.processIdentifier
+        CFRunLoopAddSource(
+            CFRunLoopGetMain(),
+            AXObserverGetRunLoopSource(observer),
+            .commonModes
+        )
+        refreshObservedWindow()
+    }
+
+    private func refreshObservedWindow() {
+        guard let observer = accessibilityObserver,
+              let applicationElement = observedApplicationElement else { return }
+
+        if let oldWindow = observedWindowElement {
+            AXObserverRemoveNotification(
+                observer,
+                oldWindow,
+                kAXTitleChangedNotification as CFString
+            )
+            observedWindowElement = nil
+        }
+
+        guard let window = Self.windowElement(for: applicationElement) else { return }
+        let context = Unmanaged.passUnretained(self).toOpaque()
+        guard AXObserverAddNotification(
+            observer,
+            window,
+            kAXTitleChangedNotification as CFString,
+            context
+        ) == .success else { return }
+        observedWindowElement = window
+    }
+
+    private func detachAccessibilityObserver() {
+        guard let observer = accessibilityObserver else {
+            accessibilityObserverIdentity = nil
+            observedApplicationElement = nil
+            observedWindowElement = nil
+            observedApplicationPID = nil
+            return
+        }
+        CFRunLoopRemoveSource(
+            CFRunLoopGetMain(),
+            AXObserverGetRunLoopSource(observer),
+            .commonModes
+        )
+        accessibilityObserver = nil
+        accessibilityObserverIdentity = nil
+        observedApplicationElement = nil
+        observedWindowElement = nil
+        observedApplicationPID = nil
+    }
+
+    private static func windowElement(for applicationElement: AXUIElement) -> AXUIElement? {
+        var value: CFTypeRef?
+        let focusedResult = AXUIElementCopyAttributeValue(
+            applicationElement,
+            kAXFocusedWindowAttribute as CFString,
+            &value
+        )
+        if focusedResult != .success {
+            value = nil
+            guard AXUIElementCopyAttributeValue(
+                applicationElement,
+                kAXMainWindowAttribute as CFString,
+                &value
+            ) == .success else { return nil }
+        }
+        guard let value, CFGetTypeID(value) == AXUIElementGetTypeID() else { return nil }
+        return (value as! AXUIElement)
+    }
+
+    private static func windowTitle(forPID processID: pid_t) -> String? {
+        let applicationElement = AXUIElementCreateApplication(processID)
+        guard let window = windowElement(for: applicationElement) else { return nil }
+        var titleValue: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(
+            window,
+            kAXTitleAttribute as CFString,
+            &titleValue
+        ) == .success else { return nil }
+        return titleValue as? String
+    }
+
+    private static func normalizedWindowTitle(_ raw: String?) -> String? {
+        guard let raw else { return nil }
+        let collapsed = raw
+            .split(whereSeparator: { $0.isWhitespace })
+            .joined(separator: " ")
+        guard !collapsed.isEmpty else { return nil }
+        return String(collapsed.prefix(240))
+    }
+
+    private static func identity(of observer: AXObserver) -> UInt {
+        UInt(bitPattern: Unmanaged.passUnretained(observer).toOpaque())
+    }
+
+    private static let accessibilityNotificationCallback: AXObserverCallback = {
+        observer, _, notification, context in
+        guard let context else { return }
+        let monitor = Unmanaged<DesktopActivityMonitor>.fromOpaque(context).takeUnretainedValue()
+        let observerIdentity = identity(of: observer)
+        let focusedWindowChanged = notification as String == kAXFocusedWindowChangedNotification
+
+        Task { @MainActor in
+            guard monitor.accessibilityObserverIdentity == observerIdentity else { return }
+            guard let app = NSWorkspace.shared.frontmostApplication else { return }
+            guard monitor.windowTitleApplicationWhitelist.contains(
+                bundleIdentifier: app.bundleIdentifier
+            ) else {
+                monitor.detachAccessibilityObserver()
+                if monitor.windowTitle != nil { monitor.windowTitle = nil }
+                return
+            }
+            if focusedWindowChanged { monitor.refreshObservedWindow() }
+            monitor.refreshWindowTitle(for: app)
+        }
     }
 
     private static var nowMilliseconds: Int64 { Int64(Date().timeIntervalSince1970 * 1_000) }
@@ -777,6 +987,21 @@ final class AppleMusicMonitor: ObservableObject {
 }
 
 extension DesktopActivitySnapshot {
+    /// 黑名单命中时发送的虚拟应用身份。站点像处理 Codex / Claude 一样按 Bundle ID
+    /// 替换名称和图标；载荷里不保留真实应用的任何身份或图标信息。
+    static let hiddenBundleIdentifier = "com.liangyangjunwei.MacTelemetryHub.hidden"
+
+    static func hidden(observedAt: Int64) -> DesktopActivitySnapshot {
+        DesktopActivitySnapshot(
+            applicationName: "Hidden Application",
+            bundleIdentifier: hiddenBundleIdentifier,
+            iconHash: nil,
+            iconData: nil,
+            iconObjectKey: nil,
+            observedAt: observedAt
+        )
+    }
+
     func withIconData(_ iconData: Data?, iconObjectKey: String? = nil) -> DesktopActivitySnapshot {
         DesktopActivitySnapshot(
             applicationName: applicationName,

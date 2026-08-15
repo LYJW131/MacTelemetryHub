@@ -536,6 +536,8 @@ final class ServiceController: ObservableObject {
     /// 只跟结构性变化比，管的是「要不要即时发」，不管「要不要带 charger 模块」
     private var lastPostedChargingStructural: ChargingDevicesStructuralSignature?
     private var lastPostedDesktop: DesktopUploadSignature?
+    /// 隐藏虚拟应用已成功发出。单靠 Optional 无法区分“尚未发过”和“已发隐藏态”。
+    private var lastPostedDesktopWasHidden = false
     /// 这个上报会话里已经在 R2 确认存在的图标身份指纹。
     private var uploadedDesktopIconHashes: Set<String> = []
     /// 图标直传连续失败次数，按身份哈希记。到上限就不再试，避免打成热循环
@@ -749,6 +751,12 @@ final class ServiceController: ObservableObject {
         return true
     }
 
+    var currentDesktopReportingIsBlocked: Bool {
+        settings.isDesktopReportingBlocked(
+            bundleIdentifier: desktopActivity.snapshot?.bundleIdentifier
+        )
+    }
+
     func isManualReportInFlight(_ module: TelemetryModule) -> Bool {
         pendingManualReports.contains(module)
     }
@@ -832,7 +840,10 @@ final class ServiceController: ObservableObject {
 
     private func moduleHasData(_ module: TelemetryModule) -> Bool {
         switch module {
-        case .desktop: desktopActivity.snapshot != nil
+        case .desktop:
+            desktopActivity.snapshot.map {
+                !settings.isDesktopReportingBlocked(bundleIdentifier: $0.bundleIdentifier)
+            } ?? false
         case .appleMusic: appleMusic.snapshot != nil
         case .charger: chargerLink.hasTelemetry
         case .powerBank: powerBankLink.hasTelemetry
@@ -931,12 +942,17 @@ final class ServiceController: ObservableObject {
         }
 
         if settings.desktopModuleEnabled {
+            desktopActivity.setWindowTitleApplicationWhitelist(
+                settings.normalizedWindowTitleApplicationWhitelist
+            )
             // 每次激活都重排，连续 Cmd-Tab 只在最后停下的那个应用上叫醒一次。
             // 开着远端上报时，图标在这 400ms 里先走后台 resolver；名称上报不等它。
             desktopActivity.onChange = { [weak self] in
                 guard let self else { return }
                 desktopSettleTask?.cancel()
-                if settings.postEnabled, let snapshot = desktopActivity.snapshot {
+                if settings.postEnabled,
+                   let snapshot = desktopActivity.snapshot,
+                   !settings.isDesktopReportingBlocked(bundleIdentifier: snapshot.bundleIdentifier) {
                     startDesktopIconResolution(snapshot)
                 }
                 desktopSettleTask = Task { [weak self] in
@@ -951,6 +967,9 @@ final class ServiceController: ObservableObject {
             desktopSettleTask?.cancel()
             desktopSettleTask = nil
             desktopActivity.stop()
+            desktopActivity.setWindowTitleApplicationWhitelist(
+                settings.normalizedWindowTitleApplicationWhitelist
+            )
         }
 
         if settings.timezoneModuleEnabled {
@@ -1037,6 +1056,7 @@ final class ServiceController: ObservableObject {
         lastPostedChargingDevices = nil
         lastPostedChargingStructural = nil
         lastPostedDesktop = nil
+        lastPostedDesktopWasHidden = false
         uploadedDesktopIconHashes.removeAll(keepingCapacity: true)
         uploadedDesktopIconOrder.removeAll(keepingCapacity: true)
         iconUploadAttempts.removeAll(keepingCapacity: true)
@@ -1084,7 +1104,12 @@ final class ServiceController: ObservableObject {
                     let charger = chargingDevicesPayload
                     let chargerSignature = charger
                     let chargerStructural = charger.map(ChargingDevicesStructuralSignature.init)
-                    let desktop = settings.desktopModuleEnabled ? desktopActivity.snapshot : nil
+                    let capturedDesktop = settings.desktopModuleEnabled ? desktopActivity.snapshot : nil
+                    let desktopBlocked = capturedDesktop.map {
+                        settings.isDesktopReportingBlocked(bundleIdentifier: $0.bundleIdentifier)
+                    } ?? false
+                    // 黑名单只切断远端载荷；monitor 的本机快照继续保留给界面和本地 API。
+                    let desktop = desktopBlocked ? nil : capturedDesktop
                     let desktopSignature = desktop.map(DesktopUploadSignature.init)
                     let timezone = settings.timezoneModuleEnabled ? timeZone.snapshot : nil
                     let timezoneSignature = timezone.map(TimeZoneUploadSignature.init)
@@ -1098,7 +1123,13 @@ final class ServiceController: ObservableObject {
                         $0.musicUserToken != lastPostedAppleMusicUserToken
                     } ?? false
                     let chargerChanged = chargerSignature != nil && chargerSignature != lastPostedChargingDevices
-                    let desktopChanged = desktopSignature != nil && desktopSignature != lastPostedDesktop
+                    let desktopChanged = capturedDesktop != nil && (
+                        desktopBlocked
+                            ? !lastPostedDesktopWasHidden
+                            : desktopSignature != nil && (
+                                lastPostedDesktopWasHidden || desktopSignature != lastPostedDesktop
+                            )
+                    )
                     let timezoneChanged = timezoneSignature != nil && timezoneSignature != lastPostedTimeZone
                     // 进度不参与变化判断，只在它偏离网页的预测值时才重新对锚点，
                     // 否则播放中每一轮都会「有变化」，按需上报就退化成了定时轮询。
@@ -1210,6 +1241,8 @@ final class ServiceController: ObservableObject {
                     // 但那只防住「叫醒」这条路：tick 恰好落在切换途中时照样会采到中间
                     // 那个应用。真要根治得在这里再比一次，眼下不值当。
                     let desktopUrgent = !manualMode && desktopChanged && (
+                        desktopBlocked ||
+                        lastPostedDesktopWasHidden ||
                         desktop?.bundleIdentifier != lastPostedDesktop?.bundleIdentifier ||
                         desktop?.applicationName != lastPostedDesktop?.applicationName
                     )
@@ -1247,7 +1280,9 @@ final class ServiceController: ObservableObject {
 
                     if let url, anythingChanged, shouldPost {
                         let desktopPayload: DesktopActivitySnapshot?
-                        if let desktop {
+                        if desktopBlocked, let capturedDesktop {
+                            desktopPayload = .hidden(observedAt: capturedDesktop.observedAt)
+                        } else if let desktop {
                             // 名称不等图标：对象已经确认好就顺手带上，否则先发无图状态，
                             // 后台 resolver 成功后再叫醒一轮补对象键。
                             let iconObjectKey = desktopIconObjectKeyIfReady(desktop)
@@ -1298,7 +1333,11 @@ final class ServiceController: ObservableObject {
                         // 结构变了完整指纹必然也变，反过来不成立。
                         if let chargerStructural { lastPostedChargingStructural = chargerStructural }
                         if desktopToSend {
-                            if desktopIconAvailable == false,
+                            if desktopBlocked {
+                                // 进入黑名单应用时只发一次虚拟应用；真实身份和图标都不进载荷。
+                                lastPostedDesktop = nil
+                                lastPostedDesktopWasHidden = true
+                            } else if desktopIconAvailable == false,
                                let desktop,
                                let iconHash = desktop.iconHash {
                                 // false 只说明这次信封没有可用对象键。先把名称门闩推进，
@@ -1315,8 +1354,10 @@ final class ServiceController: ObservableObject {
                                     lastPostedDesktop = nil
                                     wakeReporter()
                                 }
+                                lastPostedDesktopWasHidden = false
                             } else {
                                 lastPostedDesktop = desktopSignature
+                                lastPostedDesktopWasHidden = false
                                 // 服务端可能只是命中了自己的旧 iconHash 映射；只有这次
                                 // 信封真的带了对象键，才把本地状态记成已确认。
                                 if let desktop, desktopPayload?.iconObjectKey != nil {

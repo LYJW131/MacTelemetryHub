@@ -18,7 +18,8 @@ usage, rather than the identity of the whole application.
 - a versioned telemetry envelope posted to one shared ingest endpoint
 - direct local Music.app state via Apple Events (separate from Apple Music Web API)
 - optional MusicKit library authorization and Apple Music token upload
-- foreground application reporting, limited to the app's name, bundle ID, and icon
+- foreground application reporting, limited to the app's name, bundle ID, and icon,
+  with an exact Bundle ID blacklist for remote reporting
 - CodexBar aggregation that never uploads session IDs, project paths, prompts, or replies
 - subscription plan tier and server-side rate-limit windows for Claude Code and Codex
 - login launch using `SMAppService.mainApp`
@@ -172,8 +173,19 @@ The app also exposes local debugging snapshots at `GET /activity` and
 ## Module permissions
 
 - Foreground app names and icons use `NSWorkspace` and need no special
-  permission. Window contents and titles are never read, so the app needs no
-  Accessibility permission at all.
+  permission. With explicit Accessibility permission, the app also reads the
+  focused window title for local menu-bar and dashboard display only. Title
+  detection uses an exact Bundle ID whitelist that defaults to empty. Apps
+  outside the whitelist never have their accessibility window or title read,
+  and switching to one detaches the previous observer and clears the local
+  title. Window titles are excluded from `DesktopActivitySnapshot`, local JSON
+  APIs, debug snapshots, and remote telemetry; window contents are never read.
+  Bundle IDs in the remote-reporting blacklist remain visible in the local UI
+  and local APIs, but their application identity and icon are not uploaded.
+  Entering a blacklisted app reports the dedicated virtual application
+  `com.liangyangjunwei.MacTelemetryHub.hidden` with the fixed name
+  `Hidden Application`; the site maps that identity to its hidden label and
+  icon. The real application name, Bundle ID, and icon never enter the payload.
 - Apple Music asks once for permission to communicate with Music.app. The
   separate “授权并上报 Apple Music token” action asks for MusicKit library
   permission, obtains a Music User Token and a MusicKit-generated developer

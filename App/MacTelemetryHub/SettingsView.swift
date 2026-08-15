@@ -1,4 +1,6 @@
+import AppKit
 import SwiftUI
+import UniformTypeIdentifiers
 
 private enum SettingsCategory: String, CaseIterable, Identifiable {
     case general
@@ -40,11 +42,19 @@ private enum SettingsCategory: String, CaseIterable, Identifiable {
     }
 }
 
+private struct RunningApplicationChoice: Identifiable {
+    let name: String
+    let bundleIdentifier: String
+
+    var id: String { bundleIdentifier.lowercased() }
+}
+
 struct SettingsView: View {
     @ObservedObject var service: ServiceController
     @ObservedObject private var settings: AppSettings
     @ObservedObject private var bluetooth: BluetoothService
     @ObservedObject private var powerBankLink: BluetoothService
+    @ObservedObject private var desktopActivity: DesktopActivityMonitor
     @ObservedObject private var appleMusicAuthorization: AppleMusicAuthorizationManager
     @Environment(\.dismiss) private var dismiss
     @State private var selection: SettingsCategory = .general
@@ -57,6 +67,7 @@ struct SettingsView: View {
         settings = service.settings
         bluetooth = service.chargerLink
         powerBankLink = service.powerBankLink
+        desktopActivity = service.desktopActivity
         appleMusicAuthorization = service.appleMusicAuthorization
     }
 
@@ -185,9 +196,102 @@ struct SettingsView: View {
 
     private var sourceSettings: some View {
         VStack(alignment: .leading, spacing: 0) {
-            settingSection("前台应用", detail: "仅采集应用名、Bundle ID 和图标，不读取窗口标题或窗口内容。", icon: "macwindow") {
+            settingSection("前台应用", detail: "应用身份默认参与上报；可按 Bundle ID 排除。", icon: "macwindow") {
                 Toggle("启用前台应用采集", isOn: $settings.desktopModuleEnabled)
                     .toggleStyle(.switch)
+
+                Divider().padding(.vertical, 3)
+
+                fieldTitle("远端上报黑名单", detail: "每行一个 Bundle ID；也接受逗号或分号，匹配时忽略大小写")
+                TextEditor(text: $settings.desktopReportingBlacklist)
+                    .font(.body.monospaced())
+                    .frame(minHeight: 72, maxHeight: 110)
+                    .padding(5)
+                    .background(Color(nsColor: .textBackgroundColor))
+                    .clipShape(RoundedRectangle(cornerRadius: 6))
+                    .overlay {
+                        RoundedRectangle(cornerRadius: 6)
+                            .stroke(Color(nsColor: .separatorColor), lineWidth: 1)
+                    }
+
+                HStack(spacing: 10) {
+                    Menu("添加运行中的应用") {
+                        if runningApplicationsForReportingBlacklist.isEmpty {
+                            Text("没有可添加的应用")
+                        } else {
+                            ForEach(runningApplicationsForReportingBlacklist) { application in
+                                Button("\(application.name) — \(application.bundleIdentifier)") {
+                                    settings.addToDesktopReportingBlacklist(
+                                        bundleIdentifier: application.bundleIdentifier
+                                    )
+                                }
+                            }
+                        }
+                    }
+
+                    Button("从应用程序中选择…") {
+                        chooseApplicationsForDesktopReportingBlacklist()
+                    }
+                }
+
+                Text("命中时本机界面和本地 API 仍会显示当前应用；远端会收到一次空状态来清除上一个应用，应用身份和图标不会上传。")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+
+                Divider().padding(.vertical, 3)
+
+                fieldTitle("窗口标题白名单", detail: "只有列表中的 Bundle ID 才会读取标题；默认不检测任何应用")
+                TextEditor(text: $settings.windowTitleApplicationWhitelist)
+                    .font(.body.monospaced())
+                    .frame(minHeight: 72, maxHeight: 110)
+                    .padding(5)
+                    .background(Color(nsColor: .textBackgroundColor))
+                    .clipShape(RoundedRectangle(cornerRadius: 6))
+                    .overlay {
+                        RoundedRectangle(cornerRadius: 6)
+                            .stroke(Color(nsColor: .separatorColor), lineWidth: 1)
+                    }
+
+                HStack(spacing: 10) {
+                    Menu("添加运行中的应用") {
+                        if runningApplicationsForWindowTitleWhitelist.isEmpty {
+                            Text("没有可添加的应用")
+                        } else {
+                            ForEach(runningApplicationsForWindowTitleWhitelist) { application in
+                                Button("\(application.name) — \(application.bundleIdentifier)") {
+                                    settings.addToWindowTitleApplicationWhitelist(
+                                        bundleIdentifier: application.bundleIdentifier
+                                    )
+                                }
+                            }
+                        }
+                    }
+
+                    Button("从应用程序中选择…") {
+                        chooseApplicationsForWindowTitleWhitelist()
+                    }
+                }
+
+                LabeledContent("辅助功能权限") {
+                    Text(windowTitleStatusText)
+                        .foregroundStyle(windowTitleStatusColor)
+                }
+
+                Text("未命中白名单时不会读取窗口元素或标题，并会立即停止旧观察。标题始终不会写入本地 API、调试快照或远端遥测。")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+
+                if !settings.normalizedWindowTitleApplicationWhitelist.bundleIdentifiers.isEmpty,
+                   !desktopActivity.windowTitleAccessGranted {
+                    HStack(spacing: 10) {
+                        Button("请求辅助功能权限") {
+                            desktopActivity.requestWindowTitleAccess()
+                        }
+                        Button("打开系统设置") {
+                            desktopActivity.openWindowTitlePrivacySettings()
+                        }
+                    }
+                }
             }
 
             settingSection("Apple Music", detail: "直接读取本机 Music.app 的播放状态、曲目与进度。", icon: "music.note") {
@@ -268,6 +372,91 @@ struct SettingsView: View {
                 feedbackMessage(message)
             }
         }
+    }
+
+    private var runningApplicationsForReportingBlacklist: [RunningApplicationChoice] {
+        runningApplicationChoices(excluding: settings.normalizedDesktopReportingBlacklist)
+    }
+
+    private var runningApplicationsForWindowTitleWhitelist: [RunningApplicationChoice] {
+        runningApplicationChoices(excluding: settings.normalizedWindowTitleApplicationWhitelist)
+    }
+
+    private func runningApplicationChoices(
+        excluding configuredList: BundleIdentifierList
+    ) -> [RunningApplicationChoice] {
+        let ownBundleIdentifier = Bundle.main.bundleIdentifier?.lowercased()
+        var seen: Set<String> = []
+        return NSWorkspace.shared.runningApplications.compactMap { application in
+            guard application.activationPolicy == .regular,
+                  let bundleIdentifier = application.bundleIdentifier,
+                  bundleIdentifier.lowercased() != ownBundleIdentifier,
+                  !configuredList.contains(bundleIdentifier: bundleIdentifier),
+                  seen.insert(bundleIdentifier.lowercased()).inserted else {
+                return nil
+            }
+            return RunningApplicationChoice(
+                name: application.localizedName ?? bundleIdentifier,
+                bundleIdentifier: bundleIdentifier
+            )
+        }.sorted {
+            $0.name.localizedStandardCompare($1.name) == .orderedAscending
+        }
+    }
+
+    private func chooseApplicationsForDesktopReportingBlacklist() {
+        chooseApplications(
+            title: "选择不参与远端上报的应用",
+            prompt: "加入黑名单",
+            add: settings.addToDesktopReportingBlacklist(bundleIdentifier:)
+        )
+    }
+
+    private func chooseApplicationsForWindowTitleWhitelist() {
+        chooseApplications(
+            title: "选择允许读取窗口标题的应用",
+            prompt: "加入白名单",
+            add: settings.addToWindowTitleApplicationWhitelist(bundleIdentifier:)
+        )
+    }
+
+    private func chooseApplications(
+        title: String,
+        prompt: String,
+        add: (String) -> Void
+    ) {
+        let panel = NSOpenPanel()
+        panel.title = title
+        panel.prompt = prompt
+        panel.directoryURL = URL(fileURLWithPath: "/Applications", isDirectory: true)
+        panel.allowedContentTypes = [.application]
+        panel.allowsMultipleSelection = true
+        panel.canChooseDirectories = false
+        panel.canChooseFiles = true
+
+        guard panel.runModal() == .OK else { return }
+        let ownBundleIdentifier = Bundle.main.bundleIdentifier?.lowercased()
+        for url in panel.urls {
+            guard let bundleIdentifier = Bundle(url: url)?.bundleIdentifier,
+                  bundleIdentifier.lowercased() != ownBundleIdentifier else {
+                continue
+            }
+            add(bundleIdentifier)
+        }
+    }
+
+    private var windowTitleStatusText: String {
+        if settings.normalizedWindowTitleApplicationWhitelist.bundleIdentifiers.isEmpty {
+            return "白名单为空，不检测"
+        }
+        return desktopActivity.windowTitleAccessGranted
+            ? "已授权，仅对白名单应用检测"
+            : "需要辅助功能权限"
+    }
+
+    private var windowTitleStatusColor: Color {
+        settings.normalizedWindowTitleApplicationWhitelist.bundleIdentifiers.isEmpty ||
+            desktopActivity.windowTitleAccessGranted ? .secondary : .orange
     }
 
     private var chargerSettings: some View {
