@@ -1086,8 +1086,48 @@ func agentPlanLabel(agent: String, tier: String) -> String {
     }
 }
 
-private let agentLimitProviderIDs = ["claude", "codex", "cursor", "opencodego", "antigravity"]
-private let supplementalQuotaProviderIDs = ["cursor", "opencodego", "antigravity"]
+/**
+ * 网页上只占一行「总限额」的附加 provider。
+ *
+ * 加一个 provider 只动这个数组。从前同样三个名字要在四处各写一遍 —— 跑 CodexBar
+ * 的任务清单、保留旧快照的名单、挑窗口的 switch、上传载荷 —— 漏掉哪一处的表现都
+ * 不一样，而且四处都不会报错。
+ *
+ * 展示名和图标跟着载荷一起发给站点：那边没有名单，这边配几个页面上就是几行。
+ */
+private struct SupplementalQuotaProvider {
+    /// CodexBar `--provider` 的实参，也是站点那一行的稳定 key
+    let id: String
+    /// 站点直接拿去显示的名字
+    let label: String
+    /**
+     * 站点图标注册表的键，认不出来的退回首字母。
+     *
+     * 跟 `id` 分开是因为它俩本来就不是一回事：`id` 是 CodexBar 里那个 provider 的
+     * 名字，这个是牌子 —— `opencodego` 的牌子是 OpenCode。
+     */
+    let icon: String
+    /// 从 usage 的窗口里挑哪一个当「总限额」
+    let totalWindow: TotalWindowPick
+}
+
+/// 每家「总限额」的口径不一样，挑法见各 case。
+private enum TotalWindowPick {
+    /// Cursor 明确把 primary 叫 Total
+    case primarySlot
+    /// OpenCode Go 的最长窗口是 Monthly，代表套餐总周期
+    case longestSlot
+    /// 周窗口只在 extraRateWindows 里，见 weeklyExtraWindow
+    case weeklyExtra
+}
+
+private let supplementalQuotaProviders: [SupplementalQuotaProvider] = [
+    .init(id: "cursor", label: "Cursor", icon: "cursor", totalWindow: .primarySlot),
+    .init(id: "opencodego", label: "OpenCode Go", icon: "opencode", totalWindow: .longestSlot),
+    .init(id: "antigravity", label: "Antigravity", icon: "antigravity", totalWindow: .weeklyExtra),
+]
+
+private let agentLimitProviderIDs = ["claude", "codex"] + supplementalQuotaProviders.map(\.id)
 
 @MainActor
 final class AgentLimitsMonitor: ObservableObject {
@@ -1187,8 +1227,16 @@ final class AgentLimitsMonitor: ObservableObject {
         if !fresh.isEmpty { lastSuccess = Date() }
     }
 
-    /// `vibeCodingLimits` 模块的载荷。展示名（"Claude Code" / "Cursor"）由站点自己给，
-    /// 它那边本来就有一份写死的映射，这里再发一遍只会多一个要对齐的地方。
+    /**
+     * `vibeCodingLimits` 模块的载荷。
+     *
+     * 两个 agent 的展示名（"Claude Code" / "Codex"）仍由站点自己给：就那两个，
+     * 名单在站点的类型里写死，多发一遍只会多一个要对齐的地方。
+     *
+     * 附加 provider 反过来 —— 名字和图标由这边发。名单在这边，站点那边没有，
+     * 它照单渲染。否则加一个 provider 要改两个仓库，站点漏改的表现是这边在传、
+     * 页面上没有，不报错也看不出来。
+     */
     private static func makeUploadPayload(
         plans: [String: AgentPlanSnapshot],
         limitErrors: [String: String]
@@ -1216,11 +1264,14 @@ final class AgentLimitsMonitor: ObservableObject {
                 "limitsError": limitErrors[id].map(JSONValue.string) ?? .null,
             ])
         }
-        let quotaProviders: [JSONValue] = supplementalQuotaProviderIDs.map { id in
+        let quotaProviders: [JSONValue] = supplementalQuotaProviders.map { provider in
             .object([
-                "id": .string(id),
-                "usedPercent": plans[id]?.limits.first.map { .number($0.usedPercent) } ?? .null,
-                "limitsError": limitErrors[id].map(JSONValue.string) ?? .null,
+                "id": .string(provider.id),
+                "label": .string(provider.label),
+                "icon": .string(provider.icon),
+                "usedPercent": plans[provider.id]?.limits.first
+                    .map { .number($0.usedPercent) } ?? .null,
+                "limitsError": limitErrors[provider.id].map(JSONValue.string) ?? .null,
             ])
         }
         return .object([
@@ -1239,16 +1290,13 @@ private struct AgentLimitsOutcome: Sendable {
 }
 
 private enum AgentLimitsCollector {
-    /// Claude 与 Codex 仍共用 `both`；其余三个 provider 必须分别指定。CodexBar
+    /// Claude 与 Codex 仍共用 `both`；附加 provider 必须一个一个指定。CodexBar
     /// 的 `all` 会把其它已配置但未展示的 provider 也拉进来，而且任意一个失败时
-    /// 整条命令可能不给 JSON，因此这里并发跑四个有边界的调用。
+    /// 整条命令可能不给 JSON，因此这里并发跑若干个有边界的调用。
     nonisolated static func collect(codexBarPath: String) async -> AgentLimitsOutcome {
-        let jobs: [(argument: String, providers: [String])] = [
-            ("both", ["claude", "codex"]),
-            ("cursor", ["cursor"]),
-            ("opencodego", ["opencodego"]),
-            ("antigravity", ["antigravity"]),
-        ]
+        let jobs: [(argument: String, providers: [String])] =
+            [("both", ["claude", "codex"])]
+            + supplementalQuotaProviders.map { ($0.id, [$0.id]) }
         let tasks = jobs.map { job in
             Task.detached(priority: .utility) {
                 Self.collectBlocking(
@@ -1330,9 +1378,9 @@ private enum AgentLimitsCollector {
                 ?? (usage["loginMethod"] as? String)?.nilIfEmpty
             let tier = loginMethod ?? provider
             let label = agentPlanLabel(agent: provider, tier: tier)
-            let windows = supplementalQuotaProviderIDs.contains(provider)
-                ? parseTotalLimit(provider: provider, usage: usage)
-                : parseWebLimits(provider: provider, usage: usage)
+            let windows = supplementalQuotaProviders.first { $0.id == provider }
+                .map { parseTotalLimit(provider: $0, usage: usage) }
+                ?? parseWebLimits(provider: provider, usage: usage)
             plans[provider] = AgentPlanSnapshot(
                 tier: tier,
                 label: label,
@@ -1356,11 +1404,10 @@ private enum AgentLimitsCollector {
         return AgentLimitsOutcome(plans: plans, errors: errors, limitErrors: limitErrors)
     }
 
-    /// 附加 provider 在网页上只占一行“总限额”。Cursor 明确把 primary 叫 Total；
-    /// OpenCode Go 的最长窗口是 Monthly，代表套餐总周期；Antigravity 取周窗口
-    /// —— 见 antigravityWeekly。
+    /// 附加 provider 在网页上只占一行“总限额”。挑哪个窗口按它自己的口径来，
+    /// 各家的理由见 TotalWindowPick 各 case。
     nonisolated private static func parseTotalLimit(
-        provider: String,
+        provider: SupplementalQuotaProvider,
         usage: [String: Any]
     ) -> [AgentLimitWindow] {
         let slots: [(name: String, value: [String: Any])] =
@@ -1368,27 +1415,25 @@ private enum AgentLimitsCollector {
                 (usage[name] as? [String: Any]).map { (name, $0) }
             }
         let selected: (name: String, value: [String: Any])?
-        switch provider {
-        case "cursor":
+        switch provider.totalWindow {
+        case .primarySlot:
             selected = slots.first { $0.name == "primary" }
-        case "opencodego":
+        case .longestSlot:
             selected = slots.max {
                 (($0.value["windowMinutes"] as? NSNumber)?.intValue ?? 0) <
                     (($1.value["windowMinutes"] as? NSNumber)?.intValue ?? 0)
             }
-        case "antigravity":
+        case .weeklyExtra:
             // 周窗口只在 extraRateWindows 里；退回槽位时拿到的是 5 小时那档。
-            selected = antigravityWeekly(usage: usage).map { ("weekly", $0) }
+            selected = weeklyExtraWindow(usage: usage).map { ("weekly", $0) }
                 ?? slots.max {
                     (($0.value["usedPercent"] as? NSNumber)?.doubleValue ?? 0) <
                         (($1.value["usedPercent"] as? NSNumber)?.doubleValue ?? 0)
                 }
-        default:
-            selected = nil
         }
         guard let window = selected?.value else { return [] }
         return [AgentLimitWindow(
-            key: "\(provider).total",
+            key: "\(provider.id).total",
             label: selected?.name == "weekly" ? "Weekly" : "Total",
             group: nil,
             windowMinutes: (window["windowMinutes"] as? NSNumber)?.intValue,
@@ -1398,9 +1443,9 @@ private enum AgentLimitsCollector {
     }
 
     /**
-     * Antigravity 的周窗口。
+     * `extraRateWindows` 里最长的那个窗口。眼下只有 Antigravity 走这条。
      *
-     * `primary` / `secondary` 是 Gemini 和 Claude/GPT 的**5 小时**窗口，一天要刷
+     * 它的 `primary` / `secondary` 是 Gemini 和 Claude/GPT 的**5 小时**窗口，一天要刷
      * 好几遍，代表不了「这周还剩多少」。周窗口只出现在 `extraRateWindows` 里
      * （windowMinutes = 10080），带着 `Gemini weekly` / `Claude/GPT weekly` 的标题。
      *
@@ -1410,7 +1455,7 @@ private enum AgentLimitsCollector {
      * 拿不到 extraRateWindows 时返回 nil，调用方退回原来的槽位逻辑（老版本
      * CodexBar 没有这个键）。
      */
-    nonisolated private static func antigravityWeekly(usage: [String: Any]) -> [String: Any]? {
+    nonisolated private static func weeklyExtraWindow(usage: [String: Any]) -> [String: Any]? {
         let windows = (usage["extraRateWindows"] as? [[String: Any]] ?? [])
             .compactMap { $0["window"] as? [String: Any] }
         func minutes(_ window: [String: Any]) -> Int {

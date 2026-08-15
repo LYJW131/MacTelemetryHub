@@ -86,9 +86,12 @@ Claude Code / Codex 是否正在使用，不上传 session ID、项目路径、�
   reads Claude and Codex local logs in one process and supplies token/cost history.
 - `usage --provider both --source auto --no-credits --format json` reads Claude
   and Codex plan tiers and server-side quota windows.
-- Three concurrent `usage` calls for `cursor`, `opencodego`, and `antigravity`
-  read one total quota percentage each. They never add token/cost/model detail to
-  the upload payload.
+- One concurrent `usage` call per supplemental provider (see
+  `supplementalQuotaProviders` in `TelemetryModules.swift` — currently `cursor`,
+  `opencodego`, and `antigravity`), each reading a single total quota percentage.
+  Each one uploads its display name and icon key alongside that percentage, so
+  the site renders however many are configured here rather than keeping its own
+  list. They never add token/cost/model detail to the upload payload.
 - `ccusage claude session --json --offline` and
   `ccusage codex session --json --offline` provide the lightweight live status.
 
