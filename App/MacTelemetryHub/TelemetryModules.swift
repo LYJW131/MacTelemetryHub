@@ -351,6 +351,8 @@ final class DesktopActivityMonitor: ObservableObject {
     /// snapshot 变化时通知上报循环，让它别干等到下一个周期
     var onChange: (() -> Void)?
     private var observer: NSObjectProtocol?
+    private var pollTask: Task<Void, Never>?
+    private static let fallbackPollInterval = Duration.seconds(5)
     /// 一个应用的图标：身份指纹 + 待上传的 PNG（编码失败时 png 为 nil）
     struct IconEntry {
         let identity: String
@@ -358,12 +360,21 @@ final class DesktopActivityMonitor: ObservableObject {
     }
     private var iconCache: [String: IconEntry] = [:]
 
-    /// 前台应用完全由 `didActivateApplicationNotification` 驱动，没有兜底轮询 ——
-    /// 前台是谁这件事不存在「不发通知的变化」，不像音乐的进度还要防着 seek。
-    /// Cmd-Tab 途经的应用照样会在这里被采成 snapshot，防抖不在这一层：
-    /// 上报侧收到 onChange 后压一个 400ms 的窗口，只有最后停下的那个才发得出去。
+    /**
+     * 前台应用以 `didActivateApplicationNotification` 为主，再加一条兜底轮询。
+     *
+     * 激活通知在绝大多数切换里都会来，但全屏 Space、某些 Electron 应用、
+     * 隐藏窗口把前台让出去这类路径上会漏。漏了就一直显示上一个应用，直到
+     * 下一次「会发通知」的切换 —— 这就是「有时候名字不跟着变」的来源。
+     * 轮询读 `frontmostApplication`：那是稳态下的真相，只有通知刚到那一瞬
+     * 才不能信它（所以通知回调仍然用 userInfo 里那份）。
+     *
+     * Cmd-Tab 途经的应用照样会在这里被采成 snapshot，防抖不在这一层：
+     * 上报侧收到 onChange 后压一个 400ms 的窗口，只有最后停下的那个才发得出去。
+     */
     func start() {
         capture()
+        startFallbackPoll()
         guard observer == nil else { return }
         observer = NSWorkspace.shared.notificationCenter.addObserver(
             forName: NSWorkspace.didActivateApplicationNotification,
@@ -380,15 +391,29 @@ final class DesktopActivityMonitor: ObservableObject {
     }
 
     func stop() {
+        pollTask?.cancel()
+        pollTask = nil
         if let observer { NSWorkspace.shared.notificationCenter.removeObserver(observer) }
         observer = nil
         snapshot = nil
     }
 
-    /// 传 nil 表示「自己去问当前前台是谁」，只有启动时的第一次采集这么用。
+    private func startFallbackPoll() {
+        guard pollTask == nil else { return }
+        pollTask = Task { [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(for: Self.fallbackPollInterval)
+                guard !Task.isCancelled else { return }
+                self?.capture()
+            }
+        }
+    }
+
+    /// 传 nil 表示「自己去问当前前台是谁」：启动时的第一次采集，以及兜底轮询。
     func capture(_ activated: NSRunningApplication? = nil) {
         guard let app = activated ?? NSWorkspace.shared.frontmostApplication else { return }
         let iconKey = app.bundleIdentifier ?? app.bundleURL?.path ?? app.localizedName ?? "unknown"
+        let previous = snapshot
 
         /*
          * 身份和字节一起缓存。
@@ -409,7 +434,7 @@ final class DesktopActivityMonitor: ObservableObject {
             entry = nil
         }
 
-        snapshot = DesktopActivitySnapshot(
+        let next = DesktopActivitySnapshot(
             applicationName: app.localizedName ?? "Unknown",
             bundleIdentifier: app.bundleIdentifier,
             iconHash: entry?.identity,
@@ -417,6 +442,12 @@ final class DesktopActivityMonitor: ObservableObject {
             iconObjectKey: nil,
             observedAt: Self.nowMilliseconds
         )
+        let identityChanged =
+            previous?.applicationName != next.applicationName ||
+            previous?.bundleIdentifier != next.bundleIdentifier ||
+            previous?.iconHash != next.iconHash
+        guard identityChanged else { return }
+        snapshot = next
         onChange?()
     }
 

@@ -71,11 +71,10 @@ private enum R2IconUploader {
     }
 
     /**
-     * 先问一句桶里有没有。
+     * 检查内容寻址对象是否仍在桶里。
      *
-     * 上报器手上本来就有写凭据，一个图标一辈子只问这一次（问过就记在
-     * uploadedDesktopIconHashes 里），代价可以忽略；换来的是桶被清空、
-     * 换机器、重启之后不必依赖站点回执就能自己发现要补传。
+     * 这一步只在后台图标 resolver 里跑，不再挡住前台应用名称上报。每个图标
+     * 最多五分钟检查一次，用来接住桶被清空或对象被手动删除后的自愈。
      */
     static func exists(
         objectKey: String,
@@ -142,7 +141,7 @@ private enum R2IconUploader {
 
     static func contentHash(of data: Data) -> String { sha256Hex(data) }
 
-    /// 空请求体的 payload 哈希，SigV4 里 HEAD/GET 用它
+    /// 空请求体的 payload 哈希，SigV4 里 HEAD 用它
     private static let emptyPayloadHash =
         "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
 
@@ -537,11 +536,16 @@ final class ServiceController: ObservableObject {
     /// 只跟结构性变化比，管的是「要不要即时发」，不管「要不要带 charger 模块」
     private var lastPostedChargingStructural: ChargingDevicesStructuralSignature?
     private var lastPostedDesktop: DesktopUploadSignature?
-    /// 这个上报会话里服务端已经确认保存的图标内容指纹。
+    /// 这个上报会话里已经在 R2 确认存在的图标身份指纹。
     private var uploadedDesktopIconHashes: Set<String> = []
     /// 图标直传连续失败次数，按身份哈希记。到上限就不再试，避免打成热循环
     private var iconUploadAttempts: [String: Int] = [:]
     private static let maxIconUploadAttempts = 3
+    /// 最近一次在 R2 确认存在的时间；过期后后台 HEAD 一次，接住手动清桶。
+    private var desktopIconVerifiedAt: [String: Date] = [:]
+    private static let desktopIconVerificationInterval: TimeInterval = 5 * 60
+    /// 同一枚图标在飞的那一次后台检查 / 直传。
+    private var iconResolvers: [String: (id: UUID, task: Task<Void, Never>)] = [:]
     private var uploadedDesktopIconOrder: [String] = []
     private var lastPostedTimeZone: TimeZoneUploadSignature?
     private var lastPostedAppleMusic: AppleMusicUploadSignature?
@@ -631,6 +635,7 @@ final class ServiceController: ObservableObject {
         reporterTask = nil
         desktopSettleTask?.cancel()
         desktopSettleTask = nil
+        cancelDesktopIconResolvers()
         vibeCodingCollectionTask?.cancel()
         vibeCodingCollectionTask = nil
         desktopActivity.stop()
@@ -926,10 +931,14 @@ final class ServiceController: ObservableObject {
         }
 
         if settings.desktopModuleEnabled {
-            // 每次激活都重排，连续 Cmd-Tab 只在最后停下的那个应用上叫醒一次
+            // 每次激活都重排，连续 Cmd-Tab 只在最后停下的那个应用上叫醒一次。
+            // 开着远端上报时，图标在这 400ms 里先走后台 resolver；名称上报不等它。
             desktopActivity.onChange = { [weak self] in
                 guard let self else { return }
                 desktopSettleTask?.cancel()
+                if settings.postEnabled, let snapshot = desktopActivity.snapshot {
+                    startDesktopIconResolution(snapshot)
+                }
                 desktopSettleTask = Task { [weak self] in
                     try? await Task.sleep(for: Self.desktopSettleDelay)
                     guard !Task.isCancelled else { return }
@@ -1030,6 +1039,9 @@ final class ServiceController: ObservableObject {
         lastPostedDesktop = nil
         uploadedDesktopIconHashes.removeAll(keepingCapacity: true)
         uploadedDesktopIconOrder.removeAll(keepingCapacity: true)
+        iconUploadAttempts.removeAll(keepingCapacity: true)
+        desktopIconVerifiedAt.removeAll(keepingCapacity: true)
+        cancelDesktopIconResolvers()
         lastPostedTimeZone = nil
         lastPostedAppleMusic = nil
         lastPostedMusicAnchor = nil
@@ -1236,50 +1248,9 @@ final class ServiceController: ObservableObject {
                     if let url, anythingChanged, shouldPost {
                         let desktopPayload: DesktopActivitySnapshot?
                         if let desktop {
-                            /*
-                             * 图标直传。三条铁律：
-                             *
-                             * 1. 传失败不许连累整份遥测 —— 图片是这里面最不重要的一块，
-                             *    没有权力否决充电头、时区、音乐和 vibe coding 的上报。
-                             *    所以整段包在 do/catch 里，失败就是「这轮没有对象键」。
-                             * 2. 传之前先问桶里有没有。对象是内容寻址的，桶里已经有就直接用，
-                             *    一个图标一辈子只问这一次。
-                             * 3. 反复失败要收手。站点收不到图会回 desktopIconAvailable=false，
-                             *    那条路会把 lastPostedDesktop 清空并立刻叫醒下一轮；真要是
-                             *    永远成功不了（比如凭据错了），不设上限就是一个打站点的热循环。
-                             */
-                            var iconObjectKey: String?
-                            if let iconHash = desktop.iconHash,
-                               let iconData = desktop.iconData,
-                               let r2Configuration = R2IconUploader.configuration(settings: settings),
-                               iconUploadAttempts[iconHash, default: 0] < Self.maxIconUploadAttempts {
-                                let objectKey = "\(R2IconUploader.objectKey(for: iconData))"
-                                do {
-                                    if uploadedDesktopIconHashes.contains(iconHash) {
-                                        iconObjectKey = objectKey
-                                    } else if try await R2IconUploader.exists(
-                                        objectKey: objectKey,
-                                        configuration: r2Configuration,
-                                        timeout: min(timeout, 3)
-                                    ) {
-                                        iconObjectKey = objectKey
-                                    } else {
-                                        try await R2IconUploader.upload(
-                                            data: iconData,
-                                            contentHash: R2IconUploader.contentHash(of: iconData),
-                                            objectKey: objectKey,
-                                            configuration: r2Configuration,
-                                            timeout: min(timeout, 3)
-                                        )
-                                        iconObjectKey = objectKey
-                                    }
-                                    iconUploadAttempts[iconHash] = 0
-                                } catch {
-                                    iconUploadAttempts[iconHash, default: 0] += 1
-                                    reporterLastError = "图标上传失败：\(error.localizedDescription)"
-                                }
-                            }
-                            // 站点只收对象键，二进制一律不进遥测 JSON
+                            // 名称不等图标：对象已经确认好就顺手带上，否则先发无图状态，
+                            // 后台 resolver 成功后再叫醒一轮补对象键。
+                            let iconObjectKey = desktopIconObjectKeyIfReady(desktop)
                             desktopPayload = desktop.withIconData(nil, iconObjectKey: iconObjectKey)
                         } else {
                             desktopPayload = nil
@@ -1327,14 +1298,30 @@ final class ServiceController: ObservableObject {
                         // 结构变了完整指纹必然也变，反过来不成立。
                         if let chargerStructural { lastPostedChargingStructural = chargerStructural }
                         if desktopToSend {
-                            if desktopIconAvailable == false, let iconHash = desktop?.iconHash {
-                                forgetUploadedDesktopIcon(iconHash)
-                                // 服务端缓存可能刚被清空；下一圈立即补发完整图标。
-                                lastPostedDesktop = nil
-                                wakeReporter()
+                            if desktopIconAvailable == false,
+                               let desktop,
+                               let iconHash = desktop.iconHash {
+                                // false 只说明这次信封没有可用对象键。先把名称门闩推进，
+                                // 不在这里自唤醒；否则 R2 未配置 / PNG 编码失败会打成热循环。
+                                lastPostedDesktop = desktopSignature
+                                if desktopPayload?.iconObjectKey != nil {
+                                    // 兼容服务端今后恢复对象校验：带了键仍返回 false，说明
+                                    // 这份本地“已上传”记忆失效，后台重新 HEAD/PUT。
+                                    forgetUploadedDesktopIcon(iconHash)
+                                }
+                                startDesktopIconResolution(desktop)
+                                // resolver 可能在 POST 飞行期间已经完成；补上那次竞态唤醒。
+                                if uploadedDesktopIconHashes.contains(iconHash) {
+                                    lastPostedDesktop = nil
+                                    wakeReporter()
+                                }
                             } else {
                                 lastPostedDesktop = desktopSignature
-                                if let desktop { rememberUploadedDesktopIcon(desktop) }
+                                // 服务端可能只是命中了自己的旧 iconHash 映射；只有这次
+                                // 信封真的带了对象键，才把本地状态记成已确认。
+                                if let desktop, desktopPayload?.iconObjectKey != nil {
+                                    rememberUploadedDesktopIcon(desktop)
+                                }
                             }
                         }
                         if timezoneToSend { lastPostedTimeZone = timezoneSignature }
@@ -1393,6 +1380,96 @@ final class ServiceController: ObservableObject {
         }
     }
 
+    /**
+     * 返回已经确认存在的对象键；没有准备好就启动后台 resolver 并立即返回 nil。
+     *
+     * 名称上报从此不 await R2。resolver 先 HEAD：对象还在就复用，被清掉就 PUT；
+     * 同一枚图标五分钟内不重复检查。成功时若网页已经收过无图版本，再叫醒一轮
+     * 补对象键。失败最多试三次，但绝不靠反复 POST 遥测来驱动重试。
+     */
+    private func desktopIconObjectKeyIfReady(_ desktop: DesktopActivitySnapshot) -> String? {
+        guard let iconHash = desktop.iconHash, let iconData = desktop.iconData else { return nil }
+        startDesktopIconResolution(desktop)
+        return uploadedDesktopIconHashes.contains(iconHash)
+            ? R2IconUploader.objectKey(for: iconData)
+            : nil
+    }
+
+    private func startDesktopIconResolution(_ desktop: DesktopActivitySnapshot) {
+        guard settings.postEnabled,
+              let iconHash = desktop.iconHash,
+              let iconData = desktop.iconData,
+              let r2Configuration = R2IconUploader.configuration(settings: settings),
+              iconUploadAttempts[iconHash, default: 0] < Self.maxIconUploadAttempts,
+              iconResolvers[iconHash] == nil else {
+            return
+        }
+
+        if uploadedDesktopIconHashes.contains(iconHash),
+           let verifiedAt = desktopIconVerifiedAt[iconHash],
+           Date().timeIntervalSince(verifiedAt) < Self.desktopIconVerificationInterval {
+            return
+        }
+
+        let signature = DesktopUploadSignature(desktop)
+        let objectKey = R2IconUploader.objectKey(for: iconData)
+        let timeout = min(settings.postTimeout, 3)
+        let resolverID = UUID()
+        let task = Task<Void, Never> { @MainActor [weak self] in
+            guard let self else { return }
+
+            while !Task.isCancelled,
+                  self.iconUploadAttempts[iconHash, default: 0] < Self.maxIconUploadAttempts {
+                do {
+                    let exists = try await R2IconUploader.exists(
+                        objectKey: objectKey,
+                        configuration: r2Configuration,
+                        timeout: timeout
+                    )
+                    if !exists {
+                        self.forgetUploadedDesktopIcon(iconHash)
+                        try await R2IconUploader.upload(
+                            data: iconData,
+                            contentHash: R2IconUploader.contentHash(of: iconData),
+                            objectKey: objectKey,
+                            configuration: r2Configuration,
+                            timeout: timeout
+                        )
+                    }
+                    guard !Task.isCancelled else { break }
+                    self.iconUploadAttempts[iconHash] = 0
+                    self.desktopIconVerifiedAt[iconHash] = Date()
+                    self.rememberUploadedDesktopIcon(desktop)
+
+                    // resolver 早于首包完成时，400ms 防抖会自然把键带上，不额外叫醒。
+                    // 只有无图版本已经成功发过，才需要补发同一应用的对象键。
+                    if self.lastPostedDesktop == signature,
+                       self.desktopActivity.snapshot.map(DesktopUploadSignature.init) == signature {
+                        self.lastPostedDesktop = nil
+                        self.wakeReporter()
+                    }
+                    break
+                } catch is CancellationError {
+                    break
+                } catch {
+                    if Task.isCancelled { break }
+                    self.iconUploadAttempts[iconHash, default: 0] += 1
+                    self.reporterLastError = "图标上传失败：\(error.localizedDescription)"
+                }
+            }
+
+            if self.iconResolvers[iconHash]?.id == resolverID {
+                self.iconResolvers.removeValue(forKey: iconHash)
+            }
+        }
+        iconResolvers[iconHash] = (resolverID, task)
+    }
+
+    private func cancelDesktopIconResolvers() {
+        for resolver in iconResolvers.values { resolver.task.cancel() }
+        iconResolvers.removeAll(keepingCapacity: true)
+    }
+
     private func rememberUploadedDesktopIcon(_ snapshot: DesktopActivitySnapshot) {
         guard let iconHash = snapshot.iconHash else { return }
         uploadedDesktopIconHashes.insert(iconHash)
@@ -1401,12 +1478,14 @@ final class ServiceController: ObservableObject {
         if uploadedDesktopIconOrder.count > Self.uploadedDesktopIconLimit {
             let evicted = uploadedDesktopIconOrder.removeFirst()
             uploadedDesktopIconHashes.remove(evicted)
+            desktopIconVerifiedAt.removeValue(forKey: evicted)
         }
     }
 
     private func forgetUploadedDesktopIcon(_ iconHash: String) {
         uploadedDesktopIconHashes.remove(iconHash)
         uploadedDesktopIconOrder.removeAll { $0 == iconHash }
+        desktopIconVerifiedAt.removeValue(forKey: iconHash)
     }
 
     var telemetryEnvelope: TelemetryEnvelope {
