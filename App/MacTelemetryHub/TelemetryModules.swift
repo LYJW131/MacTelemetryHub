@@ -1123,6 +1123,8 @@ private enum TotalWindowPick {
 
 private let supplementalQuotaProviders: [SupplementalQuotaProvider] = [
     .init(id: "cursor", label: "Cursor", icon: "cursor", totalWindow: .primarySlot),
+    // Grok 只给 primary 一个窗口（周重置，且不带 windowMinutes），它就是总额
+    .init(id: "grok", label: "Grok", icon: "grok", totalWindow: .primarySlot),
     .init(id: "antigravity", label: "Antigravity", icon: "antigravity", totalWindow: .weeklyExtra),
 ]
 

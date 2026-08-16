@@ -87,8 +87,8 @@ Claude Code / Codex 是否正在使用，不上传 session ID、项目路径、�
 - `usage --provider both --source auto --no-credits --format json` reads Claude
   and Codex plan tiers and server-side quota windows.
 - One concurrent `usage` call per supplemental provider (see
-  `supplementalQuotaProviders` in `TelemetryModules.swift` — currently `cursor`
-  and `antigravity`), each reading a single total quota percentage.
+  `supplementalQuotaProviders` in `TelemetryModules.swift` — currently `cursor`,
+  `grok`, and `antigravity`), each reading a single total quota percentage.
   Each one uploads its display name and icon key alongside that percentage, so
   the site renders however many are configured here rather than keeping its own
   list. They never add token/cost/model detail to the upload payload.
