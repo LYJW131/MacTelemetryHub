@@ -564,8 +564,25 @@ final class ServiceController: ObservableObject {
 
     /// 循环的常规周期。前台应用、音乐、充电器插拔都会提前叫醒它，所以这个只
     /// 用来照顾没有事件放行的活：充电器功率滚动这类按节流窗口发的变化、
-    /// 30 秒心跳、CodexBar 的刷新间隔检查。
+    /// 心跳、CodexBar 的刷新间隔检查。
     private static let tickInterval = Duration.seconds(5)
+    /**
+     * 安静时段补心跳的间隔。
+     *
+     * 只在这一圈没有任何数据要发的时候才补 —— 有数据时那个包本身就证明活着。
+     * 纯心跳是 /api/ingest/mac 的主要流量（实测 12 小时 1.9K 次调用里约三分之二
+     * 是它），而它唯一影响的是「崩溃 / 断网 / 强制关机」的判定延迟：关盖、睡眠、
+     * 退出走 declaredOffline，收到那一条就瞬时翻转，不等这个间隔。
+     *
+     * ⚠️ 必须明显短于站点的存活窗口（`lib/freshness.ts` 的 HEARTBEAT_WINDOW_MS，
+     * 现在是 300 秒，Vercel 和 EdgeOne 两边都显式配着）。两者一样长的话每一轮
+     * 都踩在窗口边上，安静时段全站会断续显示离线。**先放宽窗口，再降心跳频率。**
+     *
+     * 和「发送间隔」（AppSettings 的 postInterval，本机 30 秒）是两档独立的节奏：
+     * 那个管有数据时多久发一次，这个管没数据时多久证明一次还活着。两个数字曾经
+     * 被填反过 —— 90 秒是这里的，不是那里的。
+     */
+    private static let heartbeatInterval: TimeInterval = 90
     /**
      * 充电设备结构变化后的追发。
      *
@@ -1204,7 +1221,8 @@ final class ServiceController: ObservableObject {
                     } else {
                         credentialsToSend = nil
                     }
-                    let heartbeatDue = lastHeartbeatAt.map { Date().timeIntervalSince($0) >= 30 } ?? true
+                    let heartbeatDue = lastHeartbeatAt
+                        .map { Date().timeIntervalSince($0) >= Self.heartbeatInterval } ?? true
                     let dataChanged = chargerToSend || desktopToSend || timezoneToSend ||
                         musicToSend || usageToSend || limitsToSend || sessionsToSend ||
                         credentialsToSend != nil
