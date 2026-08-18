@@ -1266,12 +1266,18 @@ final class AgentLimitsMonitor: ObservableObject {
             ])
         }
         let quotaProviders: [JSONValue] = supplementalQuotaProviders.map { provider in
-            .object([
+            let snapshot = plans[provider.id]
+            let window = snapshot?.limits.first
+            return .object([
                 "id": .string(provider.id),
                 "label": .string(provider.label),
                 "icon": .string(provider.icon),
-                "usedPercent": plans[provider.id]?.limits.first
-                    .map { .number($0.usedPercent) } ?? .null,
+                "usedPercent": window.map { .number($0.usedPercent) } ?? .null,
+                // 和 agents[].plan / limits[].resetsAt 同名同单位
+                "plan": snapshot.map {
+                    JSONValue.object(["tier": .string($0.tier), "label": .string($0.label)])
+                } ?? .null,
+                "resetsAt": window?.resetsAt.map { .number(Double($0)) } ?? .null,
                 "limitsError": limitErrors[provider.id].map(JSONValue.string) ?? .null,
             ])
         }
