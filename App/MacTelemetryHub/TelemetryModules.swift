@@ -1109,18 +1109,6 @@ private struct SupplementalQuotaProvider {
     let icon: String
     /// 从 usage 的窗口里挑哪一个当「总限额」
     let totalWindow: TotalWindowPick
-    /**
-     * 上游不报窗口时长时按这个数当时长；上游报了就以上游为准。
-     *
-     * 站点拿窗口时长画那道匀速基准线（走过多少比例，线就在多少百分比处），
-     * 没有时长就画不出来。这种「这家的周期是多久」属于对 provider 的了解，
-     * 归这边管 —— 站点那边没有名单，也就不该替谁猜周期。
-     *
-     * 只有 Grok 用得上：xAI 不报时长，CodexBar 自己也是按 7 天算的
-     * （GrokProviderDescriptor 的 resetWindowPace，`window.windowMinutes ?? 7 * 24 * 60`）。
-     * 哪天它改成月周期，坏掉的就是这条基准线的位置。
-     */
-    let assumedWindowMinutes: Int?
 }
 
 /// 每家「总限额」的口径不一样，挑法见各 case。
@@ -1134,13 +1122,10 @@ private enum TotalWindowPick {
 }
 
 private let supplementalQuotaProviders: [SupplementalQuotaProvider] = [
-    .init(id: "cursor", label: "Cursor", icon: "cursor", totalWindow: .primarySlot,
-          assumedWindowMinutes: nil),
+    .init(id: "cursor", label: "Cursor", icon: "cursor", totalWindow: .primarySlot),
     // Grok 只给 primary 一个窗口（周重置，且不带 windowMinutes），它就是总额
-    .init(id: "grok", label: "Grok", icon: "grok", totalWindow: .primarySlot,
-          assumedWindowMinutes: 7 * 24 * 60),
-    .init(id: "antigravity", label: "Antigravity", icon: "antigravity", totalWindow: .weeklyExtra,
-          assumedWindowMinutes: nil),
+    .init(id: "grok", label: "Grok", icon: "grok", totalWindow: .primarySlot),
+    .init(id: "antigravity", label: "Antigravity", icon: "antigravity", totalWindow: .weeklyExtra),
 ]
 
 private let agentLimitProviderIDs = ["claude", "codex"] + supplementalQuotaProviders.map(\.id)
@@ -1288,8 +1273,7 @@ final class AgentLimitsMonitor: ObservableObject {
                 "label": .string(provider.label),
                 "icon": .string(provider.icon),
                 "usedPercent": window.map { .number($0.usedPercent) } ?? .null,
-                // 和 agents[].plan / limits[].windowMinutes / limits[].resetsAt 同名同单位
-                "windowMinutes": window?.windowMinutes.map { .number(Double($0)) } ?? .null,
+                // 和 agents[].plan / limits[].resetsAt 同名同单位
                 "plan": snapshot.map {
                     JSONValue.object(["tier": .string($0.tier), "label": .string($0.label)])
                 } ?? .null,
@@ -1459,8 +1443,7 @@ private enum AgentLimitsCollector {
             key: "\(provider.id).total",
             label: selected?.name == "weekly" ? "Weekly" : "Total",
             group: nil,
-            windowMinutes: (window["windowMinutes"] as? NSNumber)?.intValue
-                ?? provider.assumedWindowMinutes,
+            windowMinutes: (window["windowMinutes"] as? NSNumber)?.intValue,
             usedPercent: (window["usedPercent"] as? NSNumber)?.doubleValue ?? 0,
             resetsAt: unixSeconds(window["resetsAt"] as? String)
         )]
