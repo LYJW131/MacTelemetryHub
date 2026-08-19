@@ -49,11 +49,15 @@ envelope and may contain only the modules that have fresh data:
     },
     "appleMusic": {},
     "timezone": {},
-    "charger": {},
-    "vibeCoding": {}
+    "chargingDevices": {},
+    "vibeCodingUsage": {},
+    "vibeCodingNow": {}
   }
 }
 ```
+
+`activeModules` lists the **toggles** the user has switched on, not the module
+keys above: vibe coding is one toggle (`vibeCoding`) that feeds two modules.
 
 Version 4 is the only accepted contract; desktop icons are addressed by SHA-256.
 The Mac renders each icon at 96 px, encodes it once as WebP, signs an S3-compatible
@@ -69,14 +73,35 @@ sent synchronously so it beats the disconnect; crashes, network loss, and forced
 shutdowns still rely on the site's "nothing received for a while" timeout. Both
 paths are needed; neither replaces the other.
 The POST body is deliberately bounded. The app discards TokenTracker's
-project-level details after parsing and uploads only display-ready totals, seven
-daily points, 365-day token totals, and 30 daily activity buckets. Token
-inspection stays in TokenTracker's own panel; Mac Telemetry Hub only shows the
-collector's health. That module is sent again only after the collectors refresh,
-while the smaller live modules are also sent only when their display content
-changes. Presence uses its own endpoint every 30 seconds so the site can detect
-an offline reporter without receiving duplicate charger, desktop, music, or
-coding-usage snapshots.
+project-level details after parsing and uploads only display-ready totals,
+today's numbers, and 30 daily activity buckets. Token inspection stays in
+TokenTracker's own panel; Mac Telemetry Hub only shows the collectors' health.
+
+Vibe coding is split into two modules by **how often it changes**, not by which
+endpoint produced it:
+
+| Module | Interval | Contents |
+| --- | --- | --- |
+| `vibeCodingNow` | 60 s | whether each agent is in use right now, its current model, last activity time |
+| `vibeCodingUsage` | 10 min | tokens, cost, the 30-day curve, plan tiers, rate-limit windows, supplemental quota providers, lifetime session count |
+
+There were three modules before (usage / limits / sessions), one per collector —
+a line drawn by *which command produced the data*, back when limits and usage
+came from two separate CodexBar invocations and the slow one could take the
+freshly fetched limits down with it. All three now come from the same local
+service on the same two schedules, so only the real line is left: "right now"
+versus "cumulative", and the collectors were merged to match — two modules, two
+collectors, two refresh intervals.
+
+Merging the two halves into one collector does not make them share a fate.
+Limits failing does not hold up usage: the bars keep their last good values and
+carry a `limitsError` so the site can tell "not configured" from "configured but
+unreachable". Usage failing drops the whole round instead — limits are attached
+to `agents[]` by id, and without the trunk there is nothing to attach them to.
+The session count is spliced in at send time (`VibeCodingUsagePayload`), since
+it is counted by the other collector.
+
+Every module is sent only when its own display content changes.
 
 ## Plan tier and rate-limit windows
 
@@ -91,6 +116,8 @@ Token、费用、限额和会话都来自本机跑着的 TokenTracker 面板，�
   自己的显示名和图标 key 一起上报，站点按这里配了几家就渲染几家，自己不留名单。
   补充来源不会往载荷里加 token / 费用 / 模型明细。
 - `tokentracker-sessions` 给出轻量的在用状态：只留模型名、最后活动时刻和条数。
+  前两样走 `vibeCodingNow`（60 秒一轮）；条数是「一共开过多少次」，属于累计量，
+  搭 `vibeCodingUsage` 那份车走。
 
 从前这四份是 CodexBar CLI 两条命令加 ccusage 两条、一共四次进程，光那条
 `cost --refresh` 就要十几秒；现在是同一个本机 HTTP 服务的几个 GET。代价是它

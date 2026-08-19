@@ -108,7 +108,7 @@ final class CodingSessionMonitor: ObservableObject {
     @Published private(set) var snapshots: [String: CodingSessionSnapshot] = [:]
     /// 所有来源的会话总数，和头部那一栏是同一个口径
     @Published private(set) var sessionCount = 0
-    /// `vibeCodingSessions` 模块的载荷。刻意不带采集时刻：内容没变就不该重发，
+    /// `vibeCodingNow` 模块的载荷。刻意不带采集时刻：内容没变就不该重发，
     /// 而 60 秒一轮的扫描里绝大多数轮次什么都没变。
     @Published private(set) var uploadPayload: JSONValue?
     /// 载荷**真正变化**的时刻，上报侧的判变门闩看它而不是 lastSuccess ——
@@ -153,7 +153,7 @@ final class CodingSessionMonitor: ObservableObject {
         snapshots = fresh
         // 整轮失败时会话总数留着上一次的，理由同上面那几份快照
         if outcome.sessionCount > 0 { sessionCount = outcome.sessionCount }
-        let payload = fresh.isEmpty ? nil : Self.makeUploadPayload(fresh, sessionCount: sessionCount)
+        let payload = fresh.isEmpty ? nil : Self.makeUploadPayload(fresh)
         if uploadPayload != payload {
             uploadPayload = payload
             payloadUpdatedAt = Date()
@@ -163,10 +163,15 @@ final class CodingSessionMonitor: ObservableObject {
         if !fresh.isEmpty { lastSuccess = Date() }
     }
 
-    /// 站点按 `id` 把这几个字段并回用量模块的 agent 上，所以除了 id 只发状态本身。
+    /**
+     * 站点按 `id` 把这几个字段并回用量模块的 agent 上，所以除了 id 只发状态本身。
+     *
+     * 会话总数不在这里：它是「一共开过多少次」，一个累计量，跟 token 和费用一起
+     * 走十几分钟那份（见 VibeCodingUsagePayload.merge）。放这里的话，它一涨就得
+     * 发一封 60 秒那轮的信 —— 而这条路是为「此刻」留的。
+     */
     private static func makeUploadPayload(
-        _ snapshots: [String: CodingSessionSnapshot],
-        sessionCount: Int
+        _ snapshots: [String: CodingSessionSnapshot]
     ) -> JSONValue {
         let agents = ["claude", "codex"].compactMap { id -> JSONValue? in
             guard let snapshot = snapshots[id] else { return nil }
@@ -177,10 +182,7 @@ final class CodingSessionMonitor: ObservableObject {
                 "active": .bool(snapshot.active),
             ])
         }
-        return .object([
-            "agents": .array(agents),
-            "sessionCount": .number(Double(sessionCount)),
-        ])
+        return .object(["agents": .array(agents)])
     }
 }
 
@@ -337,25 +339,30 @@ struct TelemetryModulesPayload: Encodable, Sendable {
     let appleMusicCredentials: AppleMusicCredentialsPayload?
     let timezone: TimeZoneSnapshot?
     /**
-     * Vibe coding 拆成三个模块，一个采集器一个。
+     * Vibe coding 两个模块，按**多久变一次**分。
      *
-     * 从前是一个 `vibeCoding`：CodexBar 的 365 天扫描顺手把限额和会话状态烤进
-     * 自己的载荷里。代价是三件事被绑成一件 —— 限额动一下就要重跑那个十几秒的
-     * 扫描，会话状态变了得靠一个手写的 JSON 补丁器去改冻结的载荷，而扫描一旦
-     * 失败，刚取到的限额连发都发不出去。
+     * - `vibeCodingNow`：此刻在不在用、用的是哪个模型。60 秒一轮，站点收到就推
+     *   给浏览器。
+     * - `vibeCodingUsage`：token、费用、曲线、套餐、限额、会话总数 —— 全是累计
+     *   事实，十几分钟才动一次，站点只拿它刷缓存。
      *
-     * 名字按数据是什么起，不按它从哪个接口来 —— 三份如今都来自 TokenTracker
-     * 的面板接口，换个来源不该牵动这三个模块名。
+     * 从前是三个：用量、限额、会话状态各一个，一个采集器一个。那条线是按「哪条
+     * 命令产出的」划的 —— 当年限额和用量分别来自 CodexBar 的两条命令，其中那条
+     * 十几秒的扫描一失败，同一轮刚取到的限额也跟着发不出去。如今都来自
+     * TokenTracker 同一个本机服务、跟着同两个间隔转，那道线就只剩历史了，采集器
+     * 也跟着并成两个：一个模块一个采集器一个间隔。
+     *
+     * 唯一的例外是会话总数：数出它的是短间隔那个采集器，但它是累计量，归这份
+     * 发 —— 发信封那一刻才补进去，见 VibeCodingUsagePayload.withSessionCount。
      */
     let vibeCodingUsage: JSONValue?
-    let vibeCodingLimits: JSONValue?
-    let vibeCodingSessions: JSONValue?
+    let vibeCodingNow: JSONValue?
     let includeDesktop: Bool
     let includeAppleMusic: Bool
 
     private enum CodingKeys: String, CodingKey {
         case chargingDevices, desktop, appleMusic, appleMusicCredentials, timezone
-        case vibeCodingUsage, vibeCodingLimits, vibeCodingSessions
+        case vibeCodingUsage, vibeCodingNow
     }
 
     func encode(to encoder: Encoder) throws {
@@ -366,8 +373,7 @@ struct TelemetryModulesPayload: Encodable, Sendable {
         try container.encodeIfPresent(appleMusicCredentials, forKey: .appleMusicCredentials)
         try container.encodeIfPresent(timezone, forKey: .timezone)
         try container.encodeIfPresent(vibeCodingUsage, forKey: .vibeCodingUsage)
-        try container.encodeIfPresent(vibeCodingLimits, forKey: .vibeCodingLimits)
-        try container.encodeIfPresent(vibeCodingSessions, forKey: .vibeCodingSessions)
+        try container.encodeIfPresent(vibeCodingNow, forKey: .vibeCodingNow)
     }
 }
 
@@ -1169,165 +1175,6 @@ private let supplementalQuotaProviders: [SupplementalQuotaProvider] = [
 
 private let agentLimitProviderIDs = ["claude", "codex"] + supplementalQuotaProviders.map(\.id)
 
-@MainActor
-final class AgentLimitsMonitor: ObservableObject {
-    @Published private(set) var plans: [String: AgentPlanSnapshot] = [:]
-    /// `vibeCodingLimits` 模块的载荷。里面全是内容，没有采集时刻，所以同一份
-    /// 限额重复采集不会变成一封新信。
-    @Published private(set) var uploadPayload: JSONValue?
-    /// 载荷真正变化的时刻，判变门闩看它 —— 理由同 CodingSessionMonitor。
-    @Published private(set) var payloadUpdatedAt: Date?
-    @Published private(set) var lastSuccess: Date?
-    @Published private(set) var lastError: String?
-    /// 载荷变化时叫醒上报循环，理由同 CodingSessionMonitor。
-    var onChange: (() -> Void)?
-    /// 按 agent 分开的限额失败原因，随载荷发给网页 —— 页面要能把「没配」和「取不到」分开
-    @Published private(set) var limitErrors: [String: String] = [:]
-
-    private var refreshing = false
-    /// 间隔门闩看的是「上次尝试」而不是 lastSuccess：CLI 配错或 Web 临时失败时，
-    /// 不能让主循环每一圈都重问一次 TokenTracker。
-    private var lastAttempt: Date?
-
-    func stop() {
-        plans = [:]
-        uploadPayload = nil
-        payloadUpdatedAt = nil
-        lastSuccess = nil
-        lastError = nil
-        limitErrors = [:]
-        lastAttempt = nil
-        refreshing = false
-    }
-
-    func refreshIfNeeded(baseURL: String, interval: Double) async {
-        guard !refreshing else { return }
-        if let lastAttempt, Date().timeIntervalSince(lastAttempt) < interval { return }
-        await refreshNow(baseURL: baseURL)
-    }
-
-    /// Bypasses the interval gate for an explicit user refresh, while preserving
-    /// the monitor's single-flight guard.
-    func refreshNow(baseURL: String) async {
-        guard !refreshing else { return }
-        refreshing = true
-        lastAttempt = Date()
-        defer { refreshing = false }
-
-        let outcome = await AgentLimitsCollector.collect(baseURL: baseURL)
-
-        // 内容没变就留着旧快照，下游（上传门闩、@Published 订阅者）才不会被
-        // 每一轮采集都惊动一次。
-        var fresh = outcome.plans
-        // 某一 provider 本轮完全失败时也保留它上次的好值；错误通过
-        // limitErrors 单独标记。统一命令的一边失败不能把另一边或旧快照清掉。
-        for agent in agentLimitProviderIDs where fresh[agent] == nil {
-            if outcome.limitErrors[agent] != nil, let previous = plans[agent] {
-                fresh[agent] = previous
-            }
-        }
-        for (agent, snapshot) in fresh {
-            /**
-             * 这一轮没取到限额时，沿用上一次拿到的那几条，不要清空。
-             *
-             * 清空会让页面上那几根条整个消失 —— 而「取不到」和「没有限额」是
-             * 两回事，前者该继续显示上次的值并标明它不是当前值。失败原因走
-             * limitErrors 单独送出去，页面据此决定怎么标。
-             */
-            var merged = snapshot
-            if snapshot.limits.isEmpty,
-               outcome.limitErrors[agent] != nil,
-               let previous = plans[agent], !previous.limits.isEmpty {
-                merged = AgentPlanSnapshot(
-                    tier: snapshot.tier,
-                    label: snapshot.label,
-                    limits: previous.limits
-                )
-            }
-            if let previous = plans[agent], previous == merged {
-                fresh[agent] = previous
-            } else {
-                fresh[agent] = merged
-            }
-        }
-        plans = fresh
-        lastError = outcome.errors.isEmpty ? nil : outcome.errors.joined(separator: "；")
-        limitErrors = outcome.limitErrors
-        // 全都失败时也要发：空 limits 加上 limitsError 才是「配了但取不到」，
-        // 什么都不发在站点那边和「没配」长得一模一样。
-        let payload = fresh.isEmpty && outcome.limitErrors.isEmpty
-            ? nil
-            : Self.makeUploadPayload(plans: fresh, limitErrors: outcome.limitErrors)
-        if uploadPayload != payload {
-            uploadPayload = payload
-            payloadUpdatedAt = Date()
-            onChange?()
-        }
-        if !fresh.isEmpty { lastSuccess = Date() }
-    }
-
-    /**
-     * `vibeCodingLimits` 模块的载荷。
-     *
-     * 两个 agent 的展示名（"Claude Code" / "Codex"）仍由站点自己给：就那两个，
-     * 名单在站点的类型里写死，多发一遍只会多一个要对齐的地方。
-     *
-     * 附加 provider 反过来 —— 名字和图标由这边发。名单在这边，站点那边没有，
-     * 它照单渲染。否则加一个 provider 要改两个仓库，站点漏改的表现是这边在传、
-     * 页面上没有，不报错也看不出来。
-     */
-    private static func makeUploadPayload(
-        plans: [String: AgentPlanSnapshot],
-        limitErrors: [String: String]
-    ) -> JSONValue {
-        func windows(_ limits: [AgentLimitWindow]) -> JSONValue {
-            .array(limits.map { window in
-                .object([
-                    "key": .string(window.key),
-                    "label": window.label.map(JSONValue.string) ?? .null,
-                    "group": window.group.map(JSONValue.string) ?? .null,
-                    "windowMinutes": window.windowMinutes.map { .number(Double($0)) } ?? .null,
-                    "usedPercent": .number(window.usedPercent),
-                    "resetsAt": window.resetsAt.map { .number(Double($0)) } ?? .null,
-                ])
-            })
-        }
-        let agents: [JSONValue] = ["claude", "codex"].map { id in
-            let plan = plans[id]
-            return .object([
-                "id": .string(id),
-                "plan": plan.flatMap(planValue) ?? .null,
-                "limits": windows(plan?.limits ?? []),
-                "limitsError": limitErrors[id].map(JSONValue.string) ?? .null,
-            ])
-        }
-        let quotaProviders: [JSONValue] = supplementalQuotaProviders.map { provider in
-            let snapshot = plans[provider.id]
-            let window = snapshot?.limits.first
-            return .object([
-                "id": .string(provider.id),
-                "label": .string(provider.label),
-                "icon": .string(provider.icon),
-                "usedPercent": window.map { .number($0.usedPercent) } ?? .null,
-                // 和 agents[].plan / limits[].resetsAt 同名同单位
-                "plan": snapshot.flatMap(planValue) ?? .null,
-                "resetsAt": window?.resetsAt.map { .number(Double($0)) } ?? .null,
-                "limitsError": limitErrors[provider.id].map(JSONValue.string) ?? .null,
-            ])
-        }
-        return .object([
-            "agents": .array(agents),
-            "quotaProviders": .array(quotaProviders),
-        ])
-    }
-
-    /// 套餐取不到时整格不发。发一个空字符串会在页面上留下一块没有内容的标签
-    private static func planValue(_ snapshot: AgentPlanSnapshot) -> JSONValue? {
-        guard let tier = snapshot.tier, let label = snapshot.label else { return nil }
-        return .object(["tier": .string(tier), "label": .string(label)])
-    }
-}
-
 private struct AgentLimitsOutcome: Sendable {
     let plans: [String: AgentPlanSnapshot]
     let errors: [String]
@@ -1525,26 +1372,55 @@ private enum AgentLimitsCollector {
 
 }
 
+/**
+ * 长间隔那份的采集器：token / 费用 / 曲线，加上套餐与限额，一轮转出一整个
+ * `vibeCodingUsage` 载荷（只差会话总数，那个发信封时才补，见
+ * `VibeCodingUsagePayload.withSessionCount`）。
+ *
+ * 从前限额单独一个采集器、单独一个模块。那条线是按「哪条命令产出的」划的 ——
+ * 当年用量来自 CodexBar 一条要跑十几秒的扫描，它一失败会把同一轮刚取到的限额
+ * 一起拖下水，拆开才有意义。如今两半都是同一个本机服务上的 GET、跟着同一个
+ * 间隔转，拆着只剩两份状态和两个要对齐的地方。
+ *
+ * 并成一个采集器**不等于共命**，两半的失败各走各的：
+ *
+ * - **限额挂了**：用量照发。限额沿用上一次的好值，并带上 limitsError ——
+ *   页面据此把「没配」和「配了但取不到」分开，两者都是空数组。
+ * - **用量挂了**：整轮不发。限额是按 id 贴在 agents 上的，站点那边没有主干就
+ *   没有 agents 可贴，硬发出去也是整份被判废。限额仍然收进状态，下一轮用量
+ *   成功时一起出去。
+ */
 @MainActor
 final class VibeCodingUsageMonitor: ObservableObject {
+    /// 各 provider 最近一次取到的套餐与限额窗口。这一轮取不到就留着上次的好值
+    @Published private(set) var plans: [String: AgentPlanSnapshot] = [:]
     @Published private(set) var uploadPayload: JSONValue?
     /// 载荷真正变化的时刻，判变门闩看它 —— 理由同 CodingSessionMonitor。
-    /// 这份载荷带着 `collectedAt`，所以每采一次都算变化，仍是 600 秒发一次。
+    /// 这份载荷带着 `collectedAt`，所以每采一次都算变化，仍是一个间隔发一次。
     @Published private(set) var payloadUpdatedAt: Date?
     @Published private(set) var lastSuccess: Date?
+    /// 用量那半的失败原因。它挂了就整轮不发，所以这条为空才谈得上有新数据
     @Published private(set) var lastError: String?
-    /// 载荷变化时叫醒上报循环，理由同 CodingSessionMonitor。
+    /// 限额那半的失败原因，合成一句给界面看；按 provider 分开的那份在 limitErrors 里
+    @Published private(set) var limitsError: String?
+    /// 按 provider 分开的限额失败原因，随载荷发给网页 —— 页面要能把「没配」和「取不到」分开
+    @Published private(set) var limitErrors: [String: String] = [:]
+    /// 载荷变化时叫醒上报循环。采集不再挂在那条循环上，所以得跟前台应用、
+    /// 音乐一样自己回头敲一下门。
     var onChange: (() -> Void)?
     private var refreshing = false
     /// 上一次**尝试**采集的时刻。间隔门闩看它而不是 lastSuccess：失败或被判废
-    /// 时 lastSuccess 不动，光看它的话 2 秒一圈的主循环会每圈都重跑一次 CodexBar。
+    /// 时 lastSuccess 不动，光看它的话 2 秒一圈的主循环会每圈都重跑一次采集。
     private var lastAttempt: Date?
 
     func stop() {
+        plans = [:]
         uploadPayload = nil
         payloadUpdatedAt = nil
         lastSuccess = nil
         lastError = nil
+        limitsError = nil
+        limitErrors = [:]
         lastAttempt = nil
         refreshing = false
     }
@@ -1563,20 +1439,191 @@ final class VibeCodingUsageMonitor: ObservableObject {
         refreshing = true
         lastAttempt = Date()
         defer { refreshing = false }
+
+        // 两半并发取：限额只有一次请求，用量要两百多次，串着跑等于白等一次往返
+        async let usageTask = TokenTrackerUsageCollector.collect(baseURL: baseURL)
+        // 限额那条自己吞错误、把原因分到各 provider 上，所以先接它，
+        // 不管用量成不成都先把状态收下
+        applyLimits(await AgentLimitsCollector.collect(baseURL: baseURL))
+
+        let usage: VibeCodingUsageCollection
         do {
-            let collection = try await TokenTrackerUsageCollector.collect(baseURL: baseURL)
-            if uploadPayload != collection.uploadPayload {
-                uploadPayload = collection.uploadPayload
-                payloadUpdatedAt = Date()
-                onChange?()
-            }
-            lastSuccess = Date()
-            lastError = nil
-            return true
+            usage = try await usageTask
         } catch {
             lastError = error.localizedDescription
             return false
         }
+        lastError = nil
+
+        let payload = VibeCodingUsagePayload.withLimits(usage.uploadPayload, limits: limitsPayload())
+        if uploadPayload != payload {
+            uploadPayload = payload
+            payloadUpdatedAt = Date()
+            onChange?()
+        }
+        lastSuccess = Date()
+        return true
+    }
+
+    /// 把这一轮的限额收进状态：取到的更新，没取到的留着上次的好值。
+    private func applyLimits(_ outcome: AgentLimitsOutcome) {
+        // 内容没变就留着旧快照，下游（上传门闩、@Published 订阅者）才不会被
+        // 每一轮采集都惊动一次。
+        var fresh = outcome.plans
+        // 某一 provider 本轮完全失败时也保留它上次的好值；错误通过
+        // limitErrors 单独标记。统一命令的一边失败不能把另一边或旧快照清掉。
+        for agent in agentLimitProviderIDs where fresh[agent] == nil {
+            if outcome.limitErrors[agent] != nil, let previous = plans[agent] {
+                fresh[agent] = previous
+            }
+        }
+        for (agent, snapshot) in fresh {
+            /**
+             * 这一轮没取到限额时，沿用上一次拿到的那几条，不要清空。
+             *
+             * 清空会让页面上那几根条整个消失 —— 而「取不到」和「没有限额」是
+             * 两回事，前者该继续显示上次的值并标明它不是当前值。失败原因走
+             * limitErrors 单独送出去，页面据此决定怎么标。
+             */
+            var merged = snapshot
+            if snapshot.limits.isEmpty,
+               outcome.limitErrors[agent] != nil,
+               let previous = plans[agent], !previous.limits.isEmpty {
+                merged = AgentPlanSnapshot(
+                    tier: snapshot.tier,
+                    label: snapshot.label,
+                    limits: previous.limits
+                )
+            }
+            if let previous = plans[agent], previous == merged {
+                fresh[agent] = previous
+            } else {
+                fresh[agent] = merged
+            }
+        }
+        plans = fresh
+        limitsError = outcome.errors.isEmpty ? nil : outcome.errors.joined(separator: "；")
+        limitErrors = outcome.limitErrors
+    }
+
+    /**
+     * 限额那半的载荷。全都失败时也要发：空 limits 加上 limitsError 才是
+     * 「配了但取不到」，什么都不发在站点那边和「没配」长得一模一样。
+     *
+     * 两个 agent 的展示名（"Claude Code" / "Codex"）仍由站点自己给：就那两个，
+     * 名单在站点的类型里写死，多发一遍只会多一个要对齐的地方。
+     *
+     * 附加 provider 反过来 —— 名字和图标由这边发。名单在这边，站点那边没有，
+     * 它照单渲染。否则加一个 provider 要改两个仓库，站点漏改的表现是这边在传、
+     * 页面上没有，不报错也看不出来。
+     */
+    private func limitsPayload() -> JSONValue? {
+        if plans.isEmpty && limitErrors.isEmpty { return nil }
+        func windows(_ limits: [AgentLimitWindow]) -> JSONValue {
+            .array(limits.map { window in
+                .object([
+                    "key": .string(window.key),
+                    "label": window.label.map(JSONValue.string) ?? .null,
+                    "group": window.group.map(JSONValue.string) ?? .null,
+                    "windowMinutes": window.windowMinutes.map { .number(Double($0)) } ?? .null,
+                    "usedPercent": .number(window.usedPercent),
+                    "resetsAt": window.resetsAt.map { .number(Double($0)) } ?? .null,
+                ])
+            })
+        }
+        let agents: [JSONValue] = ["claude", "codex"].map { id in
+            let plan = plans[id]
+            return .object([
+                "id": .string(id),
+                "plan": plan.flatMap(Self.planValue) ?? .null,
+                "limits": windows(plan?.limits ?? []),
+                "limitsError": limitErrors[id].map(JSONValue.string) ?? .null,
+            ])
+        }
+        let quotaProviders: [JSONValue] = supplementalQuotaProviders.map { provider in
+            let snapshot = plans[provider.id]
+            let window = snapshot?.limits.first
+            return .object([
+                "id": .string(provider.id),
+                "label": .string(provider.label),
+                "icon": .string(provider.icon),
+                "usedPercent": window.map { .number($0.usedPercent) } ?? .null,
+                // 和 agents[].plan / limits[].resetsAt 同名同单位
+                "plan": snapshot.flatMap(Self.planValue) ?? .null,
+                "resetsAt": window?.resetsAt.map { .number(Double($0)) } ?? .null,
+                "limitsError": limitErrors[provider.id].map(JSONValue.string) ?? .null,
+            ])
+        }
+        return .object([
+            "agents": .array(agents),
+            "quotaProviders": .array(quotaProviders),
+        ])
+    }
+
+    /// 套餐取不到时整格不发。发一个空字符串会在页面上留下一块没有内容的标签
+    private static func planValue(_ snapshot: AgentPlanSnapshot) -> JSONValue? {
+        guard let tier = snapshot.tier, let label = snapshot.label else { return nil }
+        return .object(["tier": .string(tier), "label": .string(label)])
+    }
+}
+
+/**
+ * `vibeCodingUsage` 模块载荷的两道拼装。
+ *
+ * 拼出来的形状和站点的读法一一对应：限额按 `id` 贴到对应的 agent 上，附加
+ * provider 平铺在顶层，会话总数落进 totals。
+ *
+ * 分两道是因为两样东西不在同一个地方就位：限额和用量在同一个采集器里，
+ * 采完就能贴；会话总数在另一个采集器手上，发信封那一刻才拿得到。
+ */
+enum VibeCodingUsagePayload {
+    /**
+     * 限额贴进用量。
+     *
+     * 限额缺席时整片字段都不发，而不是发一串 null —— 站点那边「没有这几个键」
+     * 就是「没配」，整块不渲染；「配了但取不到」由 limitsError 表达，那是有键的。
+     */
+    static func withLimits(_ usage: JSONValue, limits: JSONValue?) -> JSONValue {
+        guard case .object(var root) = usage else { return usage }
+
+        var limitsRoot: [String: JSONValue] = [:]
+        if case let .object(fields)? = limits { limitsRoot = fields }
+
+        var limitsByAgent: [String: [String: JSONValue]] = [:]
+        if case let .array(rows)? = limitsRoot["agents"] {
+            for row in rows {
+                guard case let .object(fields) = row,
+                      case let .string(id)? = fields["id"] else { continue }
+                limitsByAgent[id] = fields
+            }
+        }
+        if !limitsByAgent.isEmpty, case let .array(agents)? = root["agents"] {
+            root["agents"] = .array(agents.map { agent in
+                guard case .object(var fields) = agent,
+                      case let .string(id)? = fields["id"],
+                      let limit = limitsByAgent[id] else { return agent }
+                fields["plan"] = limit["plan"] ?? .null
+                fields["limits"] = limit["limits"] ?? .array([])
+                fields["limitsError"] = limit["limitsError"] ?? .null
+                return .object(fields)
+            })
+        }
+        if let providers = limitsRoot["quotaProviders"] { root["quotaProviders"] = providers }
+        return .object(root)
+    }
+
+    /**
+     * 会话总数落进 totals。
+     *
+     * 它是「一共开过多少次」，一个累计量，所以归这份而不是 60 秒那轮的
+     * `vibeCodingNow`；但数出它的是那边的扫描，所以只能在发信封时补上。
+     */
+    static func withSessionCount(_ usage: JSONValue, _ sessionCount: Int) -> JSONValue {
+        guard case .object(var root) = usage,
+              case .object(var totals)? = root["totals"] else { return usage }
+        totals["sessionCount"] = .number(Double(sessionCount))
+        root["totals"] = .object(totals)
+        return .object(root)
     }
 }
 

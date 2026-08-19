@@ -41,11 +41,10 @@ struct DashboardView: View {
     @ObservedObject private var httpServer: LocalHTTPServer
     @ObservedObject private var desktopActivity: DesktopActivityMonitor
     @ObservedObject private var appleMusic: AppleMusicMonitor
-    @ObservedObject private var vibeCodingUsageCollector: VibeCodingUsageMonitor
-    // 三张卡各看一个采集器，三个都得单独订阅：ServiceController 是 ObservableObject，
+    // 两张卡各看一个采集器，两个都得单独订阅：ServiceController 是 ObservableObject，
     // 但它内部这几个 monitor 的 @Published 不会冒泡上来。从前会话状态那行的错误
     // 就是这么挂在 service 下面读的，只有别的东西触发重绘时才会跟着变。
-    @ObservedObject private var agentLimits: AgentLimitsMonitor
+    @ObservedObject private var vibeCodingUsageCollector: VibeCodingUsageMonitor
     @ObservedObject private var codingSessions: CodingSessionMonitor
     @State private var selection: DashboardSection = .overview
 
@@ -58,7 +57,6 @@ struct DashboardView: View {
         desktopActivity = service.desktopActivity
         appleMusic = service.appleMusic
         vibeCodingUsageCollector = service.vibeCodingUsageCollector
-        agentLimits = service.agentLimits
         codingSessions = service.codingSessions
     }
 
@@ -502,8 +500,9 @@ struct DashboardView: View {
                 feedback: service.manualReportMessage(for: .timezone),
                 feedbackIsError: service.manualReportFailed(.timezone)
             )
-            // Vibe coding 一行拆三行，一个采集器一行：三条命令的失败原因互不相干，
-            // 合成一行时限额取不到这件事在本机根本看不见（从前那条链里就没有它）。
+            // Vibe coding 一行拆两行，一个采集器一行，也正好是一个上报模块一行：
+            // 「此刻在不在用」60 秒一轮，用量和限额十分钟一轮，两边的失败原因
+            // 互不相干，合成一行时限额取不到这件事在本机根本看不见。
             ModuleStatusCard(
                 title: "会话状态",
                 icon: "terminal",
@@ -523,38 +522,23 @@ struct DashboardView: View {
                 feedbackIsError: service.manualReportFailed(.vibeCoding)
             )
             ModuleStatusCard(
-                title: "Token / 费用",
+                title: "用量 / 限额",
                 icon: "chart.bar",
                 enabled: service.settings.codexBarModuleEnabled,
                 value: vibeCodingUsageCollector.lastSuccess == nil ? "等待统计" : "聚合完成",
+                // 用量挂了整轮不发，限额挂了只是那几根条留着上次的值 —— 两种都要说，
+                // 而且要分得出是哪种
                 detail: vibeCodingUsageCollector.lastError
+                    ?? vibeCodingUsageCollector.limitsError.map { "限额：\($0)" }
                     ?? vibeCodingUsageCollector.lastSuccess?.formatted(date: .omitted, time: .standard),
                 action: { Task { await service.refreshVibeCodingUsageNow() } },
                 actionIcon: "arrow.clockwise",
-                actionHelp: "重新读取 TokenTracker 用量与费用并上报",
+                actionHelp: "重新读取 TokenTracker 用量、费用与限额并上报",
                 actionEnabled: service.settings.codexBarModuleEnabled,
                 isReporting: service.isRefreshingVibeCodingUsage
                     || service.isManualReportInFlight(.vibeCoding),
                 feedback: service.isRefreshingVibeCodingUsage
                     ? "正在重新统计用量…"
-                    : service.manualReportMessage(for: .vibeCoding),
-                feedbackIsError: service.manualReportFailed(.vibeCoding)
-            )
-            ModuleStatusCard(
-                title: "限额",
-                icon: "gauge.with.dots.needle.33percent",
-                enabled: service.settings.codexBarModuleEnabled,
-                value: agentLimits.lastSuccess == nil ? "等待限额" : "限额已取",
-                detail: agentLimits.lastError
-                    ?? agentLimits.lastSuccess?.formatted(date: .omitted, time: .standard),
-                action: { Task { await service.refreshVibeCodingLimitsNow() } },
-                actionIcon: "arrow.clockwise",
-                actionHelp: "重新读取 TokenTracker 限额并上报",
-                actionEnabled: service.settings.codexBarModuleEnabled,
-                isReporting: service.isRefreshingVibeCodingLimits
-                    || service.isManualReportInFlight(.vibeCoding),
-                feedback: service.isRefreshingVibeCodingLimits
-                    ? "正在读取限额…"
                     : service.manualReportMessage(for: .vibeCoding),
                 feedbackIsError: service.manualReportFailed(.vibeCoding)
             )

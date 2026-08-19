@@ -358,8 +358,7 @@ struct SettingsView: View {
                             placeholder: "http://127.0.0.1:7680"
                         )
                         NumericField(title: "会话状态刷新", unit: "秒（最少 60）", placeholder: "60", value: $settings.codingSessionRefreshInterval)
-                        NumericField(title: "Token / 费用刷新", unit: "秒（最少 60）", placeholder: "600", value: $settings.codexBarCostRefreshInterval)
-                        NumericField(title: "限额刷新", unit: "秒（最少 60）", placeholder: "600", value: $settings.agentLimitsRefreshInterval)
+                        NumericField(title: "用量与限额刷新", unit: "秒（最少 60）", placeholder: "600", value: $settings.vibeCodingUsageRefreshInterval)
                     }
                     .padding(.top, 5)
                 }

@@ -26,8 +26,9 @@ final class AppSettings: ObservableObject {
         static let codexBarModuleEnabled = "codexBarModuleEnabled"
         static let tokenTrackerBaseURL = "tokenTrackerBaseURL"
         static let codingSessionRefreshInterval = "codingSessionRefreshInterval"
-        static let codexBarCostRefreshInterval = "codexBarCostRefreshInterval"
-        static let agentLimitsRefreshInterval = "agentLimitsRefreshInterval"
+        /// 从前是 codexBarCostRefreshInterval + agentLimitsRefreshInterval 两个。
+        /// 并成一个采集器之后没有「只刷限额」这回事了，旧键留着也没人读
+        static let vibeCodingUsageRefreshInterval = "vibeCodingUsageRefreshInterval"
         static let r2Endpoint = "r2Endpoint"
         static let r2Bucket = "r2Bucket"
         static let r2AccessKeyAccount = "r2-access-key-id"
@@ -65,9 +66,10 @@ final class AppSettings: ObservableObject {
     @Published var codexBarModuleEnabled: Bool
     /// TokenTracker 本地面板的根地址。用量、限额、会话三份都从它下面取。
     @Published var tokenTrackerBaseURL: String
+    /// 短间隔那份：此刻在不在用
     @Published var codingSessionRefreshInterval: Double
-    @Published var codexBarCostRefreshInterval: Double
-    @Published var agentLimitsRefreshInterval: Double
+    /// 长间隔那份：token、费用、曲线、套餐、限额，一个采集器一轮全取
+    @Published var vibeCodingUsageRefreshInterval: Double
     @Published var r2Endpoint: String
     @Published var r2Bucket: String
     @Published var r2AccessKeyID: String
@@ -139,10 +141,8 @@ final class AppSettings: ObservableObject {
             : storedBaseURL
         let storedSessionInterval = defaults.double(forKey: Key.codingSessionRefreshInterval)
         codingSessionRefreshInterval = storedSessionInterval == 0 ? 60 : storedSessionInterval
-        let storedCostInterval = defaults.double(forKey: Key.codexBarCostRefreshInterval)
-        codexBarCostRefreshInterval = storedCostInterval == 0 ? 600 : storedCostInterval
-        let storedAgentLimitsInterval = defaults.double(forKey: Key.agentLimitsRefreshInterval)
-        agentLimitsRefreshInterval = storedAgentLimitsInterval == 0 ? 600 : storedAgentLimitsInterval
+        let storedUsageInterval = defaults.double(forKey: Key.vibeCodingUsageRefreshInterval)
+        vibeCodingUsageRefreshInterval = storedUsageInterval == 0 ? 600 : storedUsageInterval
         r2Endpoint = defaults.string(forKey: Key.r2Endpoint)
             ?? environment["R2_ENDPOINT"]
             ?? ""
@@ -260,8 +260,9 @@ final class AppSettings: ObservableObject {
             guard codingSessionRefreshInterval >= 60 else {
                 throw SettingsError.invalidCodingSessionInterval
             }
-            guard codexBarCostRefreshInterval >= 60 else { throw SettingsError.invalidCodexBarCostInterval }
-            guard agentLimitsRefreshInterval >= 60 else { throw SettingsError.invalidAgentLimitsInterval }
+            guard vibeCodingUsageRefreshInterval >= 60 else {
+                throw SettingsError.invalidVibeCodingUsageInterval
+            }
         }
         let r2Values = [r2Endpoint, r2Bucket, r2AccessKeyID, r2SecretAccessKey]
             .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
@@ -316,8 +317,7 @@ final class AppSettings: ObservableObject {
         defaults.set(codexBarModuleEnabled, forKey: Key.codexBarModuleEnabled)
         defaults.set(tokenTrackerBaseURL, forKey: Key.tokenTrackerBaseURL)
         defaults.set(codingSessionRefreshInterval, forKey: Key.codingSessionRefreshInterval)
-        defaults.set(codexBarCostRefreshInterval, forKey: Key.codexBarCostRefreshInterval)
-        defaults.set(agentLimitsRefreshInterval, forKey: Key.agentLimitsRefreshInterval)
+        defaults.set(vibeCodingUsageRefreshInterval, forKey: Key.vibeCodingUsageRefreshInterval)
         defaults.set(r2Endpoint, forKey: Key.r2Endpoint)
         defaults.set(r2Bucket, forKey: Key.r2Bucket)
     }
@@ -346,7 +346,7 @@ final class AppSettings: ObservableObject {
 enum SettingsError: LocalizedError {
     case invalidUserID, invalidPeripheralID, invalidPort, invalidTiming, invalidPostURL
     case invalidTokenTrackerURL, invalidCodingSessionInterval
-    case invalidCodexBarCostInterval, invalidAgentLimitsInterval
+    case invalidVibeCodingUsageInterval
     case invalidR2Configuration
 
     var errorDescription: String? {
@@ -358,8 +358,7 @@ enum SettingsError: LocalizedError {
         case .invalidPostURL: "POST 地址必须是完整的 http:// 或 https:// URL。"
         case .invalidTokenTrackerURL: "启用 Vibe Coding 用量时，TokenTracker 地址必须是完整的 http:// 或 https:// URL。"
         case .invalidCodingSessionInterval: "会话状态刷新间隔不能低于 60 秒。"
-        case .invalidCodexBarCostInterval: "本地用量刷新间隔不能低于 60 秒。"
-        case .invalidAgentLimitsInterval: "限额刷新间隔不能低于 60 秒。"
+        case .invalidVibeCodingUsageInterval: "用量与限额刷新间隔不能低于 60 秒。"
         case .invalidR2Configuration: "R2 直传配置必须同时填写 HTTPS Endpoint、Bucket、Access Key ID 和 Secret Access Key。"
         }
     }

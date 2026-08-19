@@ -499,8 +499,9 @@ final class ServiceController: ObservableObject {
     let timeZone = TimeZoneMonitor()
     let appleMusic = AppleMusicMonitor()
     let appleMusicAuthorization = AppleMusicAuthorizationManager()
+    /// 一个模块一个采集器：长间隔那份（token / 费用 / 曲线 / 套餐 / 限额）和
+    /// 短间隔那份（此刻在不在用）
     let vibeCodingUsageCollector = VibeCodingUsageMonitor()
-    let agentLimits = AgentLimitsMonitor()
     let codingSessions = CodingSessionMonitor()
     lazy private(set) var httpServer = LocalHTTPServer { [weak self] request in
         guard let self else { return .text("Unavailable\n", status: 503, reason: "Service Unavailable") }
@@ -509,10 +510,9 @@ final class ServiceController: ObservableObject {
 
     @Published private(set) var reporterLastSuccess: Date?
     @Published private(set) var reporterLastError: String?
-    /// 三个采集器各有各的按钮，所以在飞状态也各记各的 —— 重取限额不该把
-    /// 那个十几秒的用量扫描按钮也一起变灰。
+    /// 两个采集器各有各的按钮，所以在飞状态也各记各的 —— 重扫会话不该把
+    /// 那个两百多次请求的用量按钮也一起变灰。
     @Published private(set) var isRefreshingVibeCodingUsage = false
-    @Published private(set) var isRefreshingVibeCodingLimits = false
     @Published private(set) var isRefreshingVibeCodingSessions = false
     @Published private(set) var appleMusicCredentialsUploadAt: Date?
     @Published private(set) var appleMusicCredentialsUploadError: String?
@@ -530,9 +530,9 @@ final class ServiceController: ObservableObject {
     private var reporterTask: Task<Void, Never>?
     /// vibe coding 的采集循环，跟上报循环各转各的
     private var vibeCodingCollectionTask: Task<Void, Never>?
+    /// 用量那份的门闩看两个采集器里较晚的那个变化时刻，见上报循环里的 usageUpdatedAt
     private var lastPostedVibeCodingUsageAt: Date?
-    private var lastPostedVibeCodingLimitsAt: Date?
-    private var lastPostedVibeCodingSessionsAt: Date?
+    private var lastPostedVibeCodingNowAt: Date?
     private var lastPostedChargingDevices: ChargingDevicesPayload?
     /// 只跟结构性变化比，管的是「要不要即时发」，不管「要不要带 charger 模块」
     private var lastPostedChargingStructural: ChargingDevicesStructuralSignature?
@@ -663,7 +663,6 @@ final class ServiceController: ObservableObject {
         timeZone.stop()
         appleMusic.stop()
         vibeCodingUsageCollector.stop()
-        agentLimits.stop()
         codingSessions.stop()
         httpServer.stop()
         chargerLink.shutdown()
@@ -727,10 +726,10 @@ final class ServiceController: ObservableObject {
     }
 
     /**
-     * 三个采集器各自的「立刻重取」，互不牵连。
+     * 两个采集器各自的「立刻重取」，互不牵连。
      *
-     * 拆开之前只有一个按钮，按一下三条命令全跑一遍 —— 想看看限额掉到多少，
-     * 就得连带等用量那一份跑完。
+     * 分开是为了「只想看看此刻在不在用」时不必等那两百多次请求的用量跑完。
+     * 限额没有自己的按钮 —— 它和用量在同一个采集器里，本来就是一轮取完的。
      *
      * 采集器自己带单飞门闩，这里的标志只管按钮状态。即时上报仍是一次：
      * 信封只有一个，`requestImmediateReport` 也只按模块开关走一遍。
@@ -740,14 +739,6 @@ final class ServiceController: ObservableObject {
         isRefreshingVibeCodingUsage = true
         defer { isRefreshingVibeCodingUsage = false }
         guard await vibeCodingUsageCollector.refreshNow(baseURL: settings.tokenTrackerBaseURL) else { return }
-        _ = requestImmediateReport(.vibeCoding)
-    }
-
-    func refreshVibeCodingLimitsNow() async {
-        guard settings.codexBarModuleEnabled, !isRefreshingVibeCodingLimits else { return }
-        isRefreshingVibeCodingLimits = true
-        defer { isRefreshingVibeCodingLimits = false }
-        await agentLimits.refreshNow(baseURL: settings.tokenTrackerBaseURL)
         _ = requestImmediateReport(.vibeCoding)
     }
 
@@ -867,11 +858,9 @@ final class ServiceController: ObservableObject {
         case .charger: chargerLink.hasTelemetry
         case .powerBank: powerBankLink.hasTelemetry
         case .timezone: timeZone.snapshot != nil
-        // 三份任一有值就能发。从前只看用量那份，于是那个扫描一失败，
-        // 刚取到的限额连发都发不出去。
+        // 两个模块任一有值就能发：用量还没采到时，「此刻在不在用」也值得单独发
         case .vibeCoding:
             vibeCodingUsageCollector.uploadPayload != nil
-                || agentLimits.uploadPayload != nil
                 || codingSessions.uploadPayload != nil
         }
     }
@@ -1013,27 +1002,25 @@ final class ServiceController: ObservableObject {
         }
         if settings.codexBarModuleEnabled {
             codingSessions.onChange = { [weak self] in self?.wakeReporter() }
-            agentLimits.onChange = { [weak self] in self?.wakeReporter() }
             vibeCodingUsageCollector.onChange = { [weak self] in self?.wakeReporter() }
             startVibeCodingCollection()
         } else {
             codingSessions.onChange = nil
-            agentLimits.onChange = nil
             vibeCodingUsageCollector.onChange = nil
             vibeCodingCollectionTask?.cancel()
             vibeCodingCollectionTask = nil
             vibeCodingUsageCollector.stop()
-            agentLimits.stop()
             codingSessions.stop()
         }
     }
 
     /**
-     * vibe coding 那三条 CLI 自己转一条循环，不再挂在上报循环上。
+     * vibe coding 的采集自己转一条循环，不再挂在上报循环上。
      *
-     * 从前它们在上报循环发包之前被 await 掉，而最慢那条（`cost --days 365 --refresh`）
-     * 实测要 25 秒 —— 这 25 秒里循环停在原地，切换应用的通知只能立个 pendingWake
-     * 的旗，切过去又切走的那个应用根本发不出去，不是晚发是没发。
+     * 从前它们在上报循环发包之前被 await 掉，而最慢那条（CodexBar 的
+     * `cost --days 365 --refresh`）实测要 25 秒 —— 这 25 秒里循环停在原地，切换
+     * 应用的通知只能立个 pendingWake 的旗，切过去又切走的那个应用根本发不出去，
+     * 不是晚发是没发。
      *
      * 现在采集完由各自的 onChange 叫醒循环，跟前台应用、音乐同一条路：循环只读
      * 它们留下的载荷，唯一还会阻塞的就是那次 POST 本身。
@@ -1046,20 +1033,16 @@ final class ServiceController: ObservableObject {
         vibeCodingCollectionTask = Task { [weak self] in
             while !Task.isCancelled {
                 guard let self, settings.codexBarModuleEnabled else { return }
-                // 三份互不喂料，所以并发跑
+                // 两份互不喂料，间隔也差着一个数量级，所以并发跑
                 async let sessions: Void = self.codingSessions.refreshIfNeeded(
                     baseURL: settings.tokenTrackerBaseURL,
                     interval: settings.codingSessionRefreshInterval
                 )
-                async let limits: Void = self.agentLimits.refreshIfNeeded(
-                    baseURL: settings.tokenTrackerBaseURL,
-                    interval: settings.agentLimitsRefreshInterval
-                )
                 async let usage: Void = self.vibeCodingUsageCollector.refreshIfNeeded(
                     baseURL: settings.tokenTrackerBaseURL,
-                    interval: settings.codexBarCostRefreshInterval
+                    interval: settings.vibeCodingUsageRefreshInterval
                 )
-                _ = await (sessions, limits, usage)
+                _ = await (sessions, usage)
                 try? await Task.sleep(for: Self.tickInterval)
             }
         }
@@ -1074,8 +1057,7 @@ final class ServiceController: ObservableObject {
         pendingWake = false
         reporterLastError = nil
         lastPostedVibeCodingUsageAt = nil
-        lastPostedVibeCodingLimitsAt = nil
-        lastPostedVibeCodingSessionsAt = nil
+        lastPostedVibeCodingNowAt = nil
         lastPostedChargingDevices = nil
         lastPostedChargingStructural = nil
         lastPostedDesktop = nil
@@ -1165,8 +1147,8 @@ final class ServiceController: ObservableObject {
                     // snapshot 从有值变成 nil 时也要发送一次 null，避免网页保留旧歌曲。
                     let musicChanged = settings.appleMusicModuleEnabled &&
                         (musicSignature != lastPostedAppleMusic || musicSeeked)
-                    /// 三份各判各的变化。门闩看的是载荷**变化**的时刻而不是采集成功的
-                    /// 时刻 —— 会话状态 60 秒扫一次，绝大多数轮次什么都没变，拿
+                    /// 两个模块各判各的变化。门闩看的是载荷**变化**的时刻而不是采集
+                    /// 成功的时刻 —— 会话状态 60 秒扫一次，绝大多数轮次什么都没变，拿
                     /// lastSuccess 当门闩会把每一轮扫描都变成一次上报。
                     let vibeCodingEnabled = settings.codexBarModuleEnabled
                     func vibeCodingChanged(_ updatedAt: Date?, _ lastPosted: Date?) -> Bool {
@@ -1176,11 +1158,8 @@ final class ServiceController: ObservableObject {
                     let usageChanged = vibeCodingChanged(
                         vibeCodingUsageCollector.payloadUpdatedAt, lastPostedVibeCodingUsageAt
                     )
-                    let limitsChanged = vibeCodingChanged(
-                        agentLimits.payloadUpdatedAt, lastPostedVibeCodingLimitsAt
-                    )
-                    let sessionsChanged = vibeCodingChanged(
-                        codingSessions.payloadUpdatedAt, lastPostedVibeCodingSessionsAt
+                    let nowChanged = vibeCodingChanged(
+                        codingSessions.payloadUpdatedAt, lastPostedVibeCodingNowAt
                     )
                     let manualModules = pendingManualReports
                     manualModulesForAttempt = manualModules
@@ -1200,18 +1179,15 @@ final class ServiceController: ObservableObject {
                     let musicToSend = manualMode
                         ? manualModules.contains(.appleMusic) && music != nil
                         : musicChanged
-                    // 手动上报按整个 vibe coding 模块走：信封只有一个，三份手上
+                    // 手动上报按整个 vibe coding 走：信封只有一个，两个模块手上
                     // 有什么就一起发什么。
                     let manualVibeCoding = manualModules.contains(.vibeCoding)
                     let usageToSend = manualMode
                         ? manualVibeCoding && vibeCodingUsageCollector.uploadPayload != nil
                         : usageChanged
-                    let limitsToSend = manualMode
-                        ? manualVibeCoding && agentLimits.uploadPayload != nil
-                        : limitsChanged
-                    let sessionsToSend = manualMode
+                    let nowToSend = manualMode
                         ? manualVibeCoding && codingSessions.uploadPayload != nil
-                        : sessionsChanged
+                        : nowChanged
                     let credentialsToSend: AppleMusicCredentialsPayload?
                     // 手动上报只发用户选中的模块；token 的自动变化留到下一轮。
                     if !manualMode,
@@ -1230,7 +1206,7 @@ final class ServiceController: ObservableObject {
                     let heartbeatDue = lastHeartbeatAt
                         .map { Date().timeIntervalSince($0) >= Self.heartbeatInterval } ?? true
                     let dataChanged = chargerToSend || desktopToSend || timezoneToSend ||
-                        musicToSend || usageToSend || limitsToSend || sessionsToSend ||
+                        musicToSend || usageToSend || nowToSend ||
                         credentialsToSend != nil
                     /**
                      * 只在没有数据要发的时候才补心跳 —— 有数据时那个包本身就证明
@@ -1317,15 +1293,18 @@ final class ServiceController: ObservableObject {
                         // 封面不再由这边送：网页那边为了拿曲目链接本来就要查一次
                         // Apple Music 目录，那次查询的结果自带封面 URL。
                         let musicPayload = music
+                        // 会话总数数在那边、归这边发，只能在这一刻补上
+                        let vibeCodingUsagePayload = vibeCodingUsageCollector.uploadPayload.map {
+                            VibeCodingUsagePayload.withSessionCount($0, codingSessions.sessionCount)
+                        }
                         let envelope = makeTelemetryEnvelope(
                             chargingDevices: chargerToSend ? charger : nil,
                             desktop: desktopToSend ? desktopPayload : nil,
                             timezone: timezoneToSend ? timezone : nil,
                             appleMusic: musicToSend ? musicPayload : nil,
                             appleMusicCredentials: credentialsToSend,
-                            vibeCodingUsage: usageToSend ? vibeCodingUsageCollector.uploadPayload : nil,
-                            vibeCodingLimits: limitsToSend ? agentLimits.uploadPayload : nil,
-                            vibeCodingSessions: sessionsToSend ? codingSessions.uploadPayload : nil,
+                            vibeCodingUsage: usageToSend ? vibeCodingUsagePayload : nil,
+                            vibeCodingNow: nowToSend ? codingSessions.uploadPayload : nil,
                             includeDesktop: desktopToSend,
                             includeAppleMusic: musicToSend
                         )
@@ -1404,11 +1383,10 @@ final class ServiceController: ObservableObject {
                             appleMusicCredentialsUploadAt = Date()
                             appleMusicCredentialsUploadError = nil
                         }
-                        if usageToSend { lastPostedVibeCodingUsageAt = vibeCodingUsageCollector.payloadUpdatedAt }
-                        if limitsToSend { lastPostedVibeCodingLimitsAt = agentLimits.payloadUpdatedAt }
-                        if sessionsToSend {
-                            lastPostedVibeCodingSessionsAt = codingSessions.payloadUpdatedAt
+                        if usageToSend {
+                            lastPostedVibeCodingUsageAt = vibeCodingUsageCollector.payloadUpdatedAt
                         }
+                        if nowToSend { lastPostedVibeCodingNowAt = codingSessions.payloadUpdatedAt }
                         if !manualModulesForAttempt.isEmpty {
                             pendingManualReports.subtract(manualModulesForAttempt)
                             let now = Date()
@@ -1567,9 +1545,12 @@ final class ServiceController: ObservableObject {
             timezone: settings.timezoneModuleEnabled ? timeZone.snapshot : nil,
             appleMusic: settings.appleMusicModuleEnabled ? appleMusic.snapshot : nil,
             appleMusicCredentials: credentialsPayload,
-            vibeCodingUsage: settings.codexBarModuleEnabled ? vibeCodingUsageCollector.uploadPayload : nil,
-            vibeCodingLimits: settings.codexBarModuleEnabled ? agentLimits.uploadPayload : nil,
-            vibeCodingSessions: settings.codexBarModuleEnabled ? codingSessions.uploadPayload : nil,
+            vibeCodingUsage: settings.codexBarModuleEnabled
+                ? vibeCodingUsageCollector.uploadPayload.map {
+                    VibeCodingUsagePayload.withSessionCount($0, codingSessions.sessionCount)
+                }
+                : nil,
+            vibeCodingNow: settings.codexBarModuleEnabled ? codingSessions.uploadPayload : nil,
             includeDesktop: settings.desktopModuleEnabled,
             includeAppleMusic: settings.appleMusicModuleEnabled
         )
@@ -1582,8 +1563,7 @@ final class ServiceController: ObservableObject {
         appleMusic: AppleMusicSnapshot?,
         appleMusicCredentials: AppleMusicCredentialsPayload?,
         vibeCodingUsage: JSONValue?,
-        vibeCodingLimits: JSONValue?,
-        vibeCodingSessions: JSONValue?,
+        vibeCodingNow: JSONValue?,
         includeDesktop: Bool,
         includeAppleMusic: Bool,
         presence: String = "online"
@@ -1598,8 +1578,7 @@ final class ServiceController: ObservableObject {
                 appleMusicCredentials: appleMusicCredentials,
                 timezone: timezone,
                 vibeCodingUsage: vibeCodingUsage,
-                vibeCodingLimits: vibeCodingLimits,
-                vibeCodingSessions: vibeCodingSessions,
+                vibeCodingNow: vibeCodingNow,
                 includeDesktop: includeDesktop,
                 includeAppleMusic: includeAppleMusic
             ),
@@ -1629,8 +1608,7 @@ final class ServiceController: ObservableObject {
                 appleMusic: nil,
                 appleMusicCredentials: nil,
                 vibeCodingUsage: nil,
-                vibeCodingLimits: nil,
-                vibeCodingSessions: nil,
+                vibeCodingNow: nil,
                 includeDesktop: false,
                 includeAppleMusic: false,
                 presence: presence
@@ -1717,16 +1695,18 @@ final class ServiceController: ObservableObject {
                 state: chargerLink.chargerStateForDisplay
             ))
         /**
-         * 采集侧各模块最近一次的失败原因。
+         * 采集侧最近一次的失败原因。
          *
-         * TokenTracker 里某个 provider 可能单独失败；采集器会保留该 provider
-         * 上一次的好值，并把本轮错误留在这里。没有这个端点就只能靠猜。
+         * 用量那个采集器有两半，各留各的错：用量挂了整轮不发，限额挂了只是那几根
+         * 条留着上次的值 —— 合成一条就分不出是哪种了。TokenTracker 里某个 provider
+         * 还可能单独失败，采集器会保留它上一次的好值并把本轮错误留在这里。
+         * 没有这个端点就只能靠猜。
          */
         case ("GET", "/debug/errors"):
             return encode([
-                "agentLimits": agentLimits.lastError,
                 "vibeCodingUsage": vibeCodingUsageCollector.lastError,
-                "vibeCodingSessions": codingSessions.lastError,
+                "vibeCodingUsageLimits": vibeCodingUsageCollector.limitsError,
+                "codingSessions": codingSessions.lastError,
                 "appleMusic": appleMusic.lastError,
                 "bluetooth": chargerLink.lastError,
                 "reporter": reporterLastError,
