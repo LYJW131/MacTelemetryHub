@@ -6,7 +6,7 @@ usage, rather than the identity of the whole application.
 
 ## What the app includes
 
-- independently switchable charger, foreground-app, Apple Music, Mac timezone, and CodexBar modules
+- independently switchable charger, foreground-app, Apple Music, Mac timezone, and coding-usage modules
 - CoreBluetooth discovery or a pinned peripheral UUID for the charger module
 - AES-GCM + ephemeral P-256 ECDH session handshake
 - account-scoped 40-character Anker user ID stored in Keychain
@@ -20,7 +20,7 @@ usage, rather than the identity of the whole application.
 - optional MusicKit library authorization and Apple Music token upload
 - foreground application reporting, limited to the app's name, bundle ID, and icon,
   with an exact Bundle ID blacklist for remote reporting
-- CodexBar aggregation that never uploads session IDs, project paths, prompts, or replies
+- coding-usage aggregation that never uploads session IDs, project paths, prompts, or replies
 - subscription plan tier and server-side rate-limit windows for Claude Code and Codex
 - login launch using `SMAppService.mainApp`
 
@@ -68,37 +68,39 @@ reporter is alive. `presence: "offline"` covers graceful exits (quit, sleep) and
 sent synchronously so it beats the disconnect; crashes, network loss, and forced
 shutdowns still rely on the site's "nothing received for a while" timeout. Both
 paths are needed; neither replaces the other.
-The POST body is deliberately bounded. The app discards CodexBar's project-level
-details after parsing and uploads only display-ready totals, seven daily points,
-365-day token totals, and 30 daily activity buckets. Token inspection stays in
-CodexBar's own GUI; Mac Telemetry Hub only shows the collector's health. That
-module is sent again only after CodexBar refreshes, while the smaller live
-modules are also sent only when their display content changes. Presence uses its
-own endpoint every 30 seconds so the site can detect an offline reporter without
-receiving duplicate charger, desktop, music, or CodexBar snapshots.
+The POST body is deliberately bounded. The app discards TokenTracker's
+project-level details after parsing and uploads only display-ready totals, seven
+daily points, 365-day token totals, and 30 daily activity buckets. Token
+inspection stays in TokenTracker's own panel; Mac Telemetry Hub only shows the
+collector's health. That module is sent again only after the collectors refresh,
+while the smaller live modules are also sent only when their display content
+changes. Presence uses its own endpoint every 30 seconds so the site can detect
+an offline reporter without receiving duplicate charger, desktop, music, or
+coding-usage snapshots.
 
 ## Plan tier and rate-limit windows
 
-Token、费用和限额来自 CodexBar；ccusage 只离线读取最近会话时间与模型，用来判断
-Claude Code / Codex 是否正在使用，不上传 session ID、项目路径、提示词或回复：
+Token、费用、限额和会话都来自本机跑着的 TokenTracker 面板，走它 SPA 用的那套
+`/functions/<名字>` 接口。不上传 session ID、项目路径、提示词或回复：
 
-- `cost --provider both --provider-native-only --days 365 --format json --refresh`
-  reads Claude and Codex local logs in one process and supplies token/cost history.
-- `usage --provider both --source auto --no-credits --format json` reads Claude
-  and Codex plan tiers and server-side quota windows.
-- One concurrent `usage` call per supplemental provider (see
-  `supplementalQuotaProviders` in `TelemetryModules.swift` — currently `cursor`,
-  `grok`, and `antigravity`), each reading a single total quota percentage.
-  Each one uploads its display name and icon key alongside that percentage, so
-  the site renders however many are configured here rather than keeping its own
-  list. They never add token/cost/model detail to the upload payload.
-- `ccusage claude session --json --offline` and
-  `ccusage codex session --json --offline` provide the lightweight live status.
+- `tokentracker-usage-daily` 给出哪几天有数据，再对每个有数据的日子问一次
+  `tokentracker-usage-model-breakdown`，合成 token/费用历史与模型排行。
+- `tokentracker-usage-limits` 一次带回所有来源的套餐档位和服务端限额窗口，
+  包括补充来源（见 `TelemetryModules.swift` 里的 `supplementalQuotaProviders`，
+  当前是 `cursor`、`grok`、`antigravity`），每家只取一个总额百分比。每家连同
+  自己的显示名和图标 key 一起上报，站点按这里配了几家就渲染几家，自己不留名单。
+  补充来源不会往载荷里加 token / 费用 / 模型明细。
+- `tokentracker-sessions` 给出轻量的在用状态：只留模型名、最后活动时刻和条数。
 
-The app keeps the existing `vibe_coding` payload shape by merging those two
-results into each agent's `plan` object and `limits` array. Window counts and
-durations are taken from CodexBar's response rather than assumed. Session status
-refreshes every 60 seconds; CodexBar cost and quota data refresh every 10 minutes.
+从前这四份是 CodexBar CLI 两条命令加 ccusage 两条、一共四次进程，光那条
+`cost --refresh` 就要十几秒；现在是同一个本机 HTTP 服务的几个 GET。代价是它
+得开着 —— 面板没跑的时候三份各自留下自己的错误，互不牵连。
+
+上报的 `vibe_coding` 载荷形状没变。限额那份还带 `limitsObservedAt`：上游观测到
+这几个数的时刻，不是我们取到它的时刻。两者可以差很远（上游拿不到实时额度时会
+退回自己的磁盘缓存），站点据此把旧值标出来，否则一根旧条会安静地冒充当前值。
+窗口的个数和长度取自上游的回答，不作假设。会话状态每 60 秒刷一次；用量和限额
+每 10 分钟刷一次。
 
 `position_ms` in the music module is an anchor, not a stream. Paired with
 `observed_at` and `state` it lets the site interpolate the playhead on its own,
@@ -110,7 +112,7 @@ post interval.
 Play/pause transitions, track changes, and foreground-application switches skip
 the throttle window entirely: they wake the reporter loop the moment they happen
 and upload at once, then reset the window so the next scheduled post is a full
-interval away. Everything else — seeks, charger readings, CodexBar — waits for
+interval away. Everything else — seeks, charger readings, coding usage — waits for
 that window, and rides along in whichever envelope goes out first. While a post
 is failing, the urgent path is suspended until the backoff expires.
 
@@ -133,7 +135,7 @@ An activation reschedules a 400 ms settle timer, so a burst of Cmd-Tab switches
 uploads only the application it lands on — the ones passed through never outlive
 the window. Playback needs no such timer; the confirmation read already absorbs
 the race. The loop's own five-second tick is left to the parts with no event
-source of their own: the 30 second heartbeat and the CodexBar interval check.
+source of their own: the 30 second heartbeat and the coding-usage interval check.
 
 The charger wakes it too, but selectively. Its stream arrives at ~1 Hz (below),
 and waking on every frame would turn a five-second loop into a one-second one
@@ -194,11 +196,10 @@ The app also exposes local debugging snapshots at `GET /activity` and
   permission, obtains a Music User Token and a MusicKit-generated developer
   token, and sends them only to the dedicated credentials endpoint described
   below.
-- Coding usage requires CodexBar and its App-bundled CLI. Use
-  `/Applications/CodexBar.app/Contents/Helpers/CodexBarCLI`; the app resolves a
-  Homebrew symlink to this real path when settings are saved so the CLI can use
-  CodexBar GUI's Keychain cookie cache. The minimum local-cost refresh interval
-  is 60 seconds.
+- Coding usage requires the TokenTracker app running its local panel. Point the
+  设置 at its root address — `http://127.0.0.1:7680` by default — and the three
+  collectors read from there. The minimum local-cost refresh interval is 60
+  seconds.
 
 ## Open and run in Xcode
 

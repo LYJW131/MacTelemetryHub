@@ -41,7 +41,7 @@ struct DashboardView: View {
     @ObservedObject private var httpServer: LocalHTTPServer
     @ObservedObject private var desktopActivity: DesktopActivityMonitor
     @ObservedObject private var appleMusic: AppleMusicMonitor
-    @ObservedObject private var codexBarCost: CodexBarCostMonitor
+    @ObservedObject private var vibeCodingUsageCollector: VibeCodingUsageMonitor
     // 三张卡各看一个采集器，三个都得单独订阅：ServiceController 是 ObservableObject，
     // 但它内部这几个 monitor 的 @Published 不会冒泡上来。从前会话状态那行的错误
     // 就是这么挂在 service 下面读的，只有别的东西触发重绘时才会跟着变。
@@ -57,7 +57,7 @@ struct DashboardView: View {
         httpServer = service.httpServer
         desktopActivity = service.desktopActivity
         appleMusic = service.appleMusic
-        codexBarCost = service.codexBarCost
+        vibeCodingUsageCollector = service.vibeCodingUsageCollector
         agentLimits = service.agentLimits
         codingSessions = service.codingSessions
     }
@@ -513,7 +513,7 @@ struct DashboardView: View {
                     ?? codingSessions.lastSuccess?.formatted(date: .omitted, time: .standard),
                 action: { Task { await service.refreshVibeCodingSessionsNow() } },
                 actionIcon: "arrow.clockwise",
-                actionHelp: "重新扫描 ccusage 会话状态并上报",
+                actionHelp: "重新读取 TokenTracker 会话状态并上报",
                 actionEnabled: service.settings.codexBarModuleEnabled,
                 isReporting: service.isRefreshingVibeCodingSessions
                     || service.isManualReportInFlight(.vibeCoding),
@@ -526,12 +526,12 @@ struct DashboardView: View {
                 title: "Token / 费用",
                 icon: "chart.bar",
                 enabled: service.settings.codexBarModuleEnabled,
-                value: codexBarCost.lastSuccess == nil ? "等待统计" : "聚合完成",
-                detail: codexBarCost.lastError
-                    ?? codexBarCost.lastSuccess?.formatted(date: .omitted, time: .standard),
+                value: vibeCodingUsageCollector.lastSuccess == nil ? "等待统计" : "聚合完成",
+                detail: vibeCodingUsageCollector.lastError
+                    ?? vibeCodingUsageCollector.lastSuccess?.formatted(date: .omitted, time: .standard),
                 action: { Task { await service.refreshVibeCodingUsageNow() } },
                 actionIcon: "arrow.clockwise",
-                actionHelp: "重新统计 CodexBar 用量与费用并上报",
+                actionHelp: "重新读取 TokenTracker 用量与费用并上报",
                 actionEnabled: service.settings.codexBarModuleEnabled,
                 isReporting: service.isRefreshingVibeCodingUsage
                     || service.isManualReportInFlight(.vibeCoding),
@@ -549,7 +549,7 @@ struct DashboardView: View {
                     ?? agentLimits.lastSuccess?.formatted(date: .omitted, time: .standard),
                 action: { Task { await service.refreshVibeCodingLimitsNow() } },
                 actionIcon: "arrow.clockwise",
-                actionHelp: "重新读取 CodexBar 限额并上报",
+                actionHelp: "重新读取 TokenTracker 限额并上报",
                 actionEnabled: service.settings.codexBarModuleEnabled,
                 isReporting: service.isRefreshingVibeCodingLimits
                     || service.isManualReportInFlight(.vibeCoding),

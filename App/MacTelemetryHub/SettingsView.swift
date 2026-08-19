@@ -345,23 +345,17 @@ struct SettingsView: View {
                     .toggleStyle(.switch)
             }
 
-            settingSection("Vibe Coding 用量", detail: "CodexBar 聚合 Token、费用和限额；ccusage 只读取最近会话时间与模型，用来判断是否正在使用。不会上传 session ID、项目路径、提示词或回复。", icon: "terminal") {
-                Toggle("启用 CodexBar", isOn: $settings.codexBarModuleEnabled)
+            settingSection("Vibe Coding 用量", detail: "TokenTracker 聚合 Token、费用、限额和会话状态，全部走它本机的面板接口。不会上传 session ID、项目路径、提示词或回复。", icon: "terminal") {
+                Toggle("启用 TokenTracker", isOn: $settings.codexBarModuleEnabled)
                     .toggleStyle(.switch)
 
                 if settings.codexBarModuleEnabled {
                     VStack(alignment: .leading, spacing: 12) {
-                        pathField(
-                            title: "CodexBar CLI",
-                            detail: "必须使用 App 内置真实路径；保存时会自动解析 Homebrew 符号链接",
-                            text: $settings.codexBarCLIPath,
-                            placeholder: "/Applications/CodexBar.app/Contents/Helpers/CodexBarCLI"
-                        )
-                        pathField(
-                            title: "ccusage CLI",
-                            detail: "仅扫描 Claude/Codex session 的最近活动，不参与 Token、费用或限额",
-                            text: $settings.ccusageCLIPath,
-                            placeholder: "~/.hermes/node/bin/ccusage"
+                        monoField(
+                            title: "TokenTracker 地址",
+                            detail: "它的本地面板地址；面板没开着时三份数据都取不到",
+                            text: $settings.tokenTrackerBaseURL,
+                            placeholder: "http://127.0.0.1:7680"
                         )
                         NumericField(title: "会话状态刷新", unit: "秒（最少 60）", placeholder: "60", value: $settings.codingSessionRefreshInterval)
                         NumericField(title: "Token / 费用刷新", unit: "秒（最少 60）", placeholder: "600", value: $settings.codexBarCostRefreshInterval)
@@ -752,7 +746,7 @@ struct SettingsView: View {
         }
     }
 
-    private func pathField(title: String, detail: String, text: Binding<String>, placeholder: String) -> some View {
+    private func monoField(title: String, detail: String, text: Binding<String>, placeholder: String) -> some View {
         VStack(alignment: .leading, spacing: 6) {
             fieldTitle(title, detail: detail)
             TextField(placeholder, text: text)

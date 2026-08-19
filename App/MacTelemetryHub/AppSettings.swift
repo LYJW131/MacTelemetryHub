@@ -24,8 +24,7 @@ final class AppSettings: ObservableObject {
         static let appleMusicModuleEnabled = "appleMusicModuleEnabled"
         static let timezoneModuleEnabled = "timezoneModuleEnabled"
         static let codexBarModuleEnabled = "codexBarModuleEnabled"
-        static let codexBarCLIPath = "codexBarCLIPath"
-        static let ccusageCLIPath = "ccusageCLIPath"
+        static let tokenTrackerBaseURL = "tokenTrackerBaseURL"
         static let codingSessionRefreshInterval = "codingSessionRefreshInterval"
         static let codexBarCostRefreshInterval = "codexBarCostRefreshInterval"
         static let agentLimitsRefreshInterval = "agentLimitsRefreshInterval"
@@ -64,8 +63,8 @@ final class AppSettings: ObservableObject {
     @Published var appleMusicModuleEnabled: Bool
     @Published var timezoneModuleEnabled: Bool
     @Published var codexBarModuleEnabled: Bool
-    @Published var codexBarCLIPath: String
-    @Published var ccusageCLIPath: String
+    /// TokenTracker 本地面板的根地址。用量、限额、会话三份都从它下面取。
+    @Published var tokenTrackerBaseURL: String
     @Published var codingSessionRefreshInterval: Double
     @Published var codexBarCostRefreshInterval: Double
     @Published var agentLimitsRefreshInterval: Double
@@ -132,24 +131,12 @@ final class AppSettings: ObservableObject {
         appleMusicModuleEnabled = defaults.object(forKey: Key.appleMusicModuleEnabled) as? Bool ?? true
         timezoneModuleEnabled = defaults.object(forKey: Key.timezoneModuleEnabled) as? Bool ?? true
         codexBarModuleEnabled = defaults.object(forKey: Key.codexBarModuleEnabled) as? Bool ?? false
-        codexBarCLIPath = defaults.string(forKey: Key.codexBarCLIPath)
-            ?? environment["CODEXBAR_CLI_PATH"]
-            ?? Self.firstExistingPath([
-                "/Applications/CodexBar.app/Contents/Helpers/CodexBarCLI",
-            ])
-            ?? ""
-        let storedCcusagePath = defaults.string(forKey: Key.ccusageCLIPath) ?? ""
-        ccusageCLIPath = storedCcusagePath.hasPrefix("/") &&
-            FileManager.default.isExecutableFile(atPath: storedCcusagePath)
-            ? storedCcusagePath
-            : environment["CCUSAGE_CLI_PATH"]
-                ?? Self.firstExistingPath([
-                    "/Users/\(NSUserName())/.hermes/node/bin/ccusage",
-                    "/Users/\(NSUserName())/.local/bin/ccusage",
-                    "/opt/homebrew/bin/ccusage",
-                    "/usr/local/bin/ccusage",
-                ])
-                ?? ""
+        // 端口是 TokenTracker 面板的默认端口；它没跑的时候三份都取不到，
+        // 各自留下自己的错误，不互相牵连
+        let storedBaseURL = defaults.string(forKey: Key.tokenTrackerBaseURL) ?? ""
+        tokenTrackerBaseURL = storedBaseURL.isEmpty
+            ? environment["TOKENTRACKER_BASE_URL"] ?? "http://127.0.0.1:7680"
+            : storedBaseURL
         let storedSessionInterval = defaults.double(forKey: Key.codingSessionRefreshInterval)
         codingSessionRefreshInterval = storedSessionInterval == 0 ? 60 : storedSessionInterval
         let storedCostInterval = defaults.double(forKey: Key.codexBarCostRefreshInterval)
@@ -264,11 +251,11 @@ final class AppSettings: ObservableObject {
             }
         }
         if codexBarModuleEnabled {
-            guard FileManager.default.isExecutableFile(atPath: codexBarCLIPath) else {
-                throw SettingsError.invalidCodexBarPath
-            }
-            guard FileManager.default.isExecutableFile(atPath: ccusageCLIPath) else {
-                throw SettingsError.invalidCcusagePath
+            guard let url = URL(string: tokenTrackerBaseURL),
+                  ["http", "https"].contains(url.scheme?.lowercased() ?? ""),
+                  url.host != nil
+            else {
+                throw SettingsError.invalidTokenTrackerURL
             }
             guard codingSessionRefreshInterval >= 60 else {
                 throw SettingsError.invalidCodingSessionInterval
@@ -296,10 +283,10 @@ final class AppSettings: ObservableObject {
         powerBankPeripheralID = powerBankPeripheralID.trimmingCharacters(in: .whitespacesAndNewlines)
         postURL = postURL.trimmingCharacters(in: .whitespacesAndNewlines)
         telemetrySecret = telemetrySecret.trimmingCharacters(in: .whitespacesAndNewlines)
-        codexBarCLIPath = URL(
-            fileURLWithPath: (codexBarCLIPath as NSString).expandingTildeInPath
-        ).resolvingSymlinksInPath().path
-        ccusageCLIPath = (ccusageCLIPath as NSString).expandingTildeInPath
+        // 末尾斜杠去掉，拼路径时才不会出现 //functions/…
+        tokenTrackerBaseURL = tokenTrackerBaseURL
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .replacingOccurrences(of: "/+$", with: "", options: .regularExpression)
         r2Endpoint = r2Endpoint.trimmingCharacters(in: .whitespacesAndNewlines)
         r2Bucket = r2Bucket.trimmingCharacters(in: .whitespacesAndNewlines)
         desktopReportingBlacklist = normalizedDesktopReportingBlacklist.normalizedRawValue
@@ -327,8 +314,7 @@ final class AppSettings: ObservableObject {
         defaults.set(appleMusicModuleEnabled, forKey: Key.appleMusicModuleEnabled)
         defaults.set(timezoneModuleEnabled, forKey: Key.timezoneModuleEnabled)
         defaults.set(codexBarModuleEnabled, forKey: Key.codexBarModuleEnabled)
-        defaults.set(codexBarCLIPath, forKey: Key.codexBarCLIPath)
-        defaults.set(ccusageCLIPath, forKey: Key.ccusageCLIPath)
+        defaults.set(tokenTrackerBaseURL, forKey: Key.tokenTrackerBaseURL)
         defaults.set(codingSessionRefreshInterval, forKey: Key.codingSessionRefreshInterval)
         defaults.set(codexBarCostRefreshInterval, forKey: Key.codexBarCostRefreshInterval)
         defaults.set(agentLimitsRefreshInterval, forKey: Key.agentLimitsRefreshInterval)
@@ -355,15 +341,11 @@ final class AppSettings: ObservableObject {
         }
         launchAtLoginEnabled = SMAppService.mainApp.status == .enabled
     }
-
-    private static func firstExistingPath(_ candidates: [String]) -> String? {
-        candidates.first { FileManager.default.isExecutableFile(atPath: $0) }
-    }
 }
 
 enum SettingsError: LocalizedError {
     case invalidUserID, invalidPeripheralID, invalidPort, invalidTiming, invalidPostURL
-    case invalidCodexBarPath, invalidCcusagePath, invalidCodingSessionInterval
+    case invalidTokenTrackerURL, invalidCodingSessionInterval
     case invalidCodexBarCostInterval, invalidAgentLimitsInterval
     case invalidR2Configuration
 
@@ -374,8 +356,7 @@ enum SettingsError: LocalizedError {
         case .invalidPort: "HTTP 端口必须在 1 到 65535 之间。"
         case .invalidTiming: "POST 间隔和超时必须大于 0。"
         case .invalidPostURL: "POST 地址必须是完整的 http:// 或 https:// URL。"
-        case .invalidCodexBarPath: "启用 Vibe Coding 用量时，CodexBar CLI 路径必须指向可执行文件。"
-        case .invalidCcusagePath: "启用 Vibe Coding 状态时，ccusage CLI 路径必须指向可执行文件。"
+        case .invalidTokenTrackerURL: "启用 Vibe Coding 用量时，TokenTracker 地址必须是完整的 http:// 或 https:// URL。"
         case .invalidCodingSessionInterval: "会话状态刷新间隔不能低于 60 秒。"
         case .invalidCodexBarCostInterval: "本地用量刷新间隔不能低于 60 秒。"
         case .invalidAgentLimitsInterval: "限额刷新间隔不能低于 60 秒。"

@@ -35,6 +35,67 @@ enum JSONValue: Codable, Equatable, Sendable {
     }
 }
 
+/**
+ * TokenTracker 本机面板的接口。
+ *
+ * 用量、限额、会话三份都从这里取。从前是 CodexBar CLI 两条命令加 ccusage 两条、
+ * 一共四次进程；现在是同一个本机 HTTP 服务的几个 GET，快了两个数量级。代价是
+ * 它得开着 —— 面板没跑的时候三份各自留下自己的错误，互不牵连。
+ *
+ * 走的是它面板 SPA 用的那套 `functions` 接口，不是它文档里承诺的 CLI：形状
+ * 随版本变的风险更大，坏掉的表现是某一块数据变空而不是报错。
+ */
+private enum TokenTrackerAPI {
+    /// 它按时区切「天」，不给就按 UTC 切 —— 东八区会把今天错开八小时
+    private static let timeZone = TimeZone.current.identifier
+
+    nonisolated static func get(
+        baseURL: String,
+        function: String,
+        query: [String: String] = [:]
+    ) async throws -> Any {
+        guard var components = URLComponents(string: "\(baseURL)/functions/\(function)") else {
+            throw TelemetryModuleError.tokenTracker("地址不合法：\(baseURL)")
+        }
+        components.queryItems = query.map { URLQueryItem(name: $0.key, value: $0.value) }
+            + [URLQueryItem(name: "tz", value: timeZone)]
+        guard let url = components.url else {
+            throw TelemetryModuleError.tokenTracker("地址不合法：\(baseURL)")
+        }
+        var request = URLRequest(url: url)
+        request.timeoutInterval = 20
+        let (data, response) = try await URLSession.shared.data(for: request)
+        guard let http = response as? HTTPURLResponse, http.statusCode == 200 else {
+            let code = (response as? HTTPURLResponse)?.statusCode ?? 0
+            throw TelemetryModuleError.tokenTracker("\(function)：HTTP \(code)")
+        }
+        guard let json = try? JSONSerialization.jsonObject(with: data) else {
+            throw TelemetryModuleError.tokenTracker("\(function)：输出不是有效 JSON")
+        }
+        return json
+    }
+
+    /// `total_cost_usd` 在按天那份里是数字、按来源那份里是字符串，两种都要收
+    nonisolated static func number(_ value: Any?) -> Double {
+        if let number = value as? NSNumber { return number.doubleValue }
+        if let text = value as? String { return Double(text) ?? 0 }
+        return 0
+    }
+
+    /// 重置时刻：Codex 给 epoch 秒，其余几家给 ISO8601（带小数秒）
+    nonisolated static func unixSeconds(_ value: Any?) -> Int64? {
+        if let number = value as? NSNumber, number.doubleValue > 0 {
+            return Int64(number.doubleValue)
+        }
+        guard let text = (value as? String)?.nilIfEmpty else { return nil }
+        let fractional = ISO8601DateFormatter()
+        fractional.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        let standard = ISO8601DateFormatter()
+        guard let date = fractional.date(from: text) ?? standard.date(from: text) else { return nil }
+        return Int64(date.timeIntervalSince1970)
+    }
+}
+
 struct CodingSessionSnapshot: Codable, Equatable, Sendable {
     let currentModel: String?
     let lastActivityAt: String?
@@ -45,6 +106,8 @@ struct CodingSessionSnapshot: Codable, Equatable, Sendable {
 @MainActor
 final class CodingSessionMonitor: ObservableObject {
     @Published private(set) var snapshots: [String: CodingSessionSnapshot] = [:]
+    /// 所有来源的会话总数，和头部那一栏是同一个口径
+    @Published private(set) var sessionCount = 0
     /// `vibeCodingSessions` 模块的载荷。刻意不带采集时刻：内容没变就不该重发，
     /// 而 60 秒一轮的扫描里绝大多数轮次什么都没变。
     @Published private(set) var uploadPayload: JSONValue?
@@ -61,6 +124,7 @@ final class CodingSessionMonitor: ObservableObject {
 
     func stop() {
         snapshots = [:]
+        sessionCount = 0
         uploadPayload = nil
         payloadUpdatedAt = nil
         lastSuccess = nil
@@ -69,27 +133,27 @@ final class CodingSessionMonitor: ObservableObject {
         lastAttempt = nil
     }
 
-    func refreshIfNeeded(cliPath: String, interval: Double) async {
+    func refreshIfNeeded(baseURL: String, interval: Double) async {
         guard !refreshing else { return }
         if let lastAttempt, Date().timeIntervalSince(lastAttempt) < interval { return }
-        await refreshNow(cliPath: cliPath)
+        await refreshNow(baseURL: baseURL)
     }
 
-    func refreshNow(cliPath: String) async {
+    func refreshNow(baseURL: String) async {
         guard !refreshing else { return }
         refreshing = true
         lastAttempt = Date()
         defer { refreshing = false }
 
-        let outcome = await Task.detached(priority: .utility) {
-            CodingSessionCollector.collect(cliPath: cliPath)
-        }.value
+        let outcome = await CodingSessionCollector.collect(baseURL: baseURL)
         var fresh = outcome.snapshots
         for agent in ["claude", "codex"] where fresh[agent] == nil {
             if let previous = snapshots[agent] { fresh[agent] = previous }
         }
         snapshots = fresh
-        let payload = fresh.isEmpty ? nil : Self.makeUploadPayload(fresh)
+        // 整轮失败时会话总数留着上一次的，理由同上面那几份快照
+        if outcome.sessionCount > 0 { sessionCount = outcome.sessionCount }
+        let payload = fresh.isEmpty ? nil : Self.makeUploadPayload(fresh, sessionCount: sessionCount)
         if uploadPayload != payload {
             uploadPayload = payload
             payloadUpdatedAt = Date()
@@ -100,7 +164,10 @@ final class CodingSessionMonitor: ObservableObject {
     }
 
     /// 站点按 `id` 把这几个字段并回用量模块的 agent 上，所以除了 id 只发状态本身。
-    private static func makeUploadPayload(_ snapshots: [String: CodingSessionSnapshot]) -> JSONValue {
+    private static func makeUploadPayload(
+        _ snapshots: [String: CodingSessionSnapshot],
+        sessionCount: Int
+    ) -> JSONValue {
         let agents = ["claude", "codex"].compactMap { id -> JSONValue? in
             guard let snapshot = snapshots[id] else { return nil }
             return .object([
@@ -112,110 +179,92 @@ final class CodingSessionMonitor: ObservableObject {
         }
         return .object([
             "agents": .array(agents),
-            "sessionCount": .number(
-                Double(snapshots.values.reduce(0) { $0 + $1.sessionCount })
-            ),
+            "sessionCount": .number(Double(sessionCount)),
         ])
     }
 }
 
 private struct CodingSessionOutcome: Sendable {
     let snapshots: [String: CodingSessionSnapshot]
+    /// 所有来源的会话总数。跟头部那一栏的口径一致 —— 它数的是「一共开过多少次」，
+    /// 不是下面两块面板各自的那部分。Grok 也在里面，Cursor 没有会话记录。
+    let sessionCount: Int
     let errors: [String]
 }
 
 private enum CodingSessionCollector {
     /// 和页面「正在使用」的窗口保持一致。60 秒扫描一次，五分钟内有会话活动就点亮。
     private static let activeWindow: TimeInterval = 5 * 60
+    private static let agents = ["claude", "codex"]
 
-    nonisolated static func collect(cliPath: String) -> CodingSessionOutcome {
-        guard FileManager.default.isExecutableFile(atPath: cliPath) else {
-            return CodingSessionOutcome(snapshots: [:], errors: ["ccusage CLI 路径不可执行：\(cliPath)"])
-        }
-        var snapshots: [String: CodingSessionSnapshot] = [:]
-        var errors: [String] = []
-        for agent in ["claude", "codex"] {
-            do {
-                let data = try run(cliPath, [agent, "session", "--json", "--offline"])
-                guard let report = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
-                    throw TelemetryModuleError.ccusage("\(agent) session 输出不是有效 JSON")
-                }
-                let sessions = report["sessions"] as? [[String: Any]] ?? []
-                let ordered = sessions.sorted {
-                    ($0["lastActivity"] as? String ?? "") > ($1["lastActivity"] as? String ?? "")
+    /**
+     * 会话状态：此刻在用哪个模型、活没活着、历史会话数。
+     *
+     * 用不带 `refresh` 的那一版 —— 强制重扫要十秒多，而这条循环是 60 秒一轮。
+     * 不强制也拿得到刚结束的会话，它自己按文件改动增量更新。
+     *
+     * 响应里带着项目路径和可续接的 session id，这里一个都不往外发：只留下
+     * 模型名、最后活动时刻和条数。
+     */
+    nonisolated static func collect(baseURL: String) async -> CodingSessionOutcome {
+        do {
+            let root = try await TokenTrackerAPI.get(
+                baseURL: baseURL,
+                function: "tokentracker-sessions",
+                query: ["limit": "0"]
+            )
+            guard let object = root as? [String: Any],
+                  let rows = object["sessions"] as? [[String: Any]]
+            else {
+                throw TelemetryModuleError.tokenTracker("sessions 响应缺少 sessions")
+            }
+            let now = Date()
+            var snapshots: [String: CodingSessionSnapshot] = [:]
+            for agent in agents {
+                let mine = rows.filter { ($0["source"] as? String) == agent }
+                let ordered = mine.sorted {
+                    (endedAt($0) ?? .distantPast) > (endedAt($1) ?? .distantPast)
                 }
                 let latest = ordered.first
-                let lastActivity = (latest?["lastActivity"] as? String)?.nilIfEmpty
-                let date = sessionDate(lastActivity)
-                let age = date.map { Date().timeIntervalSince($0) }
-                // 最新 session 可能尚未写入模型，或只有自动 review；模型向下找，
-                // 但活动时间仍严格使用最新 session，不能把旧会话误报成正在使用。
+                let age = latest.flatMap(endedAt).map { now.timeIntervalSince($0) }
+                // 最新那条可能是自动 review，它用的模型不是使用者选的；模型向下找，
+                // 但活动时间仍严格取最新那条，不能把旧会话说成正在使用。
                 let model = ordered.lazy.compactMap(currentModel).first
                 snapshots[agent] = CodingSessionSnapshot(
                     currentModel: model,
-                    lastActivityAt: lastActivity,
+                    lastActivityAt: latest?["ended_at"] as? String,
                     active: age.map { $0 >= 0 && $0 <= activeWindow } ?? false,
-                    sessionCount: sessions.count
+                    sessionCount: mine.count
                 )
-            } catch {
-                errors.append("ccusage \(agent) session：\(error.localizedDescription)")
             }
+            return CodingSessionOutcome(
+                snapshots: snapshots,
+                sessionCount: rows.count,
+                errors: []
+            )
+        } catch {
+            return CodingSessionOutcome(
+                snapshots: [:],
+                sessionCount: 0,
+                errors: ["TokenTracker 会话：\(error.localizedDescription)"]
+            )
         }
-        return CodingSessionOutcome(snapshots: snapshots, errors: errors)
-    }
-
-    nonisolated private static func run(_ executable: String, _ arguments: [String]) throws -> Data {
-        let process = Process()
-        let output = Pipe()
-        process.executableURL = URL(fileURLWithPath: executable)
-        process.arguments = arguments
-        process.standardOutput = output
-        process.standardError = FileHandle.nullDevice
-        var environment = ProcessInfo.processInfo.environment
-        let bin = URL(fileURLWithPath: executable).deletingLastPathComponent().path
-        environment["PATH"] = "\(bin):\(environment["PATH"] ?? "/usr/bin:/bin:/usr/sbin:/sbin")"
-        process.environment = environment
-        try process.run()
-        let data = output.fileHandleForReading.readDataToEndOfFile()
-        process.waitUntilExit()
-        guard process.terminationStatus == 0 else {
-            throw TelemetryModuleError.ccusage("退出码 \(process.terminationStatus)")
-        }
-        return data
     }
 
     nonisolated private static func currentModel(_ session: [String: Any]) -> String? {
-        if let models = session["models"] as? [String: [String: Any]] {
-            return models
-                .filter { !isHiddenModel($0.key, $0.value) }
-                .max { tokenCount($0.value) < tokenCount($1.value) }?.key
+        guard let name = (session["model"] as? String)?.nilIfEmpty, !isHiddenModel(name) else {
+            return nil
         }
-        if let rows = session["modelBreakdowns"] as? [[String: Any]] {
-            return rows
-                .filter { row in
-                    guard let name = row["modelName"] as? String else { return false }
-                    return !isHiddenModel(name, row)
-                }
-                .max { tokenCount($0) < tokenCount($1) }?["modelName"] as? String
-        }
-        return (session["modelsUsed"] as? [String])?
-            .last { $0 != "codex-auto-review" }
+        return name
     }
 
-    nonisolated private static func isHiddenModel(_ name: String, _ row: [String: Any]) -> Bool {
-        name == "codex-auto-review" || row["isFallback"] as? Bool == true
+    /// 自动 review 是独立会话，它用的模型对使用者没有意义；模型没记下来的记成 unknown
+    nonisolated private static func isHiddenModel(_ name: String) -> Bool {
+        name == "codex-auto-review" || name == "unknown"
     }
 
-    nonisolated private static func tokenCount(_ row: [String: Any]) -> Double {
-        if let total = row["totalTokens"] as? NSNumber, total.doubleValue > 0 {
-            return total.doubleValue
-        }
-        return ["inputTokens", "outputTokens", "cacheReadTokens", "cacheCreationTokens"]
-            .reduce(0) { $0 + ((row[$1] as? NSNumber)?.doubleValue ?? 0) }
-    }
-
-    nonisolated private static func sessionDate(_ value: String?) -> Date? {
-        guard let value else { return nil }
+    nonisolated private static func endedAt(_ session: [String: Any]) -> Date? {
+        guard let value = (session["ended_at"] as? String)?.nilIfEmpty else { return nil }
         let fractional = ISO8601DateFormatter()
         fractional.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
         return fractional.date(from: value) ?? ISO8601DateFormatter().date(from: value)
@@ -295,8 +344,8 @@ struct TelemetryModulesPayload: Encodable, Sendable {
      * 扫描，会话状态变了得靠一个手写的 JSON 补丁器去改冻结的载荷，而扫描一旦
      * 失败，刚取到的限额连发都发不出去。
      *
-     * 注意名字和 CodexBar 子命令是**交叉**的：`codexbar cost` 出的是 usage，
-     * `codexbar usage` 出的是 limits。按数据是什么命名，不按产生它的命令命名。
+     * 名字按数据是什么起，不按它从哪个接口来 —— 三份如今都来自 TokenTracker
+     * 的面板接口，换个来源不该牵动这三个模块名。
      */
     let vibeCodingUsage: JSONValue?
     let vibeCodingLimits: JSONValue?
@@ -1035,12 +1084,18 @@ struct AgentLimitWindow: Codable, Equatable, Sendable {
 }
 
 struct AgentPlanSnapshot: Codable, Equatable, Sendable {
-    /// 后端原始值，如 "prolite" / "default_claude_max_5x"
-    let tier: String
-    /// 展示名，如 "Pro Lite" / "Max 5x"
-    let label: String
+    /// 后端原始值，如 "prolite" / "Max"。上游不报套餐时为 nil，页面上那一格不渲染
+    let tier: String?
+    /// 展示名，如 "Pro Lite"。tier 为 nil 时同样为 nil
+    let label: String?
     let limits: [AgentLimitWindow]
-    /// 毫秒
+    /**
+     * 这几个数**在上游被观测到**的时刻，epoch 毫秒。不是我们取到它的时刻 ——
+     * 两者可以差很远：TokenTracker 拿不到 Claude 的实时额度时会从磁盘缓存读，
+     * 那份可能是几十分钟前的，而它自己把这件事标在 provenance 里。
+     *
+     * 站点据此在那几行上标「N 分钟前」，否则一根旧条会安静地冒充当前值。
+     */
     let observedAt: Int64
 
     /// 除采集时刻外是否完全一致。observedAt 每次采集都会变，直接用 == 判断
@@ -1050,9 +1105,9 @@ struct AgentPlanSnapshot: Codable, Equatable, Sendable {
     }
 }
 
-/// CodexBar exposes the provider's raw login method. Preserve the display labels
-/// used before the collector migration so changing sources does not leak enum IDs
-/// into the website.
+/// Providers report raw plan enums ("prolite"). Preserve the display labels used
+/// before the collector migrations so changing sources does not leak enum IDs into
+/// the website.
 func agentPlanLabel(agent: String, tier: String) -> String {
     switch agent {
     case "codex":
@@ -1089,22 +1144,21 @@ func agentPlanLabel(agent: String, tier: String) -> String {
 /**
  * 网页上只占一行「总限额」的附加 provider。
  *
- * 加一个 provider 只动这个数组。从前同样三个名字要在四处各写一遍 —— 跑 CodexBar
- * 的任务清单、保留旧快照的名单、挑窗口的 switch、上传载荷 —— 漏掉哪一处的表现都
- * 不一样，而且四处都不会报错。
+ * 加一个 provider 只动这个数组：保留旧快照的名单、挑窗口的规则、上传载荷都从它
+ * 来。从前这几处各写一遍名字，漏掉哪一处的表现都不一样，而且都不会报错。
  *
  * 展示名和图标跟着载荷一起发给站点：那边没有名单，这边配几个页面上就是几行。
  */
 private struct SupplementalQuotaProvider {
-    /// CodexBar `--provider` 的实参，也是站点那一行的稳定 key
+    /// TokenTracker 限额响应里的键名，也是站点那一行的稳定 key
     let id: String
     /// 站点直接拿去显示的名字
     let label: String
     /**
      * 站点图标注册表的键，认不出来的退回首字母。
      *
-     * 跟 `id` 分开是因为它俩本来就不是一回事：`id` 是 CodexBar 里那个 provider 的
-     * 名字，这个是牌子 —— `opencodego` 的牌子是 OpenCode。
+     * 跟 `id` 分开是因为它俩本来就不是一回事：`id` 是上游那份数据里 provider 的
+     * 键名，这个是牌子 —— `opencodego` 的牌子是 OpenCode。
      */
     let icon: String
     /// 从 usage 的窗口里挑哪一个当「总限额」
@@ -1113,19 +1167,18 @@ private struct SupplementalQuotaProvider {
 
 /// 每家「总限额」的口径不一样，挑法见各 case。
 private enum TotalWindowPick {
-    /// Cursor 明确把 primary 叫 Total
+    /// 上游把 primary 就当总额（Cursor 的 Total、Grok 的周额度）
     case primarySlot
-    /// OpenCode Go 的最长窗口是 Monthly，代表套餐总周期
-    case longestSlot
-    /// 周窗口只在 extraRateWindows 里，见 weeklyExtraWindow
-    case weeklyExtra
+    /// 几个并列的池，取用量高的那个 —— Antigravity 的 Gemini / Claude 两池没有
+    /// 合并总量，取高的免得低估剩余压力
+    case mostUsed
 }
 
 private let supplementalQuotaProviders: [SupplementalQuotaProvider] = [
     .init(id: "cursor", label: "Cursor", icon: "cursor", totalWindow: .primarySlot),
     // Grok 只给 primary 一个窗口（周重置，且不带 windowMinutes），它就是总额
     .init(id: "grok", label: "Grok", icon: "grok", totalWindow: .primarySlot),
-    .init(id: "antigravity", label: "Antigravity", icon: "antigravity", totalWindow: .weeklyExtra),
+    .init(id: "antigravity", label: "Antigravity", icon: "antigravity", totalWindow: .mostUsed),
 ]
 
 private let agentLimitProviderIDs = ["claude", "codex"] + supplementalQuotaProviders.map(\.id)
@@ -1133,8 +1186,8 @@ private let agentLimitProviderIDs = ["claude", "codex"] + supplementalQuotaProvi
 @MainActor
 final class AgentLimitsMonitor: ObservableObject {
     @Published private(set) var plans: [String: AgentPlanSnapshot] = [:]
-    /// `vibeCodingLimits` 模块的载荷。同样不带采集时刻：限额 600 秒才动一次，
-    /// 没变的那几轮不该白占一次上报。
+    /// `vibeCodingLimits` 模块的载荷。它带着上游的观测时刻，所以那个时刻一动
+    /// 就是一次新载荷 —— 十几分钟一次，不像会话那份值得为省一封信去掉时间。
     @Published private(set) var uploadPayload: JSONValue?
     /// 载荷真正变化的时刻，判变门闩看它 —— 理由同 CodingSessionMonitor。
     @Published private(set) var payloadUpdatedAt: Date?
@@ -1147,7 +1200,7 @@ final class AgentLimitsMonitor: ObservableObject {
 
     private var refreshing = false
     /// 间隔门闩看的是「上次尝试」而不是 lastSuccess：CLI 配错或 Web 临时失败时，
-    /// 不能让主循环每一圈都重跑一次 CodexBar。
+    /// 不能让主循环每一圈都重问一次 TokenTracker。
     private var lastAttempt: Date?
 
     func stop() {
@@ -1161,21 +1214,21 @@ final class AgentLimitsMonitor: ObservableObject {
         refreshing = false
     }
 
-    func refreshIfNeeded(codexBarPath: String, interval: Double) async {
+    func refreshIfNeeded(baseURL: String, interval: Double) async {
         guard !refreshing else { return }
         if let lastAttempt, Date().timeIntervalSince(lastAttempt) < interval { return }
-        await refreshNow(codexBarPath: codexBarPath)
+        await refreshNow(baseURL: baseURL)
     }
 
     /// Bypasses the interval gate for an explicit user refresh, while preserving
     /// the monitor's single-flight guard.
-    func refreshNow(codexBarPath: String) async {
+    func refreshNow(baseURL: String) async {
         guard !refreshing else { return }
         refreshing = true
         lastAttempt = Date()
         defer { refreshing = false }
 
-        let outcome = await AgentLimitsCollector.collect(codexBarPath: codexBarPath)
+        let outcome = await AgentLimitsCollector.collect(baseURL: baseURL)
 
         // 内容没变就留着旧快照。换成时间戳更新的那份会让下游（上传门闩、
         // @Published 订阅者）把每次采集都当成「套餐变了」。
@@ -1258,10 +1311,10 @@ final class AgentLimitsMonitor: ObservableObject {
             let plan = plans[id]
             return .object([
                 "id": .string(id),
-                "plan": plan.map {
-                    JSONValue.object(["tier": .string($0.tier), "label": .string($0.label)])
-                } ?? .null,
+                "plan": plan.flatMap(planValue) ?? .null,
                 "limits": windows(plan?.limits ?? []),
+                // 上游观测到这几个数的时刻，不是这封信发出的时刻
+                "limitsObservedAt": plan.map { JSONValue.number(Double($0.observedAt)) } ?? .null,
                 "limitsError": limitErrors[id].map(JSONValue.string) ?? .null,
             ])
         }
@@ -1274,10 +1327,10 @@ final class AgentLimitsMonitor: ObservableObject {
                 "icon": .string(provider.icon),
                 "usedPercent": window.map { .number($0.usedPercent) } ?? .null,
                 // 和 agents[].plan / limits[].resetsAt 同名同单位
-                "plan": snapshot.map {
-                    JSONValue.object(["tier": .string($0.tier), "label": .string($0.label)])
-                } ?? .null,
+                "plan": snapshot.flatMap(planValue) ?? .null,
                 "resetsAt": window?.resetsAt.map { .number(Double($0)) } ?? .null,
+                // 和 agents[].limitsObservedAt 同名同单位
+                "limitsObservedAt": snapshot.map { JSONValue.number(Double($0.observedAt)) } ?? .null,
                 "limitsError": limitErrors[provider.id].map(JSONValue.string) ?? .null,
             ])
         }
@@ -1285,6 +1338,12 @@ final class AgentLimitsMonitor: ObservableObject {
             "agents": .array(agents),
             "quotaProviders": .array(quotaProviders),
         ])
+    }
+
+    /// 套餐取不到时整格不发。发一个空字符串会在页面上留下一块没有内容的标签
+    private static func planValue(_ snapshot: AgentPlanSnapshot) -> JSONValue? {
+        guard let tier = snapshot.tier, let label = snapshot.label else { return nil }
+        return .object(["tier": .string(tier), "label": .string(label)])
     }
 }
 
@@ -1297,246 +1356,206 @@ private struct AgentLimitsOutcome: Sendable {
 }
 
 private enum AgentLimitsCollector {
-    /// Claude 与 Codex 仍共用 `both`；附加 provider 必须一个一个指定。CodexBar
-    /// 的 `all` 会把其它已配置但未展示的 provider 也拉进来，而且任意一个失败时
-    /// 整条命令可能不给 JSON，因此这里并发跑若干个有边界的调用。
-    nonisolated static func collect(codexBarPath: String) async -> AgentLimitsOutcome {
-        let jobs: [(argument: String, providers: [String])] =
-            [("both", ["claude", "codex"])]
-            + supplementalQuotaProviders.map { ($0.id, [$0.id]) }
-        let tasks = jobs.map { job in
-            Task.detached(priority: .utility) {
-                Self.collectBlocking(
-                    codexBarPath: codexBarPath,
-                    providerArgument: job.argument,
-                    providers: job.providers
-                )
+    /**
+     * 套餐与限额窗口，一次请求全拿到。
+     *
+     * TokenTracker 的 `usage-limits` 一次给十三家，两个 agent 和三个附加 provider
+     * 都在里面 —— 从前是四条 CodexBar 命令并发跑，任意一条挂掉都要单独兜底。
+     * 现在整条挂了就是整条挂了，每家各自留下自己的 error。
+     *
+     * 每家还带 `configured`：没配就是没配，不算失败 —— 页面据此整块不渲染，
+     * 和「配了但取不到」分得开。
+     */
+    nonisolated static func collect(baseURL: String) async -> AgentLimitsOutcome {
+        let root: [String: Any]
+        do {
+            guard let object = try await TokenTrackerAPI.get(
+                baseURL: baseURL,
+                function: "tokentracker-usage-limits"
+            ) as? [String: Any] else {
+                throw TelemetryModuleError.tokenTracker("usage-limits 输出不是对象")
             }
-        }
-        var plans: [String: AgentPlanSnapshot] = [:]
-        var errors: [String] = []
-        var limitErrors: [String: String] = [:]
-        for task in tasks {
-            let outcome = await task.value
-            plans.merge(outcome.plans) { _, fresh in fresh }
-            errors.append(contentsOf: outcome.errors)
-            limitErrors.merge(outcome.limitErrors) { _, fresh in fresh }
-        }
-        return AgentLimitsOutcome(plans: plans, errors: errors, limitErrors: limitErrors)
-    }
-
-    nonisolated private static func collectBlocking(
-        codexBarPath: String,
-        providerArgument: String,
-        providers: [String]
-    ) -> AgentLimitsOutcome {
-        func failed(_ message: String) -> AgentLimitsOutcome {
-            AgentLimitsOutcome(
+            root = object
+        } catch {
+            let message = error.localizedDescription
+            return AgentLimitsOutcome(
                 plans: [:],
                 errors: [message],
-                limitErrors: Dictionary(uniqueKeysWithValues: providers.map { ($0, message) })
+                limitErrors: Dictionary(
+                    uniqueKeysWithValues: agentLimitProviderIDs.map { ($0, message) }
+                )
             )
-        }
-        guard FileManager.default.isExecutableFile(atPath: codexBarPath) else {
-            return failed("CodexBar CLI 路径不可执行：\(codexBarPath)")
-        }
-
-        let process = Process()
-        let output = Pipe()
-        process.executableURL = URL(fileURLWithPath: codexBarPath)
-        process.arguments = [
-            "usage", "--provider", providerArgument, "--source", "auto",
-            "--no-credits", "--format", "json",
-        ]
-        process.standardOutput = output
-        process.standardError = FileHandle.nullDevice
-        do {
-            try process.run()
-        } catch {
-            return failed("CodexBar usage 启动失败：\(error.localizedDescription)")
-        }
-        let data = output.fileHandleForReading.readDataToEndOfFile()
-        process.waitUntilExit()
-        guard let rows = try? JSONSerialization.jsonObject(with: data) as? [[String: Any]] else {
-            return failed("CodexBar usage 输出不是有效 JSON")
         }
 
         var plans: [String: AgentPlanSnapshot] = [:]
         var errors: [String] = []
         var limitErrors: [String: String] = [:]
-        for row in rows {
-            guard let provider = row["provider"] as? String,
-                  providers.contains(provider) else { continue }
-            if let failure = row["error"] as? [String: Any] {
-                let detail = failure["message"] as? String ?? "未知错误"
-                let message = "CodexBar \(provider)：\(detail)"
+
+        for provider in agentLimitProviderIDs {
+            guard let node = root[provider] as? [String: Any] else { continue }
+            if let failure = (node["error"] as? String)?.nilIfEmpty {
+                let message = "TokenTracker \(provider)：\(failure)"
                 errors.append(message)
                 limitErrors[provider] = message
                 continue
             }
-            guard let usage = row["usage"] as? [String: Any] else {
-                let message = "CodexBar \(provider) 响应缺少 usage"
-                errors.append(message)
-                limitErrors[provider] = message
-                continue
+            // 没配的那几家直接跳过：不是失败，页面上整块不渲染
+            guard node["configured"] as? Bool ?? false else { continue }
+
+            let windows: [AgentLimitWindow]
+            switch provider {
+            case "claude": windows = claudeWindows(node)
+            case "codex": windows = codexWindows(node)
+            default: windows = quotaWindows(provider: provider, node: node)
             }
-            let identity = usage["identity"] as? [String: Any]
-            let loginMethod = (identity?["loginMethod"] as? String)?.nilIfEmpty
-                ?? (usage["loginMethod"] as? String)?.nilIfEmpty
-            let tier = loginMethod ?? provider
-            let label = agentPlanLabel(agent: provider, tier: tier)
-            let windows = supplementalQuotaProviders.first { $0.id == provider }
-                .map { parseTotalLimit(provider: $0, usage: usage) }
-                ?? parseWebLimits(provider: provider, usage: usage)
+            let tier = planTier(provider: provider, node: node)
             plans[provider] = AgentPlanSnapshot(
                 tier: tier,
-                label: label,
+                label: tier.map { agentPlanLabel(agent: provider, tier: $0) },
                 limits: windows,
-                observedAt: nowMilliseconds
+                observedAt: observedAt(node)
             )
             if windows.isEmpty {
-                let message = "CodexBar \(provider) 响应里没有限额窗口"
+                let message = "TokenTracker \(provider) 响应里没有限额窗口"
                 errors.append(message)
                 limitErrors[provider] = message
             }
         }
-        for provider in providers where plans[provider] == nil && limitErrors[provider] == nil {
-            let suffix = process.terminationStatus == 0
-                ? "响应里没有该 provider"
-                : "退出码 \(process.terminationStatus)"
-            let message = "CodexBar \(provider) \(suffix)"
-            errors.append(message)
-            limitErrors[provider] = message
-        }
         return AgentLimitsOutcome(plans: plans, errors: errors, limitErrors: limitErrors)
-    }
-
-    /// 附加 provider 在网页上只占一行“总限额”。挑哪个窗口按它自己的口径来，
-    /// 各家的理由见 TotalWindowPick 各 case。
-    nonisolated private static func parseTotalLimit(
-        provider: SupplementalQuotaProvider,
-        usage: [String: Any]
-    ) -> [AgentLimitWindow] {
-        let slots: [(name: String, value: [String: Any])] =
-            ["primary", "secondary", "tertiary"].compactMap { name in
-                (usage[name] as? [String: Any]).map { (name, $0) }
-            }
-        let selected: (name: String, value: [String: Any])?
-        switch provider.totalWindow {
-        case .primarySlot:
-            selected = slots.first { $0.name == "primary" }
-        case .longestSlot:
-            selected = slots.max {
-                (($0.value["windowMinutes"] as? NSNumber)?.intValue ?? 0) <
-                    (($1.value["windowMinutes"] as? NSNumber)?.intValue ?? 0)
-            }
-        case .weeklyExtra:
-            // 周窗口只在 extraRateWindows 里；退回槽位时拿到的是 5 小时那档。
-            selected = weeklyExtraWindow(usage: usage).map { ("weekly", $0) }
-                ?? slots.max {
-                    (($0.value["usedPercent"] as? NSNumber)?.doubleValue ?? 0) <
-                        (($1.value["usedPercent"] as? NSNumber)?.doubleValue ?? 0)
-                }
-        }
-        guard let window = selected?.value else { return [] }
-        return [AgentLimitWindow(
-            key: "\(provider.id).total",
-            label: selected?.name == "weekly" ? "Weekly" : "Total",
-            group: nil,
-            windowMinutes: (window["windowMinutes"] as? NSNumber)?.intValue,
-            usedPercent: (window["usedPercent"] as? NSNumber)?.doubleValue ?? 0,
-            resetsAt: unixSeconds(window["resetsAt"] as? String)
-        )]
     }
 
     /**
-     * `extraRateWindows` 里最长的那个窗口。眼下只有 Antigravity 走这条。
+     * Claude 的窗口按名字给，不给时长。
      *
-     * 它的 `primary` / `secondary` 是 Gemini 和 Claude/GPT 的**5 小时**窗口，一天要刷
-     * 好几遍，代表不了「这周还剩多少」。周窗口只出现在 `extraRateWindows` 里
-     * （windowMinutes = 10080），带着 `Gemini weekly` / `Claude/GPT weekly` 的标题。
-     *
-     * 所以先按窗口长度挑出最长的那一档，同档里再取用量高的那个池 —— 这个
-     * provider 没有合并总量，只有两个池，取高的免得低估剩余压力。
-     *
-     * 拿不到 extraRateWindows 时返回 nil，调用方退回原来的槽位逻辑（老版本
-     * CodexBar 没有这个键）。
+     * `five_hour` / `seven_day` 这两个名字本身就是时长声明，站点那边要拿分钟数
+     * 算窗口名（「5-hour limit」「Weekly」），所以在这里翻译成 300 / 10080。
+     * 这不是「由分组反推时长」那种猜测 —— 字段名说的就是五小时和七天。
      */
-    nonisolated private static func weeklyExtraWindow(usage: [String: Any]) -> [String: Any]? {
-        let windows = (usage["extraRateWindows"] as? [[String: Any]] ?? [])
-            .compactMap { $0["window"] as? [String: Any] }
-        func minutes(_ window: [String: Any]) -> Int {
-            (window["windowMinutes"] as? NSNumber)?.intValue ?? 0
-        }
-        func used(_ window: [String: Any]) -> Double {
-            (window["usedPercent"] as? NSNumber)?.doubleValue ?? 0
-        }
-        guard let longest = windows.map(minutes).max(), longest > 0 else { return nil }
-        return windows.filter { minutes($0) == longest }.max { used($0) < used($1) }
-    }
-
-    nonisolated private static func parseWebLimits(
-        provider: String,
-        usage: [String: Any]
-    ) -> [AgentLimitWindow] {
+    nonisolated private static func claudeWindows(_ node: [String: Any]) -> [AgentLimitWindow] {
         var windows: [AgentLimitWindow] = []
-        for slot in ["primary", "secondary", "tertiary"] {
-            guard let window = usage[slot] as? [String: Any] else { continue }
-            let windowMinutes = (window["windowMinutes"] as? NSNumber)?.intValue
-            // The pre-CodexBar Claude collector exposed the aggregate weekly bucket
-            // as `weekly_all`; the frontend uses that stable semantic key to append
-            // “all models”. Codex's primary weekly bucket intentionally keeps its
-            // own key because Spark is a separate allowance, not part of that total.
-            let key = provider == "claude" && windowMinutes == 10_080
-                ? "weekly_all"
-                : "\(provider).\(slot)"
-            windows.append(AgentLimitWindow(
-                key: key,
-                label: nil,
-                group: nil,
-                windowMinutes: windowMinutes,
-                usedPercent: (window["usedPercent"] as? NSNumber)?.doubleValue ?? 0,
-                resetsAt: unixSeconds(window["resetsAt"] as? String)
+        if let five = node["five_hour"] as? [String: Any] {
+            windows.append(window(key: "claude.primary", label: nil, minutes: 300, node: five))
+        }
+        let weekly = node["seven_day"] as? [String: Any]
+        if let weekly {
+            windows.append(window(key: "weekly_all", label: nil, minutes: 10_080, node: weekly))
+        }
+        // 作用域周额度（Fable / Opus）不带自己的重置时刻，它跟总的周窗口同时翻篇。
+        // 从前 CodexBar 那版也是拿总周窗口的时刻补上的，页面上那行的倒计时靠它。
+        let weeklyReset = weekly.flatMap { TokenTrackerAPI.unixSeconds(resetValue($0)) }
+        if let opus = node["seven_day_opus"] as? [String: Any] {
+            windows.append(window(
+                key: "claude-weekly-scoped-opus",
+                label: "Opus only",
+                minutes: 10_080,
+                node: opus,
+                fallbackReset: weeklyReset
             ))
         }
-        let claudeWeeklyReset = provider == "claude"
-            ? windows.first { $0.key == "weekly_all" }?.resetsAt
-            : nil
-        for extra in usage["extraRateWindows"] as? [[String: Any]] ?? [] {
-            guard let window = extra["window"] as? [String: Any] else { continue }
-            let key = (extra["id"] as? String)?.nilIfEmpty ?? "\(provider).extra.\(windows.count)"
-            let windowMinutes = (window["windowMinutes"] as? NSNumber)?.intValue
-            // CodexBar's Fable extra window currently omits resetsAt even though its
-            // aggregate Claude weekly window carries the shared seven-day boundary.
-            // The old collector returned that reset, so retain the established UI
-            // contract when the extra window leaves it out.
-            let resetsAt = unixSeconds(window["resetsAt"] as? String)
-                ?? (provider == "claude" && windowMinutes == 10_080
-                    ? claudeWeeklyReset
-                    : nil)
-            windows.append(AgentLimitWindow(
-                key: key,
-                label: (extra["title"] as? String)?.nilIfEmpty,
-                group: nil,
-                windowMinutes: windowMinutes,
-                usedPercent: (window["usedPercent"] as? NSNumber)?.doubleValue ?? 0,
-                resetsAt: resetsAt
+        for scoped in node["weekly_scoped"] as? [[String: Any]] ?? [] {
+            guard let name = (scoped["label"] as? String)?.nilIfEmpty else { continue }
+            windows.append(window(
+                key: "claude-weekly-scoped-\(name.lowercased())",
+                label: "\(name) only",
+                minutes: 10_080,
+                node: scoped,
+                fallbackReset: weeklyReset
             ))
         }
         return windows
     }
 
-    /// resets_at 是带小数秒的 ISO8601（`2026-08-10T03:00:00.673155+00:00`），
-    /// 不带 .withFractionalSeconds 的 formatter 会整条解析失败。
-    nonisolated private static func unixSeconds(_ value: String?) -> Int64? {
-        guard let value else { return nil }
-        let fractional = ISO8601DateFormatter()
-        fractional.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-        let standard = ISO8601DateFormatter()
-        guard let date = fractional.date(from: value) ?? standard.date(from: value) else {
-            return nil
+    /// Codex 反过来：窗口自带 `limit_window_seconds`，名字里没有时长。
+    /// Spark 是和主额度并列的独立配额，不是它的子集，所以各占一行。
+    nonisolated private static func codexWindows(_ node: [String: Any]) -> [AgentLimitWindow] {
+        let slots: [(key: String, label: String?, field: String)] = [
+            ("codex.primary", nil, "primary_window"),
+            ("codex.secondary", nil, "secondary_window"),
+            ("codex-spark-session", "Codex Spark 5h", "spark_primary_window"),
+            ("codex-spark-weekly", "Codex Spark Weekly", "spark_secondary_window"),
+        ]
+        return slots.compactMap { slot in
+            guard let value = node[slot.field] as? [String: Any] else { return nil }
+            return window(key: slot.key, label: slot.label, minutes: minutes(value), node: value)
         }
-        return Int64(date.timeIntervalSince1970)
+    }
+
+    /// 附加 provider 在站点上只占一行「总限额」，挑哪个窗口按各家的口径来。
+    nonisolated private static func quotaWindows(
+        provider: String,
+        node: [String: Any]
+    ) -> [AgentLimitWindow] {
+        let pick = supplementalQuotaProviders.first { $0.id == provider }?.totalWindow ?? .primarySlot
+        let slots = ["primary_window", "secondary_window", "tertiary_window", "quaternary_window"]
+            .compactMap { node[$0] as? [String: Any] }
+        let selected: [String: Any]?
+        switch pick {
+        case .primarySlot: selected = node["primary_window"] as? [String: Any]
+        case .mostUsed: selected = slots.max { percent($0) < percent($1) }
+        }
+        guard let selected else { return [] }
+        return [window(
+            key: "\(provider).total",
+            label: "Total",
+            minutes: minutes(selected),
+            node: selected
+        )]
+    }
+
+    nonisolated private static func window(
+        key: String,
+        label: String?,
+        minutes: Int?,
+        node: [String: Any],
+        fallbackReset: Int64? = nil
+    ) -> AgentLimitWindow {
+        AgentLimitWindow(
+            key: key,
+            label: label,
+            group: nil,
+            windowMinutes: minutes,
+            usedPercent: percent(node),
+            resetsAt: TokenTrackerAPI.unixSeconds(resetValue(node)) ?? fallbackReset
+        )
+    }
+
+    /// Claude 那几个窗口叫 `utilization`，其余几家叫 `used_percent`
+    nonisolated private static func percent(_ node: [String: Any]) -> Double {
+        TokenTrackerAPI.number(node["utilization"] ?? node["used_percent"])
+    }
+
+    /// 同理，Claude 是 `resets_at`，其余几家是 `reset_at`
+    nonisolated private static func resetValue(_ node: [String: Any]) -> Any? {
+        node["resets_at"] ?? node["reset_at"]
+    }
+
+    nonisolated private static func minutes(_ node: [String: Any]) -> Int? {
+        let seconds = TokenTrackerAPI.number(node["limit_window_seconds"])
+        return seconds > 0 ? Int(seconds / 60) : nil
+    }
+
+    /// Codex 报的是枚举值（"prolite"），其余几家直接给展示名；都为空就是没有套餐信息
+    nonisolated private static func planTier(provider: String, node: [String: Any]) -> String? {
+        if provider == "codex" {
+            return (node["plan_type"] as? String)?.nilIfEmpty
+                ?? (node["plan_label"] as? String)?.nilIfEmpty
+        }
+        return (node["plan_label"] as? String)?.nilIfEmpty
+    }
+
+    /**
+     * 上游观测到这几个数的时刻。
+     *
+     * 四家是当场去打接口的（`provenance.source` 是 provider-api，age 为 0），
+     * Claude 那份 TokenTracker headless 时取不到实时值、只能读磁盘缓存，能差
+     * 几十分钟。取不到时间戳就按此刻算 —— 宁可少标一次，不能标错方向。
+     */
+    nonisolated private static func observedAt(_ node: [String: Any]) -> Int64 {
+        let provenance = node["provenance"] as? [String: Any]
+        let captured = TokenTrackerAPI.unixSeconds(
+            provenance?["captured_at"] ?? node["cached_at"]
+        )
+        return captured.map { $0 * 1_000 } ?? nowMilliseconds
     }
 
     nonisolated private static var nowMilliseconds: Int64 {
@@ -1545,7 +1564,7 @@ private enum AgentLimitsCollector {
 }
 
 @MainActor
-final class CodexBarCostMonitor: ObservableObject {
+final class VibeCodingUsageMonitor: ObservableObject {
     @Published private(set) var uploadPayload: JSONValue?
     /// 载荷真正变化的时刻，判变门闩看它 —— 理由同 CodingSessionMonitor。
     /// 这份载荷带着 `collectedAt`，所以每采一次都算变化，仍是 600 秒发一次。
@@ -1568,24 +1587,22 @@ final class CodexBarCostMonitor: ObservableObject {
         refreshing = false
     }
 
-    func refreshIfNeeded(cliPath: String, interval: Double) async {
+    func refreshIfNeeded(baseURL: String, interval: Double) async {
         guard !refreshing else { return }
         if let lastAttempt, Date().timeIntervalSince(lastAttempt) < interval { return }
-        _ = await refreshNow(cliPath: cliPath)
+        _ = await refreshNow(baseURL: baseURL)
     }
 
     /// Bypasses the interval gate for an explicit user refresh, while preserving
     /// the monitor's single-flight guard.
     @discardableResult
-    func refreshNow(cliPath: String) async -> Bool {
+    func refreshNow(baseURL: String) async -> Bool {
         guard !refreshing else { return false }
         refreshing = true
         lastAttempt = Date()
         defer { refreshing = false }
         do {
-            let collection = try await Task.detached(priority: .utility) {
-                try CodexBarCostCollector.collect(cliPath: cliPath)
-            }.value
+            let collection = try await TokenTrackerUsageCollector.collect(baseURL: baseURL)
             if uploadPayload != collection.uploadPayload {
                 uploadPayload = collection.uploadPayload
                 payloadUpdatedAt = Date()
@@ -1601,347 +1618,228 @@ final class CodexBarCostMonitor: ObservableObject {
     }
 }
 
-private struct CodexBarCostCollection: Sendable {
+private struct VibeCodingUsageCollection: Sendable {
     let uploadPayload: JSONValue
 }
 
-private enum CodexBarCostCollector {
-    nonisolated static func collect(cliPath: String) throws -> CodexBarCostCollection {
-        guard FileManager.default.isExecutableFile(atPath: cliPath) else {
-            throw TelemetryModuleError.codexBar("CodexBar CLI 路径不可执行：\(cliPath)")
-        }
+private enum TokenTrackerUsageCollector {
+    private static let agents = ["claude", "codex"]
+    /// 曲线固定 30 桶：站点按这个数校验，少一个整份都不收
+    private static let activityDays = 30
+    /**
+     * 总量和模型排行从有记录的第一天算起，不设窗口。
+     *
+     * 从前跟着 CodexBar 那条 `cost --days 365` 划一年，于是「总计」会随时间
+     * 悄悄漏掉早期的量 —— 那一栏说的是总计，划窗口就名不副实。
+     *
+     * 代价是按天的请求数跟「有数据的天数」成正比（眼下 210 天，不到一秒）。
+     * 它涨得比日历慢：没用过的日子根本不占一次往返。
+     */
+    private static let historyStart = "2000-01-01"
 
-        let commandOutput = try run(cliPath, [
-            "cost", "--provider", "both", "--provider-native-only",
-            "--days", "365", "--format", "json", "--refresh",
-        ])
-        guard let rows = try JSONSerialization.jsonObject(with: commandOutput) as? [[String: Any]] else {
-            throw TelemetryModuleError.codexBar("cost 输出不是有效 JSON")
-        }
-        var reports: [String: Any] = [:]
-        for raw in rows {
-            guard let agent = raw["provider"] as? String,
-                  ["claude", "codex"].contains(agent) else { continue }
-            var report = normalizeCostReport(raw, provider: agent)
-            report["usageSummary"] = summarize(report)
-            reports[agent] = report
-        }
-        guard !reports.isEmpty else {
-            throw TelemetryModuleError.codexBar("cost 响应里没有 Claude/Codex 报告")
-        }
-        let uploadData = try JSONSerialization.data(withJSONObject: makeUploadSummary(reports))
-        return CodexBarCostCollection(
-            uploadPayload: try JSONDecoder().decode(JSONValue.self, from: uploadData)
-        )
+    /// 一个来源在某一天的用量
+    private struct DayUsage {
+        var input = 0.0
+        var output = 0.0
+        var cacheRead = 0.0
+        var cacheCreation = 0.0
+        var reasoning = 0.0
+        var total = 0.0
+        var cost = 0.0
+        /// 模型 → token；「主力模型」和排行都从它来
+        var models: [String: Double] = [:]
     }
 
-    private static func run(_ executable: String, _ arguments: [String]) throws -> Data {
-        let process = Process()
-        let output = Pipe()
-        process.executableURL = URL(fileURLWithPath: executable)
-        process.arguments = arguments
-        process.standardOutput = output
-        process.standardError = FileHandle.nullDevice
-        try process.run()
-        let data = output.fileHandleForReading.readDataToEndOfFile()
-        process.waitUntilExit()
-        guard process.terminationStatus == 0 else {
-            throw TelemetryModuleError.codexBar("cost 退出码 \(process.terminationStatus)")
-        }
-        return data
-    }
-
-    /// codex 的自动 review 不是用户选择的模型，排除在模型排名之外；它烧掉的
-    /// token 仍由 daily/totals 计入总量。
-    private static func isHiddenModel(_ name: String, _ row: [String: Any]) -> Bool {
-        name == "codex-auto-review" || row["isFallback"] as? Bool == true
-    }
-
-    /// CodexBar 的 Codex scanner 把 cached input 包含在 inputTokens 里；Claude scanner
-    /// 则与旧前端协议一致、把 cache 分开。这里把 Codex input 调整成非缓存 input，
-    /// 避免现有 UI 的 Input + Output + Cache 合计把缓存重复计算一次。
-    private static func normalizeCostReport(_ raw: [String: Any], provider: String) -> [String: Any] {
-        guard provider == "codex" else { return raw }
-        var report = raw
-        if var days = report["daily"] as? [[String: Any]] {
-            for index in days.indices { days[index] = normalizeCodexTokens(days[index]) }
-            report["daily"] = days
-        }
-        if let totals = report["totals"] as? [String: Any] {
-            report["totals"] = normalizeCodexTokens(totals)
-        }
-        return report
-    }
-
-    private static func normalizeCodexTokens(_ row: [String: Any]) -> [String: Any] {
-        var normalized = row
-        normalized["inputTokens"] = max(
-            0,
-            number(row["inputTokens"])
-                - number(row["cacheReadTokens"])
-                - number(row["cacheCreationTokens"])
-        )
-        return normalized
-    }
-
-    private static func summarize(_ report: [String: Any]) -> [String: Any] {
-        let days = report["daily"] as? [[String: Any]] ?? []
-        let ordered = days.sorted {
-            ($0["date"] as? String ?? "") > ($1["date"] as? String ?? "")
-        }
-        var currentModel: String?
-        for day in ordered {
-            var modelTotals: [String: Double] = [:]
-            if let models = day["models"] as? [String: [String: Any]] {
-                for (name, row) in models where !isHiddenModel(name, row) {
-                    modelTotals[name, default: 0] += number(row["totalTokens"])
-                }
-            } else if let rows = day["modelBreakdowns"] as? [[String: Any]] {
-                for row in rows {
-                    guard let name = row["modelName"] as? String, !isHiddenModel(name, row) else { continue }
-                    let components = number(row["inputTokens"]) + number(row["outputTokens"])
-                        + number(row["cacheReadTokens"]) + number(row["cacheCreationTokens"])
-                    modelTotals[name, default: 0] += max(number(row["totalTokens"]), components)
-                }
-            }
-            if let winner = modelTotals.max(by: { $0.value < $1.value })?.key {
-                currentModel = winner
-                break
-            }
-        }
-
-        // 趋势图只画最近 30 个本地自然日，一天一桶。总量、费用和模型排行仍使用
-        // cost 命令返回的完整 365 天数据；这里只裁图表，避免横轴前半段被零值占满。
-        let calendar = Calendar.current
-        let current = calendar.startOfDay(for: Date())
-        let start = calendar.date(byAdding: .day, value: -29, to: current) ?? current
-        var activity = (0..<30).map { offset in
-            let date = calendar.date(byAdding: .day, value: offset, to: start) ?? start
-            return ["t": date.timeIntervalSince1970 * 1_000, "tokens": 0.0]
-        }
-        for day in days {
-            guard let date = dayDate(day["date"] as? String) else { continue }
-            guard let index = calendar.dateComponents([.day], from: start, to: date).day else {
-                continue
-            }
-            if activity.indices.contains(index) {
-                activity[index]["tokens"] = (activity[index]["tokens"] ?? 0) + number(day["totalTokens"])
-            }
-        }
-
-        return [
-            // CodexBar cost JSON 不公开精确最后活动时间，因此这里不伪造；最后活动
-            // 时刻和 session 总数都由 `vibeCodingSessions` 那个模块单独送。
-            "currentModel": currentModel ?? NSNull(),
-            "activity": activity,
-        ]
-    }
-
-    /// The website only needs display-ready aggregates. Keep CodexBar's complete
-    /// daily/model output on the Mac and send this bounded summary instead.
-    ///
-    /// 只装本地用量：套餐 / 限额走 `vibeCodingLimits`，会话状态走 `vibeCodingSessions`。
-    /// 三份各发各的，站点按 agent id 并回一起。
-    private static func makeUploadSummary(_ reports: [String: Any]) -> [String: Any] {
+    /**
+     * 本地用量、费用和模型排行。
+     *
+     * 要的是「每天 × 每个 agent」，而 TokenTracker 没有一个接口直接给这个格子：
+     * 按天那份把所有来源合在一起，按来源那份只给一个区间的合计。所以先问哪几天
+     * 有数据，再按天各要一次按来源的拆分 —— `source` 是它自己标好的，比按模型名
+     * 猜厂商可靠（它那份里还有一个 unknown 桶，猜不出来）。
+     *
+     * 一天一次请求听着多，但它服务端整份都在内存里，一年 200 个有数据的日子加
+     * 起来不到一秒；从前 CodexBar 那条 `--refresh` 要十几秒。
+     */
+    nonisolated static func collect(baseURL: String) async throws -> VibeCodingUsageCollection {
         let calendar = Calendar.current
         let today = calendar.startOfDay(for: Date())
-        let start30 = calendar.date(byAdding: .day, value: -29, to: today) ?? today
-        var agents: [[String: Any]] = []
-        var aggregate = emptyTotals()
-        var activeDates = Set<String>()
-        var modelTotals: [String: Double] = [:]
+        let activityStart = calendar.date(byAdding: .day, value: -(activityDays - 1), to: today) ?? today
 
-        for agent in ["claude", "codex"] {
-            guard let report = reports[agent] as? [String: Any] else { continue }
-            let rawDays = report["daily"] as? [[String: Any]] ?? []
-            // 先按 agent 单独累一份再并进全局：站点上不使用时要显示「这个 agent
-            // 历史用得最多的模型」，而全局 topModels 是两个 agent 合并后的排名，
-            // 拆不回单个 agent。
-            var agentModelTotals: [String: Double] = [:]
-            for row in rawDays { addModelUsage(row, to: &agentModelTotals) }
-            modelTotals.merge(agentModelTotals, uniquingKeysWith: +)
-            let allDays = rawDays.compactMap(normalizeDay)
-            let recentDays = allDays.filter { row in
-                guard let date = dayDate(row["date"] as? String) else { return false }
-                return date >= start30
-            }
-            let recentByDate = Dictionary(uniqueKeysWithValues: recentDays.compactMap { row in
-                (row["date"] as? String).map { ($0, row) }
-            })
-            let todayText = dayString(today)
-            let todayRow = preparedDay(recentByDate[todayText] ?? normalizedEmptyDay(date: todayText))
-            let summary = report["usageSummary"] as? [String: Any] ?? [:]
-            let totals = normalizeTotals(report["totals"] as? [String: Any] ?? [:])
-            let models = Set(allDays.flatMap { $0["models"] as? [String] ?? [] }).sorted()
+        let daily = try await TokenTrackerAPI.get(
+            baseURL: baseURL,
+            function: "tokentracker-usage-daily",
+            query: ["from": historyStart, "to": dayString(today)]
+        )
+        guard let dailyRoot = daily as? [String: Any],
+              let dailyRows = dailyRoot["data"] as? [[String: Any]]
+        else {
+            throw TelemetryModuleError.tokenTracker("usage-daily 响应缺少 data")
+        }
+        // 空日子不必往返一次；今天即使还没有数据也要问，那一行要显示 0 而不是缺失
+        var days = Set(dailyRows.compactMap { row -> String? in
+            guard let day = row["day"] as? String,
+                  TokenTrackerAPI.number(row["total_tokens"]) > 0
+            else { return nil }
+            return day
+        })
+        days.insert(dayString(today))
 
-            for row in allDays where number(row["totalTokens"]) > 0 {
-                if let date = row["date"] as? String { activeDates.insert(date) }
+        var usage: [String: [String: DayUsage]] = [:]
+        for day in days.sorted() {
+            let breakdown = try await TokenTrackerAPI.get(
+                baseURL: baseURL,
+                function: "tokentracker-usage-model-breakdown",
+                query: ["from": day, "to": day]
+            )
+            guard let root = breakdown as? [String: Any],
+                  let sources = root["sources"] as? [[String: Any]]
+            else { continue }
+            for source in sources {
+                guard let id = source["source"] as? String else { continue }
+                usage[day, default: [:]][id] = dayUsage(source)
             }
-            addTotals(totals, to: &aggregate)
-
-            // 这里给的是「最近一个有用量日里的主力模型」。ccusage 那个模块会送来
-            // 真正的「此刻在用哪个」，站点优先用它、取不到才落到这个值上。
-            let currentModelValue: Any = (summary["currentModel"] as? String) ?? NSNull()
-            let topModelValue: Any = agentModelTotals
-                .filter { $0.value > 0 }
-                .max { $0.value < $1.value }?.key ?? NSNull()
-            let activityValue: Any = summary["activity"] ?? []
-            let last30DaysTokens = recentDays.reduce(0.0) {
-                $0 + number($1["totalTokens"])
-            }
-            let agentValue: [String: Any] = [
-                "id": agent,
-                "models": models,
-                "currentModel": currentModelValue,
-                // 零用量的模型只是出现在 daily 里，不代表用过，不参与排名
-                "topModel": topModelValue,
-                "activity": activityValue,
-                "today": todayRow,
-                "last30DaysTokens": last30DaysTokens,
-            ]
-            agents.append(agentValue)
         }
 
-        aggregate["activeDays"] = Double(activeDates.count)
-        return [
-            "agents": agents,
-            "totals": aggregate,
-            "topModels": modelTotals
-                .filter { $0.value > 0 }
+        /*
+         * 头部那一栏说的是「总计」，所以它把所有工具都算进来，不只是下面两块
+         * 面板的 Claude Code 和 Codex —— 光 Cursor 就占了将近一成半的 token，
+         * 漏掉它那一栏就名不副实。曲线、今日用量、当前模型仍然分 agent，
+         * 那几样本来就是各自那一块里的东西。
+         */
+        var aggregate = DayUsage()
+        var mergedModels: [String: Double] = [:]
+        var activeDates = Set<String>()
+        for (day, bySource) in usage {
+            var dayTotal = 0.0
+            for row in bySource.values {
+                aggregate.input += row.input
+                aggregate.output += row.output
+                aggregate.cacheRead += row.cacheRead
+                aggregate.cacheCreation += row.cacheCreation
+                aggregate.reasoning += row.reasoning
+                aggregate.total += row.total
+                aggregate.cost += row.cost
+                for (name, tokens) in rankable(row.models) { mergedModels[name, default: 0] += tokens }
+                dayTotal += row.total
+            }
+            if dayTotal > 0 { activeDates.insert(day) }
+        }
+
+        var agentPayloads: [[String: Any]] = []
+        for agent in agents {
+            var models: [String: Double] = [:]
+            for bySource in usage.values {
+                guard let row = bySource[agent] else { continue }
+                for (name, tokens) in row.models { models[name, default: 0] += tokens }
+            }
+
+            let activity: [[String: Any]] = (0..<activityDays).map { offset in
+                let date = calendar.date(byAdding: .day, value: offset, to: activityStart) ?? activityStart
+                return [
+                    "t": date.timeIntervalSince1970 * 1_000,
+                    "tokens": usage[dayString(date)]?[agent]?.total ?? 0,
+                ]
+            }
+            let last30 = activity.reduce(0.0) { $0 + ($1["tokens"] as? Double ?? 0) }
+            let todayKey = dayString(today)
+            let todayUsage = usage[todayKey]?[agent] ?? DayUsage()
+
+            // 「最近一个有用量日里的主力模型」。真正的「此刻在用哪个」由会话那份
+            // 送来，站点优先用它、取不到才落到这个值上。
+            let currentModel = days.sorted().reversed().lazy.compactMap { day -> String? in
+                guard let row = usage[day]?[agent], row.total > 0 else { return nil }
+                return topModel(row.models)
+            }.first
+
+            agentPayloads.append([
+                "id": agent,
+                // unknown 不是模型，是它没记下来的那部分；auto review 留着 —— 它确实跑过
+                "models": models.keys.filter { $0 != "unknown" }.sorted(),
+                "currentModel": currentModel ?? NSNull(),
+                "topModel": topModel(models) ?? NSNull(),
+                "activity": activity,
+                "today": [
+                    "date": todayKey,
+                    "inputTokens": todayUsage.input,
+                    "outputTokens": todayUsage.output,
+                    "cacheReadTokens": todayUsage.cacheRead,
+                    "cacheCreationTokens": todayUsage.cacheCreation,
+                    "totalTokens": todayUsage.total,
+                    "apiEquivalentCostUSD": todayUsage.cost,
+                ],
+                "last30DaysTokens": last30,
+            ])
+        }
+
+        let summary: [String: Any] = [
+            "agents": agentPayloads,
+            "totals": [
+                "inputTokens": aggregate.input,
+                "outputTokens": aggregate.output,
+                "cacheReadTokens": aggregate.cacheRead,
+                "cacheCreationTokens": aggregate.cacheCreation,
+                "reasoningTokens": aggregate.reasoning,
+                "totalTokens": aggregate.total,
+                "apiEquivalentCostUSD": aggregate.cost,
+                "activeDays": Double(activeDates.count),
+            ],
+            "topModels": mergedModels
                 .sorted { $0.value > $1.value }
                 .prefix(3)
                 .map { ["model": $0.key, "tokens": $0.value] },
             "collectedAt": ISO8601DateFormatter().string(from: Date()),
         ]
+        let data = try JSONSerialization.data(withJSONObject: summary)
+        return VibeCodingUsageCollection(
+            uploadPayload: try JSONDecoder().decode(JSONValue.self, from: data)
+        )
     }
 
     /**
-     * 按模型累计 token，喂给「历史主力模型」和全局排行。
+     * 一个来源在一天里的合计。
      *
-     * 和 `summarize` 里取当前模型一样过滤掉隐藏模型：自动 review 是独立会话，
-     * 它用的模型对使用者没有意义，fallback 同理。两处口径必须一致 —— 否则会
-     * 出现「当前模型」里被滤掉的东西反而排进了历史榜。
-     *
-     * 只影响「用了哪些模型」这类排名，不影响 token 与费用总计 —— 那些走
-     * `normalizeTotals`，是另一条路，隐藏模型烧掉的量仍然照实计入。
+     * 不再像 CodexBar 那版那样把 cached 从 input 里扣掉：TokenTracker 的 input
+     * 本来就不含缓存（input + output + cached + creation 正好等于 total），
+     * 再扣一次就是扣两遍。
      */
-    private static func addModelUsage(
-        _ row: [String: Any],
-        to totals: inout [String: Double]
-    ) {
-        if let models = row["models"] as? [String: Any] {
-            for (name, value) in models {
-                guard let detail = value as? [String: Any], !isHiddenModel(name, detail) else { continue }
-                let explicit = number(detail["totalTokens"])
-                let tokens = explicit > 0 ? explicit :
-                    number(detail["inputTokens"]) + number(detail["outputTokens"]) +
-                    number(detail["cacheReadTokens"]) + number(detail["cacheCreationTokens"])
-                totals[name, default: 0] += tokens
-            }
-            return
+    nonisolated private static func dayUsage(_ source: [String: Any]) -> DayUsage {
+        let totals = source["totals"] as? [String: Any] ?? [:]
+        var usage = DayUsage()
+        usage.input = TokenTrackerAPI.number(totals["input_tokens"])
+        usage.output = TokenTrackerAPI.number(totals["output_tokens"])
+        usage.cacheRead = TokenTrackerAPI.number(totals["cached_input_tokens"])
+        usage.cacheCreation = TokenTrackerAPI.number(totals["cache_creation_input_tokens"])
+        usage.reasoning = TokenTrackerAPI.number(totals["reasoning_output_tokens"])
+        usage.total = TokenTrackerAPI.number(totals["total_tokens"])
+        usage.cost = TokenTrackerAPI.number(totals["total_cost_usd"])
+        for model in source["models"] as? [[String: Any]] ?? [] {
+            guard let name = (model["model"] as? String)?.nilIfEmpty else { continue }
+            let row = model["totals"] as? [String: Any] ?? [:]
+            usage.models[name, default: 0] += TokenTrackerAPI.number(row["total_tokens"])
         }
-        for detail in row["modelBreakdowns"] as? [[String: Any]] ?? [] {
-            guard let name = detail["modelName"] as? String, !isHiddenModel(name, detail) else { continue }
-            let components = number(detail["inputTokens"]) + number(detail["outputTokens"])
-                + number(detail["cacheReadTokens"]) + number(detail["cacheCreationTokens"])
-            totals[name, default: 0] += max(number(detail["totalTokens"]), components)
-        }
+        return usage
     }
 
-    private static func normalizeDay(_ row: [String: Any]) -> [String: Any]? {
-        guard let date = row["date"] as? String, dayDate(date) != nil else { return nil }
-        let input = number(row["inputTokens"])
-        let output = number(row["outputTokens"])
-        let cacheRead = number(row["cacheReadTokens"])
-        let cacheCreation = number(row["cacheCreationTokens"])
-        let reasoning = number(row["reasoningOutputTokens"])
-        let total = number(row["totalTokens"])
-        let modelNames: [String]
-        if let models = row["models"] as? [String: Any] {
-            modelNames = models.keys.sorted()
-        } else {
-            modelNames = (row["modelsUsed"] as? [String] ?? []).sorted()
-        }
-        return [
-            "date": date,
-            "inputTokens": input,
-            "outputTokens": output,
-            "cacheReadTokens": cacheRead,
-            "cacheCreationTokens": cacheCreation,
-            "reasoningTokens": reasoning,
-            "totalTokens": total > 0 ? total : input + output + cacheRead + cacheCreation,
-            "apiEquivalentCostUSD": number(row["totalCost"] ?? row["costUSD"]),
-            "models": modelNames,
-        ]
+    /**
+     * 参与排名的模型。
+     *
+     * codex 的自动 review 不是使用者选的模型，unknown 根本不是模型 —— 两个都不
+     * 该出现在「主力模型」和排行里。它们烧掉的 token 仍然照实计入总量，那条路
+     * 走的是 totals，不看这里。
+     */
+    nonisolated private static func rankable(_ models: [String: Double]) -> [String: Double] {
+        models.filter { $0.key != "codex-auto-review" && $0.key != "unknown" && $0.value > 0 }
     }
 
-    private static func normalizedEmptyDay(date: String) -> [String: Any] {
-        [
-            "date": date,
-            "inputTokens": 0.0,
-            "outputTokens": 0.0,
-            "cacheReadTokens": 0.0,
-            "cacheCreationTokens": 0.0,
-            "reasoningTokens": 0.0,
-            "totalTokens": 0.0,
-            "apiEquivalentCostUSD": 0.0,
-            "models": [],
-        ]
+    nonisolated private static func topModel(_ models: [String: Double]) -> String? {
+        rankable(models).max { $0.value < $1.value }?.key
     }
 
-    private static func preparedDay(_ row: [String: Any]) -> [String: Any] {
-        [
-            "date": row["date"] ?? "",
-            "inputTokens": number(row["inputTokens"]),
-            "outputTokens": number(row["outputTokens"]),
-            "cacheReadTokens": number(row["cacheReadTokens"]),
-            "cacheCreationTokens": number(row["cacheCreationTokens"]),
-            "totalTokens": number(row["totalTokens"]),
-            "apiEquivalentCostUSD": number(row["apiEquivalentCostUSD"]),
-        ]
-    }
+    nonisolated private static func dayString(_ date: Date) -> String { dayFormatter.string(from: date) }
 
-    private static func normalizeTotals(_ row: [String: Any]) -> [String: Double] {
-        let input = number(row["inputTokens"])
-        let output = number(row["outputTokens"])
-        let cacheRead = number(row["cacheReadTokens"])
-        let cacheCreation = number(row["cacheCreationTokens"])
-        let total = number(row["totalTokens"])
-        return [
-            "inputTokens": input,
-            "outputTokens": output,
-            "cacheReadTokens": cacheRead,
-            "cacheCreationTokens": cacheCreation,
-            "reasoningTokens": number(row["reasoningOutputTokens"]),
-            "totalTokens": total > 0 ? total : input + output + cacheRead + cacheCreation,
-            "apiEquivalentCostUSD": number(row["totalCost"] ?? row["costUSD"]),
-        ]
-    }
-
-    private static func emptyTotals() -> [String: Double] {
-        [
-            "inputTokens": 0,
-            "outputTokens": 0,
-            "cacheReadTokens": 0,
-            "cacheCreationTokens": 0,
-            "reasoningTokens": 0,
-            "totalTokens": 0,
-            "apiEquivalentCostUSD": 0,
-        ]
-    }
-
-    private static func addTotals(_ source: [String: Double], to destination: inout [String: Double]) {
-        for (key, value) in source { destination[key, default: 0] += value }
-    }
-
-    private static func dayDate(_ value: String?) -> Date? {
-        guard let value else { return nil }
-        return dayFormatter.date(from: value)
-    }
-
-    private static func dayString(_ date: Date) -> String { dayFormatter.string(from: date) }
-
-    private static let dayFormatter: DateFormatter = {
+    /// 按本机时区切天，和请求里那个 tz 参数说的是同一件事
+    nonisolated private static let dayFormatter: DateFormatter = {
         let formatter = DateFormatter()
         formatter.calendar = Calendar(identifier: .gregorian)
         formatter.locale = Locale(identifier: "en_US_POSIX")
@@ -1949,23 +1847,17 @@ private enum CodexBarCostCollector {
         formatter.dateFormat = "yyyy-MM-dd"
         return formatter
     }()
-
-    private static func number(_ value: Any?) -> Double {
-        (value as? NSNumber)?.doubleValue ?? 0
-    }
 }
 
 private enum TelemetryModuleError: LocalizedError {
     case appleMusic(String)
-    case codexBar(String)
-    case ccusage(String)
+    case tokenTracker(String)
     case agentLimits(String)
 
     var errorDescription: String? {
         switch self {
         case let .appleMusic(message): "Apple Music：\(message)"
-        case let .codexBar(message): "CodexBar：\(message)"
-        case let .ccusage(message): "ccusage：\(message)"
+        case let .tokenTracker(message): "TokenTracker：\(message)"
         case let .agentLimits(message): "套餐额度：\(message)"
         }
     }
