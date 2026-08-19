@@ -96,11 +96,8 @@ Token、费用、限额和会话都来自本机跑着的 TokenTracker 面板，�
 `cost --refresh` 就要十几秒；现在是同一个本机 HTTP 服务的几个 GET。代价是它
 得开着 —— 面板没跑的时候三份各自留下自己的错误，互不牵连。
 
-上报的 `vibe_coding` 载荷形状没变。限额那份还带 `limitsObservedAt`：上游观测到
-这几个数的时刻，不是我们取到它的时刻。两者可以差很远（上游拿不到实时额度时会
-退回自己的磁盘缓存），站点据此把旧值标出来，否则一根旧条会安静地冒充当前值。
-窗口的个数和长度取自上游的回答，不作假设。会话状态每 60 秒刷一次；用量和限额
-每 10 分钟刷一次。
+上报的 `vibe_coding` 载荷形状没变。窗口的个数和长度取自上游的回答，不作假设。
+会话状态每 60 秒刷一次；用量和限额每 10 分钟刷一次。
 
 `position_ms` in the music module is an anchor, not a stream. Paired with
 `observed_at` and `state` it lets the site interpolate the playhead on its own,

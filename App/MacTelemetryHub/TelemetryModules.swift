@@ -1089,20 +1089,6 @@ struct AgentPlanSnapshot: Codable, Equatable, Sendable {
     /// 展示名，如 "Pro Lite"。tier 为 nil 时同样为 nil
     let label: String?
     let limits: [AgentLimitWindow]
-    /**
-     * 这几个数**在上游被观测到**的时刻，epoch 毫秒。不是我们取到它的时刻 ——
-     * 两者可以差很远：TokenTracker 拿不到 Claude 的实时额度时会从磁盘缓存读，
-     * 那份可能是几十分钟前的，而它自己把这件事标在 provenance 里。
-     *
-     * 站点据此在那几行上标「N 分钟前」，否则一根旧条会安静地冒充当前值。
-     */
-    let observedAt: Int64
-
-    /// 除采集时刻外是否完全一致。observedAt 每次采集都会变，直接用 == 判断
-    /// 「套餐有没有变」会把每一次采集都算成变化。
-    func hasSameContent(as other: AgentPlanSnapshot) -> Bool {
-        tier == other.tier && label == other.label && limits == other.limits
-    }
 }
 
 /// Providers report raw plan enums ("prolite"). Preserve the display labels used
@@ -1186,8 +1172,8 @@ private let agentLimitProviderIDs = ["claude", "codex"] + supplementalQuotaProvi
 @MainActor
 final class AgentLimitsMonitor: ObservableObject {
     @Published private(set) var plans: [String: AgentPlanSnapshot] = [:]
-    /// `vibeCodingLimits` 模块的载荷。它带着上游的观测时刻，所以那个时刻一动
-    /// 就是一次新载荷 —— 十几分钟一次，不像会话那份值得为省一封信去掉时间。
+    /// `vibeCodingLimits` 模块的载荷。里面全是内容，没有采集时刻，所以同一份
+    /// 限额重复采集不会变成一封新信。
     @Published private(set) var uploadPayload: JSONValue?
     /// 载荷真正变化的时刻，判变门闩看它 —— 理由同 CodingSessionMonitor。
     @Published private(set) var payloadUpdatedAt: Date?
@@ -1230,8 +1216,8 @@ final class AgentLimitsMonitor: ObservableObject {
 
         let outcome = await AgentLimitsCollector.collect(baseURL: baseURL)
 
-        // 内容没变就留着旧快照。换成时间戳更新的那份会让下游（上传门闩、
-        // @Published 订阅者）把每次采集都当成「套餐变了」。
+        // 内容没变就留着旧快照，下游（上传门闩、@Published 订阅者）才不会被
+        // 每一轮采集都惊动一次。
         var fresh = outcome.plans
         // 某一 provider 本轮完全失败时也保留它上次的好值；错误通过
         // limitErrors 单独标记。统一命令的一边失败不能把另一边或旧快照清掉。
@@ -1255,11 +1241,10 @@ final class AgentLimitsMonitor: ObservableObject {
                 merged = AgentPlanSnapshot(
                     tier: snapshot.tier,
                     label: snapshot.label,
-                    limits: previous.limits,
-                    observedAt: previous.observedAt
+                    limits: previous.limits
                 )
             }
-            if let previous = plans[agent], previous.hasSameContent(as: merged) {
+            if let previous = plans[agent], previous == merged {
                 fresh[agent] = previous
             } else {
                 fresh[agent] = merged
@@ -1313,8 +1298,6 @@ final class AgentLimitsMonitor: ObservableObject {
                 "id": .string(id),
                 "plan": plan.flatMap(planValue) ?? .null,
                 "limits": windows(plan?.limits ?? []),
-                // 上游观测到这几个数的时刻，不是这封信发出的时刻
-                "limitsObservedAt": plan.map { JSONValue.number(Double($0.observedAt)) } ?? .null,
                 "limitsError": limitErrors[id].map(JSONValue.string) ?? .null,
             ])
         }
@@ -1329,8 +1312,6 @@ final class AgentLimitsMonitor: ObservableObject {
                 // 和 agents[].plan / limits[].resetsAt 同名同单位
                 "plan": snapshot.flatMap(planValue) ?? .null,
                 "resetsAt": window?.resetsAt.map { .number(Double($0)) } ?? .null,
-                // 和 agents[].limitsObservedAt 同名同单位
-                "limitsObservedAt": snapshot.map { JSONValue.number(Double($0.observedAt)) } ?? .null,
                 "limitsError": limitErrors[provider.id].map(JSONValue.string) ?? .null,
             ])
         }
@@ -1412,8 +1393,7 @@ private enum AgentLimitsCollector {
             plans[provider] = AgentPlanSnapshot(
                 tier: tier,
                 label: tier.map { agentPlanLabel(agent: provider, tier: $0) },
-                limits: windows,
-                observedAt: observedAt(node)
+                limits: windows
             )
             if windows.isEmpty {
                 let message = "TokenTracker \(provider) 响应里没有限额窗口"
@@ -1543,24 +1523,6 @@ private enum AgentLimitsCollector {
         return (node["plan_label"] as? String)?.nilIfEmpty
     }
 
-    /**
-     * 上游观测到这几个数的时刻。
-     *
-     * 四家是当场去打接口的（`provenance.source` 是 provider-api，age 为 0），
-     * Claude 那份 TokenTracker headless 时取不到实时值、只能读磁盘缓存，能差
-     * 几十分钟。取不到时间戳就按此刻算 —— 宁可少标一次，不能标错方向。
-     */
-    nonisolated private static func observedAt(_ node: [String: Any]) -> Int64 {
-        let provenance = node["provenance"] as? [String: Any]
-        let captured = TokenTrackerAPI.unixSeconds(
-            provenance?["captured_at"] ?? node["cached_at"]
-        )
-        return captured.map { $0 * 1_000 } ?? nowMilliseconds
-    }
-
-    nonisolated private static var nowMilliseconds: Int64 {
-        Int64(Date().timeIntervalSince1970 * 1_000)
-    }
 }
 
 @MainActor
