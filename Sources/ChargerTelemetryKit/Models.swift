@@ -53,6 +53,10 @@ public struct ChargerState: Codable, Equatable, Sendable {
     /// carried, normally the one the handshake asked for. Ports refresh ~1 Hz
     /// from the pushed stream, so the two ages are not interchangeable.
     public var rawStatusUpdatedAt: TimeInterval?
+    /// Cloud picture id from TLV `0xE1` bytes 2–3. Not the app slot index.
+    public var screensaverId: Int?
+    /// Flag word from `0xE1` bytes 0–1, usually `0x0300` or `0x0380`.
+    public var screensaverFlags: Int?
 
     public init() {}
 }

@@ -52,6 +52,7 @@ private struct RunningApplicationChoice: Identifiable {
 struct SettingsView: View {
     @ObservedObject var service: ServiceController
     @ObservedObject private var settings: AppSettings
+    @ObservedObject private var covers: ChargerCoverController
     @ObservedObject private var bluetooth: BluetoothService
     @ObservedObject private var powerBankLink: BluetoothService
     @ObservedObject private var desktopActivity: DesktopActivityMonitor
@@ -59,12 +60,14 @@ struct SettingsView: View {
     @Environment(\.dismiss) private var dismiss
     @State private var selection: SettingsCategory = .general
     @State private var revealUserID = false
+    @State private var revealAnkerPassword = false
     @State private var message: String?
     @State private var isError = false
 
     init(service: ServiceController) {
         self.service = service
         settings = service.settings
+        covers = service.covers
         bluetooth = service.chargerLink
         powerBankLink = service.powerBankLink
         desktopActivity = service.desktopActivity
@@ -466,11 +469,53 @@ struct SettingsView: View {
             // 但会话 26 秒后就断，那种失败很难往这里想。
             settingSection(
                 "Anker 账号",
-                detail: "充电头和充电宝共用。两台设备都要它才能建立持久会话。",
+                detail: "充电头和充电宝共用。登录后会写入 40 位用户 ID，并用来拉封面预览。",
                 icon: "person.badge.key"
             ) {
                 VStack(alignment: .leading, spacing: 12) {
-                    fieldTitle("Anker 用户 ID", detail: "40 个 ASCII 字符")
+                    fieldTitle("账号", detail: "手机号或邮箱")
+                    TextField("例如 13800000000", text: $settings.ankerAccount)
+                        .textFieldStyle(.roundedBorder)
+
+                    fieldTitle("密码", detail: "保存在钥匙串")
+                    HStack(spacing: 8) {
+                        Group {
+                            if revealAnkerPassword {
+                                TextField("Anker 密码", text: $settings.ankerPassword)
+                            } else {
+                                SecureField("Anker 密码", text: $settings.ankerPassword)
+                            }
+                        }
+                        .textFieldStyle(.roundedBorder)
+
+                        Button {
+                            revealAnkerPassword.toggle()
+                        } label: {
+                            Image(systemName: revealAnkerPassword ? "eye" : "eye.slash")
+                                .frame(width: 16, height: 16)
+                        }
+                        .buttonStyle(.bordered)
+                        .help(revealAnkerPassword ? "隐藏密码" : "显示密码")
+                    }
+
+                    HStack(spacing: 10) {
+                        Button {
+                            Task { await loginAnkerAccount() }
+                        } label: {
+                            Label(
+                                covers.isLoggingIn ? "正在登录…" : "登录并写入用户 ID",
+                                systemImage: covers.isLoggingIn ? "hourglass" : "person.badge.key.fill"
+                            )
+                        }
+                        .buttonStyle(.bordered)
+                        .disabled(covers.isLoggingIn || !settings.hasAnkerCloudCredentials)
+
+                        Text(settings.hasValidAnkerToken ? "云端会话有效" : "尚未登录云端")
+                            .font(.caption)
+                            .foregroundStyle(settings.hasValidAnkerToken ? Color.secondary : Color.orange)
+                    }
+
+                    fieldTitle("Anker 用户 ID", detail: "登录后自动填写，也可手改")
                     HStack(spacing: 8) {
                         Group {
                             if revealUserID {
@@ -485,16 +530,28 @@ struct SettingsView: View {
                         Button {
                             revealUserID.toggle()
                         } label: {
-                            Image(systemName: revealUserID ? "eye.slash" : "eye")
+                            Image(systemName: revealUserID ? "eye" : "eye.slash")
                                 .frame(width: 16, height: 16)
                         }
                         .buttonStyle(.bordered)
                         .help(revealUserID ? "隐藏用户 ID" : "显示用户 ID")
                     }
-                    Text("该 ID 同时决定屏保个性化状态；使用其他账户的值会导致锁屏图片消失。")
+                    Text("BLE 会话仍然用这个 ID。只有点「登录并写入用户 ID」才会向 Anker 发登录请求；保存设置、刷新封面都不会自动登录。新登录有可能把手机 App 顶下线。")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
+
+                    if let loginMessage = covers.loginMessage {
+                        Label(loginMessage, systemImage: "checkmark.circle")
+                            .font(.caption)
+                            .foregroundStyle(.green)
+                    }
+                    if let coverError = covers.lastError, selection == .charger {
+                        Label(coverError, systemImage: "xmark.circle")
+                            .font(.caption)
+                            .foregroundStyle(.red)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
                 }
             }
 
@@ -819,6 +876,21 @@ struct SettingsView: View {
     }
 
     private func save() {
+        Task { await saveSettings() }
+    }
+
+    private func loginAnkerAccount() async {
+        do {
+            try await service.covers.loginAndStoreUserID()
+            message = service.covers.loginMessage ?? "Anker 账号已登录。"
+            isError = false
+        } catch {
+            message = error.localizedDescription
+            isError = true
+        }
+    }
+
+    private func saveSettings() async {
         do {
             try service.applySettings()
             message = "设置已保存，正在建立新会话。"

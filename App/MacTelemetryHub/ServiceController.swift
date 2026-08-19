@@ -494,6 +494,7 @@ final class ServiceController: ObservableObject {
     let chargingLinks: [BluetoothService]
     var chargerLink: BluetoothService { chargingLinks[0] }
     var powerBankLink: BluetoothService { chargingLinks[1] }
+    let covers: ChargerCoverController
     let desktopActivity = DesktopActivityMonitor()
     let timeZone = TimeZoneMonitor()
     let appleMusic = AppleMusicMonitor()
@@ -627,6 +628,7 @@ final class ServiceController: ObservableObject {
             BluetoothService(settings: settings, slot: .charger),
             BluetoothService(settings: settings, slot: .powerBank),
         ]
+        covers = ChargerCoverController(settings: settings, chargerLink: chargingLinks[0])
     }
 
     deinit {
@@ -903,7 +905,11 @@ final class ServiceController: ObservableObject {
             return
         }
         link.onStateChange = { [weak self] in
-            guard let self, let payload = chargingDevicesPayload else { return }
+            guard let self else { return }
+            if link.slot == .charger {
+                covers.chargerStateDidChange()
+            }
+            guard let payload = chargingDevicesPayload else { return }
             let signature = ChargingDevicesStructuralSignature(payload)
             guard signature != lastPostedChargingStructural else { return }
             wakeReporter()

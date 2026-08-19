@@ -27,6 +27,9 @@
 		B10000000000000000000023 /* ChargingDeviceDecoder.swift in Sources */ = {isa = PBXBuildFile; fileRef = F10000000000000000000023 /* ChargingDeviceDecoder.swift */; };
 		B10000000000000000000024 /* ChargingDeviceSlot.swift in Sources */ = {isa = PBXBuildFile; fileRef = F10000000000000000000024 /* ChargingDeviceSlot.swift */; };
 		B10000000000000000000025 /* DesktopReportingBlacklist.swift in Sources */ = {isa = PBXBuildFile; fileRef = F10000000000000000000025 /* DesktopReportingBlacklist.swift */; };
+		B10000000000000000000026 /* AnkerPassportCrypto.swift in Sources */ = {isa = PBXBuildFile; fileRef = F10000000000000000000026 /* AnkerPassportCrypto.swift */; };
+		B10000000000000000000027 /* AnkerCloudClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = F10000000000000000000027 /* AnkerCloudClient.swift */; };
+		B10000000000000000000028 /* ChargerCoverController.swift in Sources */ = {isa = PBXBuildFile; fileRef = F10000000000000000000028 /* ChargerCoverController.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -53,6 +56,9 @@
 		F10000000000000000000023 /* ChargingDeviceDecoder.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChargingDeviceDecoder.swift; sourceTree = "<group>"; };
 		F10000000000000000000024 /* ChargingDeviceSlot.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChargingDeviceSlot.swift; sourceTree = "<group>"; };
 		F10000000000000000000025 /* DesktopReportingBlacklist.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DesktopReportingBlacklist.swift; sourceTree = "<group>"; };
+		F10000000000000000000026 /* AnkerPassportCrypto.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AnkerPassportCrypto.swift; sourceTree = "<group>"; };
+		F10000000000000000000027 /* AnkerCloudClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AnkerCloudClient.swift; sourceTree = "<group>"; };
+		F10000000000000000000028 /* ChargerCoverController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChargerCoverController.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -91,6 +97,8 @@
 				F1000000000000000000000F /* Assets.xcassets */,
 				A10000000000000000000013 /* Resources */,
 				F10000000000000000000024 /* ChargingDeviceSlot.swift */,
+				F10000000000000000000027 /* AnkerCloudClient.swift */,
+				F10000000000000000000028 /* ChargerCoverController.swift */,
 			);
 			path = App/MacTelemetryHub;
 			sourceTree = SOURCE_ROOT;
@@ -106,6 +114,7 @@
 				F10000000000000000000021 /* PowerBankProtocol.swift */,
 				F10000000000000000000022 /* AnkerPrimeSpec.swift */,
 				F10000000000000000000025 /* DesktopReportingBlacklist.swift */,
+				F10000000000000000000026 /* AnkerPassportCrypto.swift */,
 			);
 			path = Sources/ChargerTelemetryKit;
 			sourceTree = SOURCE_ROOT;
@@ -200,6 +209,9 @@
 				B10000000000000000000023 /* ChargingDeviceDecoder.swift in Sources */,
 				B10000000000000000000024 /* ChargingDeviceSlot.swift in Sources */,
 				B10000000000000000000025 /* DesktopReportingBlacklist.swift in Sources */,
+				B10000000000000000000026 /* AnkerPassportCrypto.swift in Sources */,
+				B10000000000000000000027 /* AnkerCloudClient.swift in Sources */,
+				B10000000000000000000028 /* ChargerCoverController.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

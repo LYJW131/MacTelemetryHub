@@ -59,6 +59,13 @@ public enum A2687Protocol {
     public static let groupTelemetry: UInt8 = 0x0F
     public static let commandStatus: UInt16 = 0x0200
     public static let commandRealtime: UInt16 = 0x020A
+    public static let commandSetScreensaver: UInt16 = 0x021F
+    public static let commandTransferStart: UInt16 = 0x0220
+    public static let commandTransferData: UInt16 = 0x0221
+    public static let screensaverTypeCustom: UInt8 = 3
+    public static let screensaverChunkSize = 156
+    public static let screensaverAckEvery = 10
+    private static let screensaverURLKey = Data("SmallChargingUrl".utf8)
 
     private static let flagEncrypted: UInt8 = 0x40
     private static let flagAcknowledged: UInt8 = 0x08
@@ -234,6 +241,123 @@ public enum A2687Protocol {
         ]
     }
 
+    /// Official 47-byte `0x021F` body that selects an already-uploaded custom picture.
+    ///
+    /// Slot index is not sent. `pictureID` is the cloud id (`0xE1` / list `id`);
+    /// `hashCode` is the cloud `hash_code`. Timestamp is typed u32, not the
+    /// brightness `FE 04` wrapper.
+    public static func screensaverSelectFields(
+        pictureID: UInt32,
+        hashCode: UInt32,
+        type: UInt8 = screensaverTypeCustom,
+        date: Date = Date()
+    ) -> [TLVField] {
+        var idValue = Data([0x04])
+        idValue.appendUInt32LE(pictureID)
+        var hashValue = Data([0x04])
+        hashValue.appendUInt32LE(hashCode)
+        var url = Data([0x00])
+        url.append(screensaverURLKey)
+        var timestamp = Data([0x03])
+        timestamp.append(epochBytes(date: date))
+        return [
+            TLVField(0xA1, Data([0x21])),
+            TLVField(0xA3, Data([0x01, type])),
+            TLVField(0xA4, idValue),
+            TLVField(0xA5, hashValue),
+            TLVField(0xFD, url),
+            TLVField(0xFE, timestamp),
+        ]
+    }
+
+    /// Official 49-byte `0x0220` body that starts a custom-cover pixel transfer.
+    public static func screensaverTransferStartFields(
+        pictureID: UInt32,
+        hashCode: UInt32,
+        fileSize: Int,
+        chunkCount: Int,
+        chunkSize: Int = screensaverChunkSize,
+        ackEvery: Int = screensaverAckEvery,
+        date: Date = Date()
+    ) -> [TLVField] {
+        var idValue = Data([0x04])
+        idValue.appendUInt32LE(pictureID)
+        var hashValue = Data([0x04])
+        hashValue.appendUInt32LE(hashCode)
+        var sizeValue = Data([0x03])
+        sizeValue.appendUInt32LE(UInt32(truncatingIfNeeded: fileSize))
+        var chunkSizeValue = Data([0x02])
+        chunkSizeValue.appendUInt16LE(UInt16(truncatingIfNeeded: chunkSize))
+        var chunkCountValue = Data([0x02])
+        chunkCountValue.appendUInt16LE(UInt16(truncatingIfNeeded: chunkCount))
+        var timestamp = Data([0x03])
+        timestamp.append(epochBytes(date: date))
+        return [
+            TLVField(0xA1, Data([0x21])),
+            TLVField(0xA2, Data([0x01, 0x01])),
+            TLVField(0xA3, idValue),
+            TLVField(0xA4, hashValue),
+            TLVField(0xA5, sizeValue),
+            TLVField(0xA6, Data([0x01, UInt8(truncatingIfNeeded: ackEvery)])),
+            TLVField(0xA7, chunkSizeValue),
+            TLVField(0xA8, chunkCountValue),
+            TLVField(0xFE, timestamp),
+        ]
+    }
+
+    /// Official 167-byte `0x0221` body. Last slice is zero-padded to 156 bytes.
+    public static func screensaverChunkFields(seq: Int, data: Data) throws -> [TLVField] {
+        guard data.count <= screensaverChunkSize else {
+            throw ProtocolError.valueTooLong(0xA3, data.count)
+        }
+        var payload = data
+        if payload.count < screensaverChunkSize {
+            payload.append(Data(count: screensaverChunkSize - payload.count))
+        }
+        var slice = Data([0x04])
+        slice.append(payload)
+        var index = Data([0x02])
+        index.appendUInt16LE(UInt16(truncatingIfNeeded: seq))
+        return [
+            TLVField(0xA1, Data([0x21])),
+            TLVField(0xA2, index),
+            TLVField(0xA3, slice),
+        ]
+    }
+
+    public static func screensaverChunks(_ jpeg: Data, chunkSize: Int = screensaverChunkSize) -> [Data] {
+        guard !jpeg.isEmpty, chunkSize > 0 else { return [] }
+        var chunks: [Data] = []
+        var offset = 0
+        while offset < jpeg.count {
+            let end = min(offset + chunkSize, jpeg.count)
+            chunks.append(jpeg.subdata(in: offset..<end))
+            offset = end
+        }
+        return chunks
+    }
+
+    /// Cloud-only select ACKs `11 A1 01 31`; pixels already on the charger ACK `00 A1 01 31`.
+    public static func isCloudOnlySelectAck(_ payload: Data) -> Bool {
+        let marker = Data([0x11, 0xA1, 0x01, 0x31])
+        return payload.starts(with: marker) || payload.range(of: marker) != nil
+    }
+
+    /// `0xE1` is a 10-byte struct: flags u16le, cloud id u16le, then zeros.
+    /// The TLV value is usually typed (`04` + struct); some snapshots omit the tag.
+    public static func parseScreensaverField(_ raw: Data) -> (id: UInt16, flags: UInt16)? {
+        let blob: Data
+        let decoded = TypedValue(raw)
+        if decoded.tag == 0x04, decoded.payload.count >= 4 {
+            blob = decoded.payload
+        } else if raw.count >= 4 {
+            blob = raw
+        } else {
+            return nil
+        }
+        return (blob.readUInt16LE(at: 2), blob.readUInt16LE(at: 0))
+    }
+
     public static func findDevicePublicKey(in payload: Data) -> Data? {
         parseTLV(payload, offset: tlvOffset(payload)).first { $0.type == 0xA1 && $0.value.count == 64 }?.value
     }
@@ -254,9 +378,11 @@ public enum A2687Protocol {
             guard let value = fields[type] else { return false }
             return value.tag == 0x04 && value.payload.count >= 7
         }
-        guard hasPortStruct else { return false }
-
-        var changed = false
+        var changed = applyScreensaver(fields, state: &state)
+        guard hasPortStruct else {
+            if changed { state.updatedAt = now.timeIntervalSince1970 }
+            return changed
+        }
         if !statusSnapshotCommands.contains(command) {
             var total = 0.0
             for (type, key) in portTypes {
@@ -285,10 +411,25 @@ public enum A2687Protocol {
         return changed
     }
 
+    @discardableResult
+    private static func applyScreensaver(_ fields: [UInt8: TypedValue], state: inout ChargerState) -> Bool {
+        guard let field = fields[0xE1] else { return false }
+        var raw = Data([field.tag])
+        raw.append(field.payload)
+        guard let parsed = parseScreensaverField(raw) else { return false }
+        let pictureID = Int(parsed.id)
+        let flags = Int(parsed.flags)
+        guard state.screensaverId != pictureID || state.screensaverFlags != flags else { return false }
+        state.screensaverId = pictureID
+        state.screensaverFlags = flags
+        return true
+    }
+
     public static func parseStatusSnapshot(_ payload: Data, state: inout ChargerState, now: Date = Date()) {
         let names: [UInt8: String] = [
             0xA1: "state_code", 0xA2: "serial_or_identifier", 0xA4: "product_code",
-            0xD0: "port_config_0", 0xD1: "port_config_1", 0xFD: "firmware_tag",
+            0xA9: "screen_brightness", 0xD0: "port_config_0", 0xD1: "port_config_1",
+            0xE1: "screensaver", 0xFD: "firmware_tag",
         ]
         var snapshot: [String: String] = [:]
         for field in parseTLV(payload, offset: tlvOffset(payload)) {
@@ -307,6 +448,9 @@ public enum A2687Protocol {
                 state.device.productCode = text
             } else if field.type == 0xFD, let text = decoded.text {
                 state.device.firmwareTag = text
+            } else if field.type == 0xE1, let parsed = parseScreensaverField(field.value) {
+                state.screensaverId = Int(parsed.id)
+                state.screensaverFlags = Int(parsed.flags)
             }
         }
         state.rawStatus = snapshot

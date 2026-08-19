@@ -107,3 +107,80 @@ import Testing
     #expect(state.ports["C3"]?.vendor == "Apple")
     #expect(state.ports["C3"]?.deviceModel == "MacBook Pro series")
 }
+
+@Test func screensaverSelectBodyMatchesOfficial47ByteLayout() throws {
+    let fields = A2687Protocol.screensaverSelectFields(
+        pictureID: 24551,
+        hashCode: 0x1DA2DDCA,
+        date: Date(timeIntervalSince1970: 1)
+    )
+    let body = try A2687Protocol.buildTLV(fields)
+    #expect(body.count == 47)
+    #expect(
+        body.uppercaseHex ==
+        "A10121A3020103A40504E75F0000A50504CADDA21DFD1100536D616C6C4368617267696E6755726CFE050301000000"
+    )
+}
+
+@Test func screensaverFieldDecodesCloudID() throws {
+    let typed = Data(hex: "048003E75F000000000000")!
+    let parsed = A2687Protocol.parseScreensaverField(typed)
+    #expect(parsed?.id == 24551)
+    #expect(parsed?.flags == 0x0380)
+
+    var payload = Data([0x00])
+    payload.append(try A2687Protocol.buildTLV([
+        TLVField(0xE1, typed),
+        TLVField(0xA7, Data([0x04, 0x01, 0x98, 0x4D, 0xFD, 0x02, 0xE5, 0x05])),
+    ]))
+    var state = ChargerState()
+    #expect(A2687Protocol.parseRealtime(payload, command: 0x0300, state: &state))
+    #expect(state.screensaverId == 24551)
+    #expect(state.screensaverFlags == 0x0380)
+}
+
+@Test func screensaverTransferBodiesMatchOfficialLayouts() throws {
+    let start = try A2687Protocol.buildTLV(
+        A2687Protocol.screensaverTransferStartFields(
+            pictureID: 45470,
+            hashCode: 0xC126BFEF,
+            fileSize: 25397,
+            chunkCount: 163,
+            date: Date(timeIntervalSince1970: 1)
+        )
+    )
+    #expect(start.count == 49)
+    #expect(
+        start.uppercaseHex ==
+        "A10121A2020101A305049EB10000A40504EFBF26C1A5050335630000A602010AA703029C00A80302A300FE050301000000"
+    )
+
+    let last = Data([0xFF])
+    let chunk = try A2687Protocol.buildTLV(A2687Protocol.screensaverChunkFields(seq: 162, data: last))
+    #expect(chunk.count == 167)
+    #expect(chunk[0] == 0xA1)
+    #expect(Array(chunk[3..<8]) == [0xA2, 0x03, 0x02, 0xA2, 0x00])
+    #expect(chunk[8] == 0xA3)
+    #expect(chunk[9] == 0x9D)
+    #expect(chunk[10] == 0x04)
+    #expect(chunk[11] == 0xFF)
+    #expect(chunk.suffix(155).allSatisfy { $0 == 0 })
+
+    let slices = A2687Protocol.screensaverChunks(Data(count: 25397))
+    #expect(slices.count == 163)
+    #expect(slices.last?.count == 25397 - 162 * 156)
+    #expect(A2687Protocol.isCloudOnlySelectAck(Data([0x11, 0xA1, 0x01, 0x31])))
+    #expect(!A2687Protocol.isCloudOnlySelectAck(Data([0x00, 0xA1, 0x01, 0x31])))
+}
+
+@Test func passportPasswordUsesAES256CBCWithSharedSecretPrefixIV() throws {
+    let key = Data((0 as UInt8)..<32)
+    let ciphertext = try AnkerPassportCrypto.aes256CBCEncrypt(
+        key: key,
+        iv: key.prefix(16),
+        plaintext: Data("test-password".utf8)
+    )
+    #expect(ciphertext.base64EncodedString() == "/pwCUy+lmRxTF2oWJX1Qrg==")
+    #expect(AnkerPassportCrypto.parseHashCode("0x1da2ddca") == 0x1DA2DDCA)
+    #expect(AnkerPassportCrypto.parseHashCode("43B2E02C") == 0x43B2E02C)
+}

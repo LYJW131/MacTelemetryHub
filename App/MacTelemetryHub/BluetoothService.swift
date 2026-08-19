@@ -187,6 +187,71 @@ final class BluetoothService: NSObject, ObservableObject {
         scheduleRetry(after: .seconds(1))
     }
 
+    /// Official `0x021F`. Returns the ACK payload — `11 A1 01 31` means pixels are not on the charger.
+    func selectScreensaver(pictureID: UInt32, hashCode: UInt32) async throws -> Data {
+        guard phase == .connected else { throw BLEError.disconnected }
+        return try await sendExpect(
+            group: A2687Protocol.groupTelemetry,
+            command: A2687Protocol.commandSetScreensaver,
+            fields: A2687Protocol.screensaverSelectFields(pictureID: pictureID, hashCode: hashCode)
+        )
+    }
+
+    /// Official pixel path: `0x021F` → `0x0220` → `0x0221` slices (156 bytes, ACK every 10).
+    func transferScreensaver(
+        jpeg: Data,
+        pictureID: UInt32,
+        hashCode: UInt32,
+        progress: (@MainActor (Int, Int) -> Void)? = nil
+    ) async throws {
+        guard phase == .connected else { throw BLEError.disconnected }
+        let chunks = A2687Protocol.screensaverChunks(jpeg)
+        guard !chunks.isEmpty else { throw BLEError.emptyJPEG }
+
+        _ = try await sendExpect(
+            group: A2687Protocol.groupTelemetry,
+            command: A2687Protocol.commandSetScreensaver,
+            fields: A2687Protocol.screensaverSelectFields(pictureID: pictureID, hashCode: hashCode)
+        )
+        try await Task.sleep(for: .milliseconds(150))
+        _ = try await sendExpect(
+            group: A2687Protocol.groupTelemetry,
+            command: A2687Protocol.commandTransferStart,
+            fields: A2687Protocol.screensaverTransferStartFields(
+                pictureID: pictureID,
+                hashCode: hashCode,
+                fileSize: jpeg.count,
+                chunkCount: chunks.count
+            )
+        )
+        try await Task.sleep(for: .milliseconds(200))
+
+        let every = A2687Protocol.screensaverAckEvery
+        for (seq, chunk) in chunks.enumerated() {
+            try Task.checkCancellation()
+            guard phase == .connected else { throw BLEError.disconnected }
+            progress?(seq + 1, chunks.count)
+            let fields = try A2687Protocol.screensaverChunkFields(seq: seq, data: chunk)
+            let last = seq + 1 == chunks.count
+            if last || (seq + 1) % every == 0 {
+                _ = try await sendExpect(
+                    group: A2687Protocol.groupTelemetry,
+                    command: A2687Protocol.commandTransferData,
+                    fields: fields,
+                    timeout: .seconds(5)
+                )
+            } else {
+                try send(
+                    group: A2687Protocol.groupTelemetry,
+                    command: A2687Protocol.commandTransferData,
+                    fields: fields
+                )
+                try await Task.sleep(for: .milliseconds(40))
+            }
+        }
+        try await Task.sleep(for: .milliseconds(400))
+    }
+
     func shutdown() {
         desiredConnection = false
         destroyBluetoothSession()
@@ -492,11 +557,17 @@ final class BluetoothService: NSObject, ObservableObject {
         peripheral.writeValue(frame, for: writeCharacteristic, type: .withoutResponse)
     }
 
-    private func sendExpect(group: UInt8, command: UInt16, fields: [TLVField]) async throws -> Data {
+    private func sendExpect(
+        group: UInt8,
+        command: UInt16,
+        fields: [TLVField],
+        timeout: Duration = .seconds(6)
+    ) async throws -> Data {
         guard pending == nil else { throw BLEError.requestAlreadyPending }
+        let wait = timeout
         return try await withCheckedThrowingContinuation { continuation in
             let timeout = Task { [weak self] in
-                try? await Task.sleep(for: .seconds(6))
+                try? await Task.sleep(for: wait)
                 guard !Task.isCancelled, let self, let pending = self.pending, pending.command == command else { return }
                 self.pending = nil
                 pending.continuation.resume(throwing: BLEError.responseTimeout(command))
@@ -699,7 +770,7 @@ private struct PendingResponse {
 }
 
 private enum BLEError: LocalizedError {
-    case disconnected, requestAlreadyPending, responseTimeout(UInt16), missingDeviceKey
+    case disconnected, requestAlreadyPending, responseTimeout(UInt16), missingDeviceKey, emptyJPEG
 
     var errorDescription: String? {
         switch self {
@@ -707,6 +778,7 @@ private enum BLEError: LocalizedError {
         case .requestAlreadyPending: "上一个蓝牙请求尚未完成"
         case let .responseTimeout(command): String(format: "等待命令 0x%04X 响应超时", command)
         case .missingDeviceKey: "充电器没有返回有效的 P-256 公钥"
+        case .emptyJPEG: "封面 JPEG 是空的，无法传到充电头"
         }
     }
 }

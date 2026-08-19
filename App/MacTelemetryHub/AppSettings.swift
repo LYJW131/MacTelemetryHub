@@ -35,9 +35,17 @@ final class AppSettings: ObservableObject {
         static let r2SecretAccessKeyAccount = "r2-secret-access-key"
         static let userIDAccount = "anker-user-id"
         static let telemetrySecretAccount = "telemetry-ingest-secret"
+        static let ankerAccount = "ankerAccount"
+        static let ankerPasswordAccount = "anker-password"
+        static let ankerAuthTokenAccount = "anker-auth-token"
+        static let ankerAuthExpiresAt = "ankerAuthExpiresAt"
     }
 
     @Published var userID: String
+    @Published var ankerAccount: String
+    @Published var ankerPassword: String
+    @Published var ankerAuthToken: String
+    @Published var ankerAuthExpiresAt: TimeInterval
     @Published var peripheralID: String
     @Published var powerBankPeripheralID: String
     @Published var httpServerEnabled: Bool
@@ -78,6 +86,17 @@ final class AppSettings: ObservableObject {
         // Keychain at startup in that case, so the UI and HTTP listener cannot stall.
         let storedUserID = environmentUserID.isEmpty ? (keychain.read(account: Key.userIDAccount) ?? "") : ""
         userID = environmentUserID.isEmpty ? storedUserID : environmentUserID
+        ankerAccount = defaults.string(forKey: Key.ankerAccount)
+            ?? environment["ANKER_ACCOUNT"]
+            ?? environment["A2687_ACCOUNT"]
+            ?? ""
+        ankerPassword = environment["ANKER_PASSWORD"]
+            ?? environment["A2687_PASSWORD"]
+            ?? (environmentUserID.isEmpty ? (keychain.read(account: Key.ankerPasswordAccount) ?? "") : "")
+        ankerAuthToken = environmentUserID.isEmpty
+            ? (keychain.read(account: Key.ankerAuthTokenAccount) ?? "")
+            : ""
+        ankerAuthExpiresAt = defaults.double(forKey: Key.ankerAuthExpiresAt)
         peripheralID = defaults.string(forKey: Key.peripheralID) ?? environment["A2687_ADDRESS"] ?? ""
         powerBankPeripheralID = defaults.string(forKey: Key.powerBankPeripheralID)
             ?? environment["ANKER_POWERBANK_ADDRESS"] ?? ""
@@ -183,6 +202,17 @@ final class AppSettings: ObservableObject {
         BundleIdentifierList(rawValue: windowTitleApplicationWhitelist)
     }
 
+    var hasAnkerCloudCredentials: Bool {
+        !ankerAccount.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && !ankerPassword.isEmpty
+    }
+
+    var hasValidAnkerToken: Bool {
+        let token = ankerAuthToken.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !token.isEmpty else { return false }
+        if ankerAuthExpiresAt <= 0 { return true }
+        return ankerAuthExpiresAt > Date().timeIntervalSince1970 + 60
+    }
+
     func isDesktopReportingBlocked(bundleIdentifier: String?) -> Bool {
         normalizedDesktopReportingBlacklist.contains(bundleIdentifier: bundleIdentifier)
     }
@@ -261,6 +291,7 @@ final class AppSettings: ObservableObject {
     func save() throws {
         try validate()
         userID = userID.trimmingCharacters(in: .whitespacesAndNewlines)
+        ankerAccount = ankerAccount.trimmingCharacters(in: .whitespacesAndNewlines)
         peripheralID = peripheralID.trimmingCharacters(in: .whitespacesAndNewlines)
         powerBankPeripheralID = powerBankPeripheralID.trimmingCharacters(in: .whitespacesAndNewlines)
         postURL = postURL.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -275,7 +306,7 @@ final class AppSettings: ObservableObject {
         windowTitleApplicationWhitelist = normalizedWindowTitleApplicationWhitelist.normalizedRawValue
         r2AccessKeyID = r2AccessKeyID.trimmingCharacters(in: .whitespacesAndNewlines)
         r2SecretAccessKey = r2SecretAccessKey.trimmingCharacters(in: .whitespacesAndNewlines)
-        try keychain.write(userID, account: Key.userIDAccount)
+        try persistAnkerAccount()
         try keychain.write(telemetrySecret, account: Key.telemetrySecretAccount)
         try keychain.write(r2AccessKeyID, account: Key.r2AccessKeyAccount)
         try keychain.write(r2SecretAccessKey, account: Key.r2SecretAccessKeyAccount)
@@ -303,6 +334,17 @@ final class AppSettings: ObservableObject {
         defaults.set(agentLimitsRefreshInterval, forKey: Key.agentLimitsRefreshInterval)
         defaults.set(r2Endpoint, forKey: Key.r2Endpoint)
         defaults.set(r2Bucket, forKey: Key.r2Bucket)
+    }
+
+    /// Writes account, password, token and user ID without re-validating the rest of Settings.
+    func persistAnkerAccount() throws {
+        userID = userID.trimmingCharacters(in: .whitespacesAndNewlines)
+        ankerAccount = ankerAccount.trimmingCharacters(in: .whitespacesAndNewlines)
+        try keychain.write(userID, account: Key.userIDAccount)
+        try keychain.write(ankerPassword, account: Key.ankerPasswordAccount)
+        try keychain.write(ankerAuthToken, account: Key.ankerAuthTokenAccount)
+        defaults.set(ankerAccount, forKey: Key.ankerAccount)
+        defaults.set(ankerAuthExpiresAt, forKey: Key.ankerAuthExpiresAt)
     }
 
     func setLaunchAtLogin(_ enabled: Bool) throws {

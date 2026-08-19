@@ -36,6 +36,7 @@ private enum DashboardSection: String, CaseIterable, Identifiable {
 struct DashboardView: View {
     @ObservedObject var service: ServiceController
     @ObservedObject private var bluetooth: BluetoothService
+    @ObservedObject private var covers: ChargerCoverController
     @ObservedObject private var powerBankLink: BluetoothService
     @ObservedObject private var httpServer: LocalHTTPServer
     @ObservedObject private var desktopActivity: DesktopActivityMonitor
@@ -51,6 +52,7 @@ struct DashboardView: View {
     init(service: ServiceController) {
         self.service = service
         bluetooth = service.chargerLink
+        covers = service.covers
         powerBankLink = service.powerBankLink
         httpServer = service.httpServer
         desktopActivity = service.desktopActivity
@@ -70,6 +72,12 @@ struct DashboardView: View {
             .navigationSplitViewStyle(.balanced)
         }
         .frame(minWidth: 880, minHeight: 620)
+        .task {
+            await covers.refresh(force: false)
+        }
+        .onChange(of: bluetooth.chargerStateForDisplay.device.serialNumber) { _, _ in
+            Task { await covers.refresh(force: false) }
+        }
     }
 
     private func sidebar(now: Date) -> some View {
@@ -282,6 +290,8 @@ struct DashboardView: View {
                             .frame(minHeight: 248)
                     }
                 }
+
+                coverSection
             } else {
                 EmptyModuleView(
                     title: "充电模块未启用",
@@ -615,6 +625,78 @@ struct DashboardView: View {
         return track.isEmpty ? (appleMusic.lastError ?? "Music.app 已停止") : track
     }
 
+    private var coverSection: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(alignment: .firstTextBaseline) {
+                sectionHeading("自定义封面", detail: "点预览即可切换。头上没有像素的图会先按官方路径传上去（0x0220/0x0221），机内只有 4 个槽，多传会顶掉一张。")
+                Spacer()
+                Button {
+                    Task { await covers.refresh(force: true) }
+                } label: {
+                    if covers.isLoading {
+                        ProgressView().controlSize(.small)
+                    } else {
+                        Label("刷新", systemImage: "arrow.clockwise")
+                    }
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+                .disabled(covers.isLoading)
+            }
+
+            if let progress = covers.transferProgress, let transferring = covers.transferringID {
+                let name = covers.pictures.first(where: { $0.id == transferring }).map {
+                    $0.name.isEmpty ? "槽位 \($0.seq)" : $0.name
+                } ?? "封面"
+                Label("正在把 \(name) 传到充电头（\(progress.0)/\(progress.1)）", systemImage: "arrow.up.circle")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            } else if let error = covers.lastError {
+                Label(error, systemImage: "exclamationmark.triangle.fill")
+                    .font(.caption)
+                    .foregroundStyle(.orange)
+                    .fixedSize(horizontal: false, vertical: true)
+            } else if !service.settings.hasAnkerCloudCredentials {
+                Label("在设置里填写 Anker 账号密码并登录后，这里会列出封面预览。", systemImage: "person.badge.key")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            } else if covers.pictures.isEmpty, covers.isLoading {
+                Label("正在从云端拉取封面…", systemImage: "photo")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            } else if covers.pictures.isEmpty {
+                Label("云端还没有自定义封面，或充电头尚未连上。", systemImage: "photo")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
+            if !covers.pictures.isEmpty {
+                ScrollView(.horizontal, showsIndicators: true) {
+                    HStack(alignment: .top, spacing: 10) {
+                        ForEach(covers.pictures) { picture in
+                            CoverPreviewTile(
+                                picture: picture,
+                                image: covers.previews[picture.id],
+                                isCurrent: covers.currentPictureID == picture.id,
+                                isCloudOnly: covers.cloudOnlyIDs.contains(picture.id),
+                                isSelecting: covers.selectingID == picture.id
+                                    || covers.transferringID == picture.id,
+                                transferLabel: covers.transferringID == picture.id
+                                    ? covers.transferProgress.map { "\($0.0)/\($0.1)" }
+                                    : nil,
+                                enabled: covers.canSelect
+                            ) {
+                                Task { await covers.select(picture) }
+                            }
+                        }
+                    }
+                    .padding(.vertical, 2)
+                }
+                .scrollIndicators(.visible, axes: .horizontal)
+            }
+        }
+    }
+
     private func overviewCard(now: Date) -> some View {
         HStack(spacing: 22) {
             VStack(alignment: .leading, spacing: 10) {
@@ -649,6 +731,7 @@ struct DashboardView: View {
                 DeviceFact(title: "MAC 地址", value: bluetooth.chargerStateForDisplay.device.macAddress, icon: "antenna.radiowaves.left.and.right")
                 DeviceFact(title: "固件版本", value: bluetooth.chargerStateForDisplay.device.firmwareVersion, icon: "cpu")
                 DeviceFact(title: "数据更新", value: ageText(now: now), icon: "clock.arrow.circlepath")
+                DeviceFact(title: "当前封面", value: currentCoverText, icon: "photo")
             }
             .frame(maxWidth: .infinity)
         }
@@ -740,6 +823,14 @@ struct DashboardView: View {
 
     private func ageText(now: Date) -> String? {
         bluetooth.chargerStateForDisplay.updatedAt.map { String(format: "%.1f 秒前", max(0, now.timeIntervalSince1970 - $0)) }
+    }
+
+    private var currentCoverText: String? {
+        guard let id = bluetooth.chargerStateForDisplay.screensaverId else { return nil }
+        if let picture = covers.pictures.first(where: { $0.id == id }) {
+            return picture.name.isEmpty ? "槽位 \(picture.seq)" : picture.name
+        }
+        return "#\(id)"
     }
 }
 
@@ -1034,6 +1125,85 @@ private struct PowerBankPortCard: View {
         .background(Color(nsColor: .controlBackgroundColor))
         .overlay(RoundedRectangle(cornerRadius: 8).stroke(.primary.opacity(0.08), lineWidth: 1))
         .clipShape(RoundedRectangle(cornerRadius: 8))
+    }
+}
+
+private struct CoverPreviewTile: View {
+    let picture: AnkerScreensaverPicture
+    let image: NSImage?
+    let isCurrent: Bool
+    let isCloudOnly: Bool
+    let isSelecting: Bool
+    let transferLabel: String?
+    let enabled: Bool
+    let action: () -> Void
+
+    private let imageSize: CGFloat = 132
+
+    private var title: String {
+        picture.name.isEmpty ? "槽位 \(picture.seq)" : picture.name
+    }
+
+    var body: some View {
+        Button(action: action) {
+            VStack(alignment: .leading, spacing: 6) {
+                ZStack {
+                    Color.primary.opacity(0.05)
+                    if let image {
+                        Image(nsImage: image)
+                            .resizable()
+                            .scaledToFill()
+                    } else {
+                        Image(systemName: "photo")
+                            .foregroundStyle(.tertiary)
+                    }
+                    if isSelecting {
+                        ProgressView().controlSize(.small)
+                    }
+                }
+                .frame(width: imageSize, height: imageSize)
+                .clipped()
+                .clipShape(RoundedRectangle(cornerRadius: 6))
+
+                HStack(spacing: 6) {
+                    Text(title)
+                        .font(.caption.weight(.medium))
+                        .lineLimit(1)
+                    Spacer(minLength: 4)
+                    if isCurrent {
+                        Text("当前")
+                            .font(.caption2.weight(.semibold))
+                            .foregroundStyle(.green)
+                            .padding(.horizontal, 6)
+                            .padding(.vertical, 1)
+                            .background(Capsule().fill(Color.green.opacity(0.16)))
+                    } else if let transferLabel {
+                        Text(transferLabel)
+                            .font(.caption2.monospacedDigit().weight(.semibold))
+                            .foregroundStyle(.blue)
+                    } else if isCloudOnly {
+                        Text("需上传")
+                            .font(.caption2.weight(.semibold))
+                            .foregroundStyle(.orange)
+                            .padding(.horizontal, 6)
+                            .padding(.vertical, 1)
+                            .background(Capsule().fill(Color.orange.opacity(0.16)))
+                    }
+                }
+                .frame(width: imageSize, alignment: .leading)
+            }
+            .padding(8)
+            .background(Color(nsColor: .controlBackgroundColor))
+            .overlay(
+                RoundedRectangle(cornerRadius: 8)
+                    .stroke(isCurrent ? Color.blue : Color.primary.opacity(0.08), lineWidth: isCurrent ? 2 : 1)
+            )
+            .clipShape(RoundedRectangle(cornerRadius: 8))
+            .opacity(enabled ? 1 : 0.65)
+        }
+        .buttonStyle(.plain)
+        .disabled((!enabled && !isCurrent) || isSelecting)
+        .help(isCurrent ? "当前封面" : "切换到 \(title)")
     }
 }
 
