@@ -27,7 +27,8 @@ struct MacTelemetryHubApp: App {
 
 private struct MenuBarView: View {
     @ObservedObject var service: ServiceController
-    @ObservedObject private var bluetooth: BluetoothService
+    @ObservedObject private var chargerLink: BluetoothService
+    @ObservedObject private var powerBankLink: BluetoothService
     /// 单独订阅：ServiceController 是 ObservableObject，但它内部这个 monitor 的
     /// @Published 不会冒泡上来，挂在 service 下面读的话菜单里会是一份旧值。
     @ObservedObject private var desktopActivity: DesktopActivityMonitor
@@ -35,7 +36,8 @@ private struct MenuBarView: View {
 
     init(service: ServiceController) {
         self.service = service
-        bluetooth = service.chargerLink
+        chargerLink = service.chargerLink
+        powerBankLink = service.powerBankLink
         desktopActivity = service.desktopActivity
     }
 
@@ -51,10 +53,8 @@ private struct MenuBarView: View {
                 foregroundAppIcon
             }
         }
-        Text(bluetooth.phase.label)
-        if let power = bluetooth.chargerStateForDisplay.totalOutputPowerW {
-            Text(String(format: "总输出 %.2f W", power))
-        }
+        chargingMenuStatus(chargerLink)
+        chargingMenuStatus(powerBankLink)
         Divider()
         Button("打开控制面板", systemImage: "rectangle.inset.filled") {
             openWindow(id: "dashboard")
@@ -63,15 +63,34 @@ private struct MenuBarView: View {
         SettingsLink {
             Label("设置", systemImage: "gearshape")
         }
-        if service.settings.chargerModuleEnabled {
-            Button("断开充电器", systemImage: "bolt.slash") { bluetooth.disconnect() }
-                .disabled(!bluetooth.isConnected)
-            Button("重连充电器", systemImage: "arrow.clockwise") { bluetooth.reconnect() }
-        }
+        chargingMenuActions(chargerLink)
+        chargingMenuActions(powerBankLink)
         Divider()
         Button("退出") {
             service.stop()
             NSApplication.shared.terminate(nil)
+        }
+    }
+
+    @ViewBuilder
+    private func chargingMenuStatus(_ link: BluetoothService) -> some View {
+        if link.slot.isEnabled(service.settings) {
+            Text("\(link.slot.displayName) · \(link.phase.label)")
+            if let power = link.chargerState?.totalOutputPowerW {
+                Text(String(format: "总输出 %.2f W", power))
+            }
+            if let percent = link.powerBankState?.batteryPercent {
+                Text(String(format: "电量 %.1f%%", percent))
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func chargingMenuActions(_ link: BluetoothService) -> some View {
+        if link.slot.isEnabled(service.settings) {
+            Button("断开\(link.slot.displayName)", systemImage: "bolt.slash") { link.disconnect() }
+                .disabled(!link.isConnected)
+            Button("重连\(link.slot.displayName)", systemImage: "arrow.clockwise") { link.reconnect() }
         }
     }
 

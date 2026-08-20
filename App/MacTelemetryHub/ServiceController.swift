@@ -488,9 +488,8 @@ private struct AppleMusicPositionAnchor {
 @MainActor
 final class ServiceController: ObservableObject {
     let settings: AppSettings
-    /// 每台设备一条独立链路：各自的 CBCentralManager、各自的配对 UUID、各自的
-    /// 重连退避。充电头一直通电、断了就是拔了插座；充电宝空闲会自己睡、还会被
-    /// 手机 app 抢走连接 —— 共用一套超时必然有一边不合适。
+    /// 每台设备一条独立链路：各自的 CBCentralManager、各自的配对 UUID。
+    /// 连接节奏两边一样：定向连接、同一套重连和推流 watchdog。
     let chargingLinks: [BluetoothService]
     var chargerLink: BluetoothService { chargingLinks[0] }
     var powerBankLink: BluetoothService { chargingLinks[1] }
@@ -665,14 +664,13 @@ final class ServiceController: ObservableObject {
         vibeCodingUsageCollector.stop()
         codingSessions.stop()
         httpServer.stop()
-        chargerLink.shutdown()
+        for link in chargingLinks { link.shutdown() }
     }
 
     /**
      * 睡眠 / 唤醒时声明在离线。
      *
-     * 挂在 ServiceController 而不是 BluetoothService 上：那边那两个观察者只在
-     * 充电器模块开着时才注册，而在线状态跟开了哪些模块无关。
+     * 挂在 ServiceController 而不是某一条充电链路上：在线状态跟开了哪些模块无关。
      */
     private func observePowerTransitions() {
         guard !observesPower else { return }
@@ -1708,7 +1706,8 @@ final class ServiceController: ObservableObject {
                 "vibeCodingUsageLimits": vibeCodingUsageCollector.limitsError,
                 "codingSessions": codingSessions.lastError,
                 "appleMusic": appleMusic.lastError,
-                "bluetooth": chargerLink.lastError,
+                "charger": chargerLink.lastError,
+                "powerBank": powerBankLink.lastError,
                 "reporter": reporterLastError,
             ])
         case ("GET", "/ports"):

@@ -53,7 +53,7 @@ struct SettingsView: View {
     @ObservedObject var service: ServiceController
     @ObservedObject private var settings: AppSettings
     @ObservedObject private var covers: ChargerCoverController
-    @ObservedObject private var bluetooth: BluetoothService
+    @ObservedObject private var chargerLink: BluetoothService
     @ObservedObject private var powerBankLink: BluetoothService
     @ObservedObject private var desktopActivity: DesktopActivityMonitor
     @ObservedObject private var appleMusicAuthorization: AppleMusicAuthorizationManager
@@ -68,7 +68,7 @@ struct SettingsView: View {
         self.service = service
         settings = service.settings
         covers = service.covers
-        bluetooth = service.chargerLink
+        chargerLink = service.chargerLink
         powerBankLink = service.powerBankLink
         desktopActivity = service.desktopActivity
         appleMusicAuthorization = service.appleMusicAuthorization
@@ -117,7 +117,18 @@ struct SettingsView: View {
         }
         .navigationSplitViewStyle(.balanced)
         .frame(minWidth: 780, minHeight: 500)
-        .onDisappear { bluetooth.stopPairingScan() }
+        .onDisappear {
+            chargerLink.stopPairingScan()
+            powerBankLink.stopPairingScan()
+        }
+    }
+
+    private func chargingLinkBadge(_ link: BluetoothService) -> some View {
+        let enabled = link.slot.isEnabled(settings)
+        return StatusBadge(
+            text: enabled ? "\(link.slot.displayName) · \(link.phase.label)" : "\(link.slot.displayName)已关闭",
+            style: enabled && link.isConnected ? .success : .neutral
+        )
     }
 
     private var appVersion: String {
@@ -143,10 +154,12 @@ struct SettingsView: View {
 
             Spacer()
 
-            StatusBadge(
-                text: bluetooth.isConnected ? "设备已连接" : bluetooth.phase.label,
-                style: bluetooth.isConnected ? .success : .neutral
-            )
+            if selection == .charger {
+                HStack(spacing: 8) {
+                    chargingLinkBadge(chargerLink)
+                    chargingLinkBadge(powerBankLink)
+                }
+            }
         }
         .padding(.horizontal, 24)
         .padding(.vertical, 16)
@@ -555,9 +568,9 @@ struct SettingsView: View {
                 if settings.chargerModuleEnabled {
                     fieldTitle("配对的充电头", detail: settings.normalizedPeripheralID == nil ? "未配对" : "已配对")
                     if settings.normalizedPeripheralID == nil {
-                        pairingPicker(bluetooth)
+                        pairingPicker(chargerLink)
                     } else {
-                        pairedRow(bluetooth)
+                        pairedRow(chargerLink)
                     }
                 }
             }
@@ -772,22 +785,22 @@ struct SettingsView: View {
                 }
             }
 
-            ForEach(link.discovered) { charger in
+            ForEach(link.discovered) { device in
                 Button {
-                    link.slot.storePeripheralID(charger.id.uuidString, in: settings)
+                    link.slot.storePeripheralID(device.id.uuidString, in: settings)
                     link.stopPairingScan()
                     save()
                 } label: {
                     HStack(spacing: 8) {
-                        Image(systemName: "bolt.fill").foregroundStyle(.blue)
+                        Image(systemName: link.slot.icon).foregroundStyle(.blue)
                         VStack(alignment: .leading, spacing: 2) {
-                            Text(charger.name).font(.callout.weight(.medium))
-                            Text(charger.id.uuidString)
+                            Text(device.name).font(.callout.weight(.medium))
+                            Text(device.id.uuidString)
                                 .font(.caption.monospaced())
                                 .foregroundStyle(.secondary)
                         }
                         Spacer()
-                        Text("\(charger.rssi) dBm")
+                        Text("\(device.rssi) dBm")
                             .font(.caption.monospacedDigit())
                             .foregroundStyle(.tertiary)
                     }
@@ -803,7 +816,7 @@ struct SettingsView: View {
 
             if link.discovered.isEmpty {
                 Text(link.isPairingScan
-                    ? "正在找附近的 A2687，让充电头保持通电。"
+                    ? "正在扫描附近的\(link.slot.displayName)。"
                     : "扫描一次并选择设备后，应用会记住它，以后只连接这一台。")
                     .font(.caption)
                     .foregroundStyle(.secondary)
@@ -815,7 +828,7 @@ struct SettingsView: View {
     private func pairedRow(_ link: BluetoothService) -> some View {
         VStack(alignment: .leading, spacing: 8) {
             HStack(spacing: 8) {
-                Text(link.slot == .charger ? settings.peripheralID : settings.powerBankPeripheralID)
+                Text(link.slot.peripheralIDString(settings))
                     .font(.caption.monospaced())
                     .textSelection(.enabled)
                     .foregroundStyle(.secondary)

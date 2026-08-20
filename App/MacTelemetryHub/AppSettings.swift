@@ -352,7 +352,7 @@ enum SettingsError: LocalizedError {
     var errorDescription: String? {
         switch self {
         case .invalidUserID: "Anker 用户 ID 必须是正好 40 个 ASCII 字符。"
-        case .invalidPeripheralID: "配对的充电头 ID 必须是有效 UUID，或留空重新配对。"
+        case .invalidPeripheralID: "配对的设备 ID 必须是有效 UUID，或留空重新配对。"
         case .invalidPort: "HTTP 端口必须在 1 到 65535 之间。"
         case .invalidTiming: "POST 间隔和超时必须大于 0。"
         case .invalidPostURL: "POST 地址必须是完整的 http:// 或 https:// URL。"

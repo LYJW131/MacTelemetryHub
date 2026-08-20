@@ -35,7 +35,7 @@ private enum DashboardSection: String, CaseIterable, Identifiable {
 
 struct DashboardView: View {
     @ObservedObject var service: ServiceController
-    @ObservedObject private var bluetooth: BluetoothService
+    @ObservedObject private var chargerLink: BluetoothService
     @ObservedObject private var covers: ChargerCoverController
     @ObservedObject private var powerBankLink: BluetoothService
     @ObservedObject private var httpServer: LocalHTTPServer
@@ -50,7 +50,7 @@ struct DashboardView: View {
 
     init(service: ServiceController) {
         self.service = service
-        bluetooth = service.chargerLink
+        chargerLink = service.chargerLink
         covers = service.covers
         powerBankLink = service.powerBankLink
         httpServer = service.httpServer
@@ -73,7 +73,7 @@ struct DashboardView: View {
         .task {
             await covers.refresh(force: false)
         }
-        .onChange(of: bluetooth.chargerStateForDisplay.device.serialNumber) { _, _ in
+        .onChange(of: chargerLink.chargerStateForDisplay.device.serialNumber) { _, _ in
             Task { await covers.refresh(force: false) }
         }
     }
@@ -98,35 +98,8 @@ struct DashboardView: View {
             }
 
             Section("连接") {
-                HStack(spacing: 8) {
-                    Circle()
-                        .fill(serviceStatusColor(now: now))
-                        .frame(width: 7, height: 7)
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text(statusText(now: now))
-                            .font(.callout.weight(.medium))
-                        Text(service.settings.chargerModuleEnabled ? "充电头" : "充电头模块已关闭")
-                            .font(.caption2)
-                            .foregroundStyle(.secondary)
-                    }
-                }
-                .padding(.vertical, 3)
-
-                HStack(spacing: 8) {
-                    Circle()
-                        .fill(!service.settings.powerBankModuleEnabled ? Color.secondary
-                              : powerBankLink.isConnected ? .green : .orange)
-                        .frame(width: 7, height: 7)
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text(service.settings.powerBankModuleEnabled
-                             ? powerBankLink.phase.label : "充电宝模块已关闭")
-                            .font(.callout.weight(.medium))
-                        Text("充电宝")
-                            .font(.caption2)
-                            .foregroundStyle(.secondary)
-                    }
-                }
-                .padding(.vertical, 3)
+                chargingLinkStatusRow(chargerLink, now: now)
+                chargingLinkStatusRow(powerBankLink, now: now)
 
                 HStack(spacing: 8) {
                     Circle()
@@ -245,10 +218,6 @@ struct DashboardView: View {
 
     private var overviewContent: some View {
         VStack(alignment: .leading, spacing: 18) {
-            if let error = bluetooth.lastError, !bluetooth.isConnected {
-                errorBanner(error)
-            }
-
             sectionHeading("数据源", detail: "每个模块独立运行，状态变化会在这里反映")
             moduleGrid
 
@@ -256,47 +225,38 @@ struct DashboardView: View {
         }
     }
 
+    @ViewBuilder
     private func chargerContent(now: Date) -> some View {
-        VStack(alignment: .leading, spacing: 18) {
-            if service.settings.chargerModuleEnabled {
-                if let error = bluetooth.lastError, !bluetooth.isConnected {
-                    errorBanner(error)
-                }
+        if service.settings.chargerModuleEnabled {
+            VStack(alignment: .leading, spacing: 18) {
+                chargingLinkSessionHeader(chargerLink)
 
-                HStack(spacing: 8) {
-                    Button("断开充电头", systemImage: "bolt.slash") {
-                        bluetooth.disconnect()
+                if chargerLink.hasTelemetry {
+                    overviewCard(now: now)
+
+                    sectionHeading("端口", detail: "实时电压、电流、功率与识别到的设备")
+                    LazyVGrid(columns: [GridItem(.flexible(), spacing: 12), GridItem(.flexible(), spacing: 12), GridItem(.flexible(), spacing: 12)], spacing: 12) {
+                        ForEach(["C1", "C2", "C3"], id: \.self) { key in
+                            PortCard(key: key, port: chargerLink.chargerStateForDisplay.ports[key] ?? PortState())
+                                .frame(minHeight: 248)
+                        }
                     }
-                    .disabled(!bluetooth.isConnected)
-                    .help("断开当前充电设备")
 
-                    Button("重连充电头", systemImage: "arrow.clockwise") {
-                        bluetooth.reconnect()
-                    }
-                    .disabled(bluetooth.phase == .handshaking)
-                    .help("重新连接当前充电设备")
+                    coverSection
+                } else {
+                    EmptyModuleView(
+                        title: chargerLink.phase.label,
+                        detail: chargingLinkWaitingDetail(chargerLink),
+                        icon: chargerLink.slot.icon
+                    )
                 }
-                .buttonStyle(.bordered)
-                .controlSize(.small)
-
-                overviewCard(now: now)
-
-                sectionHeading("端口", detail: "实时电压、电流、功率与识别到的设备")
-                LazyVGrid(columns: [GridItem(.flexible(), spacing: 12), GridItem(.flexible(), spacing: 12), GridItem(.flexible(), spacing: 12)], spacing: 12) {
-                    ForEach(["C1", "C2", "C3"], id: \.self) { key in
-                        PortCard(key: key, port: bluetooth.chargerStateForDisplay.ports[key] ?? PortState())
-                            .frame(minHeight: 248)
-                    }
-                }
-
-                coverSection
-            } else {
-                EmptyModuleView(
-                    title: "充电模块未启用",
-                    detail: "在设置的“充电设备”中启用模块并完成一次配对。",
-                    icon: "bolt.horizontal"
-                )
             }
+        } else {
+            EmptyModuleView(
+                title: "充电头模块未启用",
+                detail: "在设置的“充电设备”中启用充电头模块并完成一次配对。",
+                icon: chargerLink.slot.icon
+            )
         }
     }
 
@@ -304,18 +264,7 @@ struct DashboardView: View {
     private func powerBankContent(now: Date) -> some View {
         if service.settings.powerBankModuleEnabled {
             VStack(alignment: .leading, spacing: 18) {
-                if let error = powerBankLink.lastError, !powerBankLink.isConnected {
-                    errorBanner(error)
-                }
-
-                HStack(spacing: 8) {
-                    Button("断开充电宝", systemImage: "bolt.slash") { powerBankLink.disconnect() }
-                        .disabled(!powerBankLink.isConnected)
-                    Button("重连充电宝", systemImage: "arrow.clockwise") { powerBankLink.reconnect() }
-                        .disabled(powerBankLink.phase == .handshaking)
-                }
-                .buttonStyle(.bordered)
-                .controlSize(.small)
+                chargingLinkSessionHeader(powerBankLink)
 
                 if let state = powerBankLink.powerBankState, powerBankLink.hasTelemetry {
                     powerBankOverviewCard(state, now: now)
@@ -331,8 +280,8 @@ struct DashboardView: View {
                 } else {
                     EmptyModuleView(
                         title: powerBankLink.phase.label,
-                        detail: powerBankWaitingDetail,
-                        icon: "minus.plus.batteryblock"
+                        detail: chargingLinkWaitingDetail(powerBankLink),
+                        icon: powerBankLink.slot.icon
                     )
                 }
             }
@@ -340,7 +289,7 @@ struct DashboardView: View {
             EmptyModuleView(
                 title: "充电宝模块未启用",
                 detail: "在设置的“充电设备”中启用充电宝模块并完成一次配对。",
-                icon: "minus.plus.batteryblock"
+                icon: powerBankLink.slot.icon
             )
         }
     }
@@ -425,20 +374,42 @@ struct DashboardView: View {
     }
 
     /// 连上了却没有数据，和根本没连上，是两个完全不同的问题。空状态必须能自己
-    /// 说清楚卡在哪一步，否则只能靠猜。
-    private var powerBankWaitingDetail: String {
-        if let error = powerBankLink.lastError { return error }
-        if powerBankLink.isConnected {
+    /// 说清楚卡在哪一步，否则只能靠猜。充电头和充电宝用同一套文案。
+    private func chargingLinkWaitingDetail(_ link: BluetoothService) -> String {
+        if let error = link.lastError { return error }
+        switch link.phase {
+        case .connected:
             return "已连接并完成握手，但还没收到遥测帧。正常情况下 1 秒内就该有第一帧。"
-        }
-        if powerBankLink.phase == .handshaking {
+        case .handshaking:
             return "正在建立加密会话。"
+        case .connecting:
+            return "正在连接已配对的\(link.slot.displayName)。"
+        case .awaitingPairing:
+            return "还没有配对。打开设置，扫描并选择一台\(link.slot.displayName)。"
+        case let .bluetoothUnavailable(reason):
+            return reason
+        case .stopped:
+            return "链路已停止。"
+        case .disconnected:
+            return "定向连接已挂起，\(link.slot.displayName)上电后会自动接入。"
         }
-        return "充电宝空闲时会休眠并停止广播，手机 App 连着它时本机也连不上。按一下机身按钮再等片刻。"
     }
 
-    /// 总览卡片正面：有电量就显示电量，没有就显示连接阶段 —— 那才是这时候
-    /// 用户真正想知道的（在连？在认证？还是根本没配对）。
+    /// 总览卡片正面：有读数就显示读数，没有就显示连接阶段。
+    private var chargerOverviewValue: String {
+        guard service.settings.chargerModuleEnabled else { return "已关闭" }
+        if chargerLink.hasTelemetry, let watts = chargerLink.chargerStateForDisplay.totalOutputPowerW {
+            return String(format: "%.2f W", watts)
+        }
+        return chargerLink.phase.label
+    }
+
+    private var chargerOverviewDetail: String? {
+        guard service.settings.chargerModuleEnabled else { return nil }
+        guard chargerLink.hasTelemetry else { return chargerLink.lastError }
+        return chargerLink.isConnected ? nil : chargerLink.phase.label
+    }
+
     private var powerBankOverviewValue: String {
         guard service.settings.powerBankModuleEnabled else { return "已关闭" }
         guard let state = powerBankLink.powerBankState, let percent = state.batteryPercent else {
@@ -452,6 +423,7 @@ struct DashboardView: View {
         guard let state = powerBankLink.powerBankState, powerBankLink.hasTelemetry else {
             return powerBankLink.lastError
         }
+        if !powerBankLink.isConnected { return powerBankLink.phase.label }
         if state.isThermallyLimited { return "过热受限，暂不充电" }
         if let input = state.inputPowerW, input > 0.05 {
             return String(format: "输入 %.1f W", input)
@@ -546,8 +518,8 @@ struct DashboardView: View {
                 title: "充电头",
                 icon: "bolt.fill",
                 enabled: service.settings.chargerModuleEnabled,
-                value: service.settings.chargerModuleEnabled ? bluetooth.phase.label : "已关闭",
-                detail: bluetooth.chargerStateForDisplay.totalOutputPowerW.map { String(format: "%.2f W", $0) },
+                value: chargerOverviewValue,
+                detail: chargerOverviewDetail,
                 action: { _ = service.requestImmediateReport(.charger) },
                 actionEnabled: service.canRequestImmediateReport(.charger),
                 isReporting: service.isManualReportInFlight(.charger),
@@ -689,7 +661,7 @@ struct DashboardView: View {
                     .foregroundStyle(.secondary)
 
                 HStack(alignment: .firstTextBaseline, spacing: 6) {
-                    Text(number(bluetooth.chargerStateForDisplay.totalOutputPowerW, digits: 2))
+                    Text(number(chargerLink.chargerStateForDisplay.totalOutputPowerW, digits: 2))
                         .font(.system(size: 44, weight: .semibold, design: .rounded))
                         .contentTransition(.numericText())
                     Text("W")
@@ -698,7 +670,7 @@ struct DashboardView: View {
                 }
 
                 HStack(spacing: 10) {
-                    ProgressView(value: min(max((bluetooth.chargerStateForDisplay.totalOutputPowerW ?? 0) / 250, 0), 1))
+                    ProgressView(value: min(max((chargerLink.chargerStateForDisplay.totalOutputPowerW ?? 0) / 250, 0), 1))
                         .tint(.blue)
                     Text("250 W MAX")
                         .font(.caption2.monospacedDigit().weight(.medium))
@@ -711,9 +683,9 @@ struct DashboardView: View {
             Divider().frame(height: 100)
 
             LazyVGrid(columns: [GridItem(.flexible(), spacing: 18), GridItem(.flexible(), spacing: 18)], alignment: .leading, spacing: 14) {
-                DeviceFact(title: "序列号", value: bluetooth.chargerStateForDisplay.device.serialNumber, icon: "number")
-                DeviceFact(title: "MAC 地址", value: bluetooth.chargerStateForDisplay.device.macAddress, icon: "antenna.radiowaves.left.and.right")
-                DeviceFact(title: "固件版本", value: bluetooth.chargerStateForDisplay.device.firmwareVersion, icon: "cpu")
+                DeviceFact(title: "序列号", value: chargerLink.chargerStateForDisplay.device.serialNumber, icon: "number")
+                DeviceFact(title: "MAC 地址", value: chargerLink.chargerStateForDisplay.device.macAddress, icon: "antenna.radiowaves.left.and.right")
+                DeviceFact(title: "固件版本", value: chargerLink.chargerStateForDisplay.device.firmwareVersion, icon: "cpu")
                 DeviceFact(title: "数据更新", value: ageText(now: now), icon: "clock.arrow.circlepath")
                 DeviceFact(title: "当前封面", value: currentCoverText, icon: "photo")
             }
@@ -785,14 +757,56 @@ struct DashboardView: View {
         .clipShape(RoundedRectangle(cornerRadius: 8))
     }
 
-    private func statusText(now: Date) -> String {
-        if bluetooth.isConnected, isStale(now: now) { return "数据过期" }
-        return bluetooth.phase.label
+    private func chargingLinkStatusRow(_ link: BluetoothService, now: Date) -> some View {
+        let enabled = link.slot.isEnabled(service.settings)
+        return HStack(spacing: 8) {
+            Circle()
+                .fill(chargingLinkStatusColor(link, now: now))
+                .frame(width: 7, height: 7)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(enabled ? chargingLinkStatusText(link, now: now) : "已关闭")
+                    .font(.callout.weight(.medium))
+                Text(link.slot.displayName)
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .padding(.vertical, 3)
     }
 
-    private func serviceStatusColor(now: Date) -> Color {
-        if bluetooth.isConnected { return isStale(now: now) ? .orange : .green }
-        switch bluetooth.phase {
+    private func chargingLinkSessionHeader(_ link: BluetoothService) -> some View {
+        VStack(alignment: .leading, spacing: 10) {
+            if let error = link.lastError, !link.isConnected {
+                errorBanner(error)
+            }
+
+            HStack(spacing: 8) {
+                Button("断开\(link.slot.displayName)", systemImage: "bolt.slash") {
+                    link.disconnect()
+                }
+                .disabled(!link.isConnected)
+                .help("断开当前\(link.slot.displayName)")
+
+                Button("重连\(link.slot.displayName)", systemImage: "arrow.clockwise") {
+                    link.reconnect()
+                }
+                .disabled(link.phase == .handshaking)
+                .help("重新连接当前\(link.slot.displayName)")
+            }
+            .buttonStyle(.bordered)
+            .controlSize(.small)
+        }
+    }
+
+    private func chargingLinkStatusText(_ link: BluetoothService, now: Date) -> String {
+        if link.isConnected, isStale(link, now: now) { return "数据过期" }
+        return link.phase.label
+    }
+
+    private func chargingLinkStatusColor(_ link: BluetoothService, now: Date) -> Color {
+        guard link.slot.isEnabled(service.settings) else { return .secondary }
+        if link.isConnected { return isStale(link, now: now) ? .orange : .green }
+        switch link.phase {
         case .connecting, .handshaking: return .blue
         case .awaitingPairing: return .orange
         case .bluetoothUnavailable: return .red
@@ -800,17 +814,17 @@ struct DashboardView: View {
         }
     }
 
-    private func isStale(now: Date) -> Bool {
-        guard let updatedAt = bluetooth.chargerStateForDisplay.updatedAt else { return bluetooth.isConnected }
+    private func isStale(_ link: BluetoothService, now: Date) -> Bool {
+        guard link.isConnected, let updatedAt = link.lastTelemetryAt else { return false }
         return now.timeIntervalSince1970 - updatedAt > 15
     }
 
     private func ageText(now: Date) -> String? {
-        bluetooth.chargerStateForDisplay.updatedAt.map { String(format: "%.1f 秒前", max(0, now.timeIntervalSince1970 - $0)) }
+        chargerLink.chargerStateForDisplay.updatedAt.map { String(format: "%.1f 秒前", max(0, now.timeIntervalSince1970 - $0)) }
     }
 
     private var currentCoverText: String? {
-        guard let id = bluetooth.chargerStateForDisplay.screensaverId else { return nil }
+        guard let id = chargerLink.chargerStateForDisplay.screensaverId else { return nil }
         if let picture = covers.pictures.first(where: { $0.id == id }) {
             return picture.name.isEmpty ? "槽位 \(picture.seq)" : picture.name
         }

@@ -7,7 +7,7 @@ final class BluetoothService: NSObject, ObservableObject {
     enum Phase: Equatable {
         case stopped
         case bluetoothUnavailable(String)
-        /// 没有存下充电头 UUID，或者系统不认识存下的那个。要用户去设置里配对一次。
+        /// 没有存下设备 UUID，或者系统不认识存下的那个。要用户去设置里配对一次。
         case awaitingPairing
         case connecting(String)
         case handshaking
@@ -27,14 +27,14 @@ final class BluetoothService: NSObject, ObservableObject {
         }
     }
 
-    /// 配对扫描里看到的一台候选充电头。
-    struct DiscoveredCharger: Identifiable, Equatable {
+    /// 配对扫描里看到的一台候选设备。
+    struct DiscoveredDevice: Identifiable, Equatable {
         let id: UUID
         let name: String
         var rssi: Int
     }
 
-    /// 这条链路对面是哪台设备。决定用哪个解码器、读哪个配对 UUID、超时怎么配。
+    /// 这条链路对面是哪台设备。决定用哪个解码器、读哪个配对 UUID。
     let slot: ChargingDeviceSlot
     /// 解码器自己持有状态。它是个类，改动不会触发 @Published，所以每次解出新
     /// 数据都要显式 objectWillChange.send() —— 和原来手动发通知的做法一致。
@@ -49,6 +49,7 @@ final class BluetoothService: NSObject, ObservableObject {
     /// 上报用的通用负载。没收到过遥测就是 nil，不塞空壳。
     var devicePayload: ChargingDevicePayload? { decoder.payload(connected: isConnected) }
     var hasTelemetry: Bool { decoder.hasTelemetry }
+    var lastTelemetryAt: TimeInterval? { chargerState?.updatedAt ?? powerBankState?.updatedAt }
     /**
      * 解出新的端口数据时通知上报循环。
      *
@@ -77,7 +78,7 @@ final class BluetoothService: NSObject, ObservableObject {
     @Published private(set) var lastError: String?
     @Published private(set) var desiredConnection = true
     /// 配对扫描的结果，只在设置面板里用。平时是空的。
-    @Published private(set) var discovered: [DiscoveredCharger] = []
+    @Published private(set) var discovered: [DiscoveredDevice] = []
     @Published private(set) var isPairingScan = false
 
     var isConnected: Bool { phase == .connected }
@@ -352,14 +353,14 @@ final class BluetoothService: NSObject, ObservableObject {
     }
 
     /**
-     * 挂一个指向存下那台充电头的定向连接，然后就不管了。
+     * 挂一个指向存下那台设备的定向连接，然后就不管了。
      *
-     * CoreBluetooth 的 connect 没有超时：请求挂在那里，交给蓝牙控制器去等，充电头
+     * CoreBluetooth 的 connect 没有超时：请求挂在那里，交给蓝牙控制器去等，设备
      * 一上电就连上。这比「扫 15 秒 → 拆掉会话 → 退避 → 再扫」省得多，也不会漏掉
      * 两次尝试之间那段空窗 —— 本进程根本不收广播，等待是控制器那一层的事。
      *
      * 代价是必须先有 UUID。没有就停在 .awaitingPairing 等用户去设置里配对一次，
-     * 绝不自己开扫描。
+     * 绝不自己开扫描。充电头和充电宝走同一条路。
      */
     private func beginConnect() {
         guard desiredConnection,
@@ -535,7 +536,7 @@ final class BluetoothService: NSObject, ObservableObject {
                     continue
                 }
                 if idle >= streamStallTimeout {
-                    lastError = "充电器已停止推送，正在重建蓝牙会话"
+                    lastError = "\(slot.displayName)已停止推送，正在重建蓝牙会话"
                     if let peripheral { central?.cancelPeripheralConnection(peripheral) }
                     return
                 }
@@ -672,14 +673,17 @@ extension BluetoothService: @preconcurrency CBCentralManagerDelegate {
         let name = peripheral.name ?? advertisedName ?? ""
         let services = advertisementData[CBAdvertisementDataServiceUUIDsKey] as? [CBUUID] ?? []
         // 整条 Prime 产品线都播 ff09，所以服务 UUID 只能说明「是台 Anker 设备」。
-        // 充电头有稳定的名字前缀，认前缀；充电宝直接播序列号、没有前缀，只能反过来
-        // 把充电头排除掉。两边都列出来会让用户在配对时选错设备。
-        guard services.contains(CBUUID(string: A2687Protocol.advertisedServiceUUID))
-            || name.hasPrefix(A2687Protocol.deviceNamePrefix) else { return }
-        let looksLikeCharger = name.hasPrefix(A2687Protocol.deviceNamePrefix)
-        guard looksLikeCharger == (slot == .charger) else { return }
+        // 有名字前缀的认前缀；没有的（充电宝直接播序列号）就反过来把有前缀的排除掉。
+        // 两边都列出来会让用户在配对时选错设备。
+        let chargerPrefix = A2687Protocol.deviceNamePrefix
+        let hasPrimeService = services.contains(CBUUID(string: A2687Protocol.advertisedServiceUUID))
+        if let prefix = decoder.namePrefix {
+            guard name.hasPrefix(prefix) else { return }
+        } else {
+            guard hasPrimeService, !name.hasPrefix(chargerPrefix) else { return }
+        }
         // 只列出来给用户挑，不自己连。allowDuplicates 关着也可能重复送达，按 UUID 去重。
-        let entry = DiscoveredCharger(id: peripheral.identifier, name: name.isEmpty ? peripheral.identifier.uuidString : name, rssi: RSSI.intValue)
+        let entry = DiscoveredDevice(id: peripheral.identifier, name: name.isEmpty ? peripheral.identifier.uuidString : name, rssi: RSSI.intValue)
         if let index = discovered.firstIndex(where: { $0.id == entry.id }) {
             discovered[index].rssi = entry.rssi
         } else {
@@ -697,20 +701,19 @@ extension BluetoothService: @preconcurrency CBCentralManagerDelegate {
     func centralManager(_ central: CBCentralManager, didFailToConnect peripheral: CBPeripheral, error: Error?) {
         guard central === self.central else { return }
         phase = .disconnected
-        lastError = error?.localizedDescription ?? "无法连接充电器"
+        lastError = error?.localizedDescription ?? "无法连接\(slot.displayName)"
         scheduleRetry(after: reconnectDelay)
     }
 
-    func centralManager(_ central: CBCentralManager, didDisconnectPeripheral peripheral: CBPeripheral, error: Error?) {
+    func centralManager(_ central: CBCentralManager, didDisconnectPeripheral peripheral: CBPeripheral, error _: Error?) {
         guard central === self.central else { return }
         cancelSessionTasks()
         writeCharacteristic = nil
         notifyCharacteristic = nil
         phase = .disconnected
         if desiredConnection, !isSystemSleeping {
-            // 充电宝每 26 秒自己断一次，那是固件行为不是故障。把它记成 lastError
-            // 会让界面一直闪红字，也会盖掉真正的错误。
-            lastError = slot == .powerBank ? nil : (error?.localizedDescription ?? "连接已断开")
+            // 例行掉线（拔掉、休眠、超出范围）两边都一样：定向重连，不写成故障。
+            // 握手失败、停流这类已经写进 lastError 的，断开回调不要盖掉。
             scheduleRetry(after: reconnectDelay)
         } else if isSystemSleeping {
             lastError = "Mac 正在睡眠，已释放蓝牙连接"
@@ -725,7 +728,7 @@ extension BluetoothService: @preconcurrency CBPeripheralDelegate {
         guard peripheral === self.peripheral else { return }
         if let error { lastError = error.localizedDescription; central?.cancelPeripheralConnection(peripheral); return }
         guard let service = peripheral.services?.first(where: { $0.uuid == CBUUID(string: A2687Protocol.serviceUUID) }) else {
-            lastError = "充电器没有所需 GATT 服务"
+            lastError = "\(slot.displayName)没有所需 GATT 服务"
             central?.cancelPeripheralConnection(peripheral)
             return
         }
@@ -741,7 +744,7 @@ extension BluetoothService: @preconcurrency CBPeripheralDelegate {
         writeCharacteristic = service.characteristics?.first { $0.uuid == CBUUID(string: A2687Protocol.writeCharacteristicUUID) }
         notifyCharacteristic = service.characteristics?.first { $0.uuid == CBUUID(string: A2687Protocol.notifyCharacteristicUUID) }
         guard writeCharacteristic != nil, let notifyCharacteristic else {
-            lastError = "充电器缺少写入或通知特征"
+            lastError = "\(slot.displayName)缺少写入或通知特征"
             central?.cancelPeripheralConnection(peripheral)
             return
         }
@@ -777,7 +780,7 @@ private enum BLEError: LocalizedError {
         case .disconnected: "蓝牙连接已断开"
         case .requestAlreadyPending: "上一个蓝牙请求尚未完成"
         case let .responseTimeout(command): String(format: "等待命令 0x%04X 响应超时", command)
-        case .missingDeviceKey: "充电器没有返回有效的 P-256 公钥"
+        case .missingDeviceKey: "设备没有返回有效的 P-256 公钥"
         case .emptyJPEG: "封面 JPEG 是空的，无法传到充电头"
         }
     }

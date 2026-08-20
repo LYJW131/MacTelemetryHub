@@ -75,7 +75,7 @@ public enum CryptoError: LocalizedError {
         switch self {
         case .invalidSessionMaterial: "会话密钥或 nonce 长度不正确"
         case .ciphertextTooShort: "AES-GCM 密文过短"
-        case .invalidDevicePublicKey: "充电器 P-256 公钥必须是 64 字节"
+        case .invalidDevicePublicKey: "设备 P-256 公钥必须是 64 字节"
         case .invalidSharedSecret: "ECDH 共享密钥长度不正确"
         }
     }
