@@ -19,6 +19,7 @@ usage, rather than the identity of the whole application.
 - foreground application reporting, limited to the app's name, bundle ID, and icon,
   with an exact Bundle ID blacklist for remote reporting
 - coding-usage aggregation that never uploads session IDs, project paths, prompts, or replies
+- charger cover name plus the original JPEG uploaded to R2 (no resize or transcode; the point is to leave Anker's signed URL)
 - subscription plan tier and server-side rate-limit windows for every coding agent in the envelope
 - login launch using `SMAppService.mainApp`
 

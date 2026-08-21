@@ -101,6 +101,22 @@ public struct BatteryPayload: Codable, Equatable, Sendable {
     }
 }
 
+/**
+ * 充电头当前封面。名字来自 Anker 云端列表；源 JPEG 原样直传 R2，不缩放不转码。
+ * `iconHash` 是源文件身份，`iconObjectKey` 是桶里那份原字节的内容地址。
+ */
+public struct CoverPayload: Codable, Equatable, Sendable {
+    public let name: String
+    public let iconHash: String?
+    public let iconObjectKey: String?
+
+    public init(name: String, iconHash: String?, iconObjectKey: String?) {
+        self.name = name
+        self.iconHash = iconHash
+        self.iconObjectKey = iconObjectKey
+    }
+}
+
 public struct ChargingDevicePayload: Codable, Equatable, Sendable {
     /// 设备序列号。同一类设备可能有多台，所以身份不能靠 `kind`。
     public let id: String
@@ -116,6 +132,8 @@ public struct ChargingDevicePayload: Codable, Equatable, Sendable {
     public let temperaturesC: [Int]?
     /// 端口列表（充电头为 C1/C2/C3，充电宝为 C1/C2/A/B，其中 B 为底座 Pogo Pin 进电口）。
     public let ports: [DevicePortPayload]
+    /// 只有充电头有。云端列表还没对上当前 screensaverId 时为 nil。
+    public let cover: CoverPayload?
 
     public init(
         id: String,
@@ -128,7 +146,8 @@ public struct ChargingDevicePayload: Codable, Equatable, Sendable {
         totalOutputW: Double? = nil,
         battery: BatteryPayload? = nil,
         temperaturesC: [Int]? = nil,
-        ports: [DevicePortPayload]
+        ports: [DevicePortPayload],
+        cover: CoverPayload? = nil
     ) {
         self.id = id
         self.kind = kind
@@ -141,6 +160,24 @@ public struct ChargingDevicePayload: Codable, Equatable, Sendable {
         self.battery = battery
         self.temperaturesC = temperaturesC
         self.ports = ports
+        self.cover = cover
+    }
+
+    public func withCover(_ cover: CoverPayload?) -> ChargingDevicePayload {
+        ChargingDevicePayload(
+            id: id,
+            kind: kind,
+            model: model,
+            connected: connected,
+            updatedAt: updatedAt,
+            firmware: firmware,
+            totalInputW: totalInputW,
+            totalOutputW: totalOutputW,
+            battery: battery,
+            temperaturesC: temperaturesC,
+            ports: ports,
+            cover: cover
+        )
     }
 }
 

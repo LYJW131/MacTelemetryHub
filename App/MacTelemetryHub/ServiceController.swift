@@ -136,8 +136,11 @@ private enum R2IconUploader {
         }
     }
 
-    /// 编码产物的内容地址。身份哈希标识「哪个应用的图标」，这个标识「哪份字节」
-    static func objectKey(for data: Data) -> String { "\(sha256Hex(data)).png" }
+    /// 编码产物的内容地址。身份哈希标识「哪个应用的图标」，这个标识「哪份字节」。
+    /// 桌面图标是 PNG；充电头封面是 Anker 源 JPEG 原样上传，扩展名跟字节走。
+    static func objectKey(for data: Data, ext: String = "png") -> String {
+        "\(sha256Hex(data)).\(ext)"
+    }
 
     static func contentHash(of data: Data) -> String { sha256Hex(data) }
 
@@ -147,7 +150,9 @@ private enum R2IconUploader {
 
     /// 对象键的扩展名决定 Content-Type；键本身是内容地址，扩展名就是事实
     private static func contentType(for objectKey: String) -> String {
-        objectKey.hasSuffix(".png") ? "image/png" : "image/webp"
+        if objectKey.hasSuffix(".png") { return "image/png" }
+        if objectKey.hasSuffix(".jpg") || objectKey.hasSuffix(".jpeg") { return "image/jpeg" }
+        return "image/webp"
     }
 
     /**
@@ -350,6 +355,8 @@ private struct ChargingDevicesStructuralSignature: Equatable {
         let thermalLimited: Bool?
         /// 底座现在作为 B 口混在 ports 里，上下底座自然被端口那一项覆盖。
         let ports: [Port]
+        let coverName: String?
+        let coverIconHash: String?
 
         init(_ device: ChargingDevicePayload) {
             id = device.id
@@ -357,6 +364,8 @@ private struct ChargingDevicesStructuralSignature: Equatable {
             connected = device.connected
             thermalLimited = device.battery?.thermalLimited
             ports = device.ports.map(Port.init)
+            coverName = device.cover?.name
+            coverIconHash = device.cover?.iconHash
         }
     }
 
@@ -426,6 +435,7 @@ private struct DesktopUploadSignature: Equatable {
 private struct TelemetryIngestResponse: Decodable {
     struct Result: Decodable {
         let desktopIconAvailable: Bool?
+        let chargerCoverIconAvailable: Bool?
     }
 
     let data: Result
@@ -891,9 +901,19 @@ final class ServiceController: ObservableObject {
     var chargingDevicesPayload: ChargingDevicesPayload? {
         let devices = chargingLinks.compactMap { link -> ChargingDevicePayload? in
             guard link.slot.isEnabled(settings) else { return nil }
-            return link.devicePayload
+            return devicePayload(for: link)
         }
         return devices.isEmpty ? nil : ChargingDevicesPayload(devices: devices)
+    }
+
+    private func devicePayload(for link: BluetoothService) -> ChargingDevicePayload? {
+        guard var device = link.devicePayload else { return nil }
+        if link.slot == .charger {
+            let source = covers.coverUploadSource
+            let key = coverIconObjectKeyIfReady(source)
+            device = device.withCover(covers.coverPayload(objectKey: key))
+        }
+        return device
     }
 
     private func streamEvent(for link: BluetoothService) -> ChargingStreamEvent {
@@ -901,7 +921,7 @@ final class ServiceController: ObservableObject {
             phase: link.phase.label,
             connected: link.isConnected,
             lastError: link.lastError,
-            device: link.devicePayload
+            device: devicePayload(for: link)
         )
     }
 
@@ -1016,6 +1036,7 @@ final class ServiceController: ObservableObject {
         for link in chargingLinks {
             configure(link: link)
         }
+        covers.onChange = { [weak self] in self?.wakeReporter() }
 
         if settings.desktopModuleEnabled {
             desktopActivity.setWindowTitleApplicationWhitelist(
@@ -1405,13 +1426,28 @@ final class ServiceController: ObservableObject {
                         let responsePayload = try JSONDecoder()
                             .decode(TelemetryIngestResponse.self, from: responseData)
                         let desktopIconAvailable = responsePayload.data.desktopIconAvailable
+                        let chargerCoverIconAvailable = responsePayload.data.chargerCoverIconAvailable
                         if desktopToSend, desktopIconAvailable == nil {
                             throw ReporterError.invalidTelemetryResponse
                         }
                         reporterLastSuccess = Date()
                         reporterLastError = nil
                         lastHeartbeatAt = Date()
-                        if chargerToSend { lastPostedChargingDevices = chargerSignature }
+                        if chargerToSend {
+                            lastPostedChargingDevices = chargerSignature
+                            if chargerCoverIconAvailable == false,
+                               let source = covers.coverUploadSource,
+                               let iconHash = source.iconHash {
+                                if charger?.devices.first(where: { $0.kind == .charger })?.cover?.iconObjectKey != nil {
+                                    forgetUploadedDesktopIcon(iconHash)
+                                }
+                                startCoverIconResolution(source)
+                                if uploadedDesktopIconHashes.contains(iconHash) {
+                                    lastPostedChargingDevices = nil
+                                    wakeReporter()
+                                }
+                            }
+                        }
                         // 结构指纹跟着每次成功发送推进，跟 chargerChanged 无关：
                         // 结构变了完整指纹必然也变，反过来不成立。
                         if let chargerStructural { lastPostedChargingStructural = chargerStructural }
@@ -1612,6 +1648,96 @@ final class ServiceController: ObservableObject {
         uploadedDesktopIconHashes.remove(iconHash)
         uploadedDesktopIconOrder.removeAll { $0 == iconHash }
         desktopIconVerifiedAt.removeValue(forKey: iconHash)
+    }
+
+    private func coverIconObjectKeyIfReady(_ source: CoverUploadSource?) -> String? {
+        guard let source, let iconHash = source.iconHash, let iconData = source.iconData else {
+            return nil
+        }
+        startCoverIconResolution(source)
+        return uploadedDesktopIconHashes.contains(iconHash)
+            ? R2IconUploader.objectKey(for: iconData, ext: "jpg")
+            : nil
+    }
+
+    private func startCoverIconResolution(_ source: CoverUploadSource) {
+        guard settings.postEnabled,
+              let iconHash = source.iconHash,
+              let iconData = source.iconData,
+              let r2Configuration = R2IconUploader.configuration(settings: settings),
+              iconUploadAttempts[iconHash, default: 0] < Self.maxIconUploadAttempts,
+              iconResolvers[iconHash] == nil else {
+            return
+        }
+
+        if uploadedDesktopIconHashes.contains(iconHash),
+           let verifiedAt = desktopIconVerifiedAt[iconHash],
+           Date().timeIntervalSince(verifiedAt) < Self.desktopIconVerificationInterval {
+            return
+        }
+
+        let objectKey = R2IconUploader.objectKey(for: iconData, ext: "jpg")
+        let timeout = min(settings.postTimeout, 3)
+        let resolverID = UUID()
+        let task = Task<Void, Never> { @MainActor [weak self] in
+            guard let self else { return }
+            while !Task.isCancelled,
+                  self.iconUploadAttempts[iconHash, default: 0] < Self.maxIconUploadAttempts {
+                do {
+                    let exists = try await R2IconUploader.exists(
+                        objectKey: objectKey,
+                        configuration: r2Configuration,
+                        timeout: timeout
+                    )
+                    if !exists {
+                        self.forgetUploadedDesktopIcon(iconHash)
+                        try await R2IconUploader.upload(
+                            data: iconData,
+                            contentHash: R2IconUploader.contentHash(of: iconData),
+                            objectKey: objectKey,
+                            configuration: r2Configuration,
+                            timeout: timeout
+                        )
+                    }
+                    guard !Task.isCancelled else { break }
+                    self.iconUploadAttempts[iconHash] = 0
+                    self.desktopIconVerifiedAt[iconHash] = Date()
+                    self.rememberUploadedCoverIcon(iconHash)
+                    if self.lastPostedChargerCover(hash: iconHash, hasObjectKey: false) {
+                        self.lastPostedChargingDevices = nil
+                        self.wakeReporter()
+                    }
+                    break
+                } catch is CancellationError {
+                    break
+                } catch {
+                    if Task.isCancelled { break }
+                    self.iconUploadAttempts[iconHash, default: 0] += 1
+                    self.reporterLastError = "封面上传失败：\(error.localizedDescription)"
+                }
+            }
+            if self.iconResolvers[iconHash]?.id == resolverID {
+                self.iconResolvers.removeValue(forKey: iconHash)
+            }
+        }
+        iconResolvers[iconHash] = (resolverID, task)
+    }
+
+    private func rememberUploadedCoverIcon(_ iconHash: String) {
+        uploadedDesktopIconHashes.insert(iconHash)
+        uploadedDesktopIconOrder.removeAll { $0 == iconHash }
+        uploadedDesktopIconOrder.append(iconHash)
+        if uploadedDesktopIconOrder.count > Self.uploadedDesktopIconLimit {
+            let evicted = uploadedDesktopIconOrder.removeFirst()
+            uploadedDesktopIconHashes.remove(evicted)
+            desktopIconVerifiedAt.removeValue(forKey: evicted)
+        }
+    }
+
+    private func lastPostedChargerCover(hash: String, hasObjectKey: Bool) -> Bool {
+        guard let cover = lastPostedChargingDevices?.devices.first(where: { $0.kind == .charger })?.cover
+        else { return false }
+        return cover.iconHash == hash && (cover.iconObjectKey != nil) == hasObjectKey
     }
 
     var telemetryEnvelope: TelemetryEnvelope {

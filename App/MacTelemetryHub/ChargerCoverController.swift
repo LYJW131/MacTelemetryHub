@@ -1,5 +1,12 @@
 import AppKit
+import CryptoKit
 import Foundation
+
+struct CoverUploadSource: Equatable, Sendable {
+    let name: String
+    let iconHash: String?
+    let iconData: Data?
+}
 
 @MainActor
 final class ChargerCoverController: ObservableObject {
@@ -20,6 +27,13 @@ final class ChargerCoverController: ObservableObject {
     private var previewTasks: [Int: Task<Void, Never>] = [:]
     private var jpegs: [Int: Data] = [:]
     private var onDeviceIDs: Set<Int> = []
+    private var lastCoverIdentity: CoverIdentity?
+    var onChange: (() -> Void)?
+
+    private struct CoverIdentity: Equatable {
+        let id: Int?
+        let hash: String?
+    }
 
     init(settings: AppSettings, chargerLink: BluetoothService) {
         self.settings = settings
@@ -27,6 +41,28 @@ final class ChargerCoverController: ObservableObject {
     }
 
     var currentPictureID: Int? { chargerLink.chargerState?.screensaverId }
+
+    var currentPicture: AnkerScreensaverPicture? {
+        guard let id = currentPictureID else { return nil }
+        return pictures.first { $0.id == id }
+    }
+
+    /// 当前封面上报源。BLE 已经给了 screensaverId 就发；云端列表对上之后补名字和图。
+    var coverUploadSource: CoverUploadSource? {
+        if let picture = currentPicture {
+            let name = picture.name.isEmpty ? "Cover \(picture.id)" : picture.name
+            let jpeg = jpegs[picture.id]
+            let hash = jpeg.map(Self.sha256Hex)
+            return CoverUploadSource(name: name, iconHash: hash, iconData: jpeg)
+        }
+        guard let id = currentPictureID else { return nil }
+        return CoverUploadSource(name: "Cover \(id)", iconHash: nil, iconData: nil)
+    }
+
+    func coverPayload(objectKey: String?) -> CoverPayload? {
+        guard let source = coverUploadSource else { return nil }
+        return CoverPayload(name: source.name, iconHash: source.iconHash, iconObjectKey: objectKey)
+    }
 
     var canSelect: Bool {
         chargerLink.isConnected && !isLoading && selectingID == nil && transferringID == nil
@@ -37,6 +73,7 @@ final class ChargerCoverController: ObservableObject {
         if let serial, serial != lastSerial, settings.hasValidAnkerToken, !isLoading {
             Task { await refresh(force: false) }
         }
+        emitCoverIfChanged()
     }
 
     func loginAndStoreUserID() async throws {
@@ -82,6 +119,7 @@ final class ChargerCoverController: ObservableObject {
             cloudOnlyIDs = cloudOnlyIDs.intersection(live)
             onDeviceIDs = onDeviceIDs.intersection(live)
             prefetchPreviews(list)
+            emitCoverIfChanged()
         } catch {
             lastError = error.localizedDescription
         }
@@ -158,6 +196,7 @@ final class ChargerCoverController: ObservableObject {
         if previews[picture.id] == nil, let image = NSImage(data: data) {
             previews[picture.id] = image
         }
+        emitCoverIfChanged()
         return data
     }
 
@@ -187,10 +226,25 @@ final class ChargerCoverController: ObservableObject {
                     if let image = NSImage(data: data) {
                         previews[picture.id] = image
                     }
+                    emitCoverIfChanged()
                 } catch {
                     // Keep the tile; a missing JPEG is not a switch failure.
                 }
             }
         }
+    }
+
+    private func emitCoverIfChanged() {
+        let identity = CoverIdentity(
+            id: currentPictureID,
+            hash: currentPictureID.flatMap { jpegs[$0] }.map(Self.sha256Hex)
+        )
+        guard identity != lastCoverIdentity else { return }
+        lastCoverIdentity = identity
+        onChange?()
+    }
+
+    private static func sha256Hex(_ data: Data) -> String {
+        SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
     }
 }
