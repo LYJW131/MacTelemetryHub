@@ -1,4 +1,5 @@
 import Foundation
+import Network
 import Security
 import ServiceManagement
 
@@ -11,6 +12,7 @@ final class AppSettings: ObservableObject {
         static let powerBankPeripheralID = "powerBankPeripheralID"
         static let powerBankModuleEnabled = "powerBankModuleEnabled"
         static let httpServerEnabled = "httpServerEnabled"
+        static let httpBindAddress = "httpBindAddress"
         static let httpPort = "httpPort"
         static let postEnabled = "postEnabled"
         static let postURL = "postURL"
@@ -29,6 +31,7 @@ final class AppSettings: ObservableObject {
         /// 从前是 codexBarCostRefreshInterval + agentLimitsRefreshInterval 两个。
         /// 并成一个采集器之后没有「只刷限额」这回事了，旧键留着也没人读
         static let vibeCodingUsageRefreshInterval = "vibeCodingUsageRefreshInterval"
+        static let vibeCodingYearRefreshInterval = "vibeCodingYearRefreshInterval"
         static let r2Endpoint = "r2Endpoint"
         static let r2Bucket = "r2Bucket"
         static let r2AccessKeyAccount = "r2-access-key-id"
@@ -49,6 +52,7 @@ final class AppSettings: ObservableObject {
     @Published var peripheralID: String
     @Published var powerBankPeripheralID: String
     @Published var httpServerEnabled: Bool
+    @Published var httpBindAddress: String
     @Published var httpPort: Int
     @Published var postEnabled: Bool
     @Published var postURL: String
@@ -68,8 +72,10 @@ final class AppSettings: ObservableObject {
     @Published var tokenTrackerBaseURL: String
     /// 短间隔那份：此刻在不在用
     @Published var codingSessionRefreshInterval: Double
-    /// 长间隔那份：token、费用、曲线、套餐、限额，一个采集器一轮全取
+    /// 长间隔那份：token、费用、套餐、限额，一个采集器一轮全取
     @Published var vibeCodingUsageRefreshInterval: Double
+    /// 年度热力图：过去 53 周日合计。格子按天变，默认一小时。
+    @Published var vibeCodingYearRefreshInterval: Double
     @Published var r2Endpoint: String
     @Published var r2Bucket: String
     @Published var r2AccessKeyID: String
@@ -102,6 +108,11 @@ final class AppSettings: ObservableObject {
         powerBankPeripheralID = defaults.string(forKey: Key.powerBankPeripheralID)
             ?? environment["ANKER_POWERBANK_ADDRESS"] ?? ""
         httpServerEnabled = defaults.object(forKey: Key.httpServerEnabled) as? Bool ?? false
+        let storedBind = defaults.string(forKey: Key.httpBindAddress)
+            ?? environment["TELEMETRY_HTTP_BIND"]
+            ?? environment["A2687_BIND"]
+            ?? ""
+        httpBindAddress = storedBind.isEmpty ? "127.0.0.1" : storedBind
         let storedPort = defaults.integer(forKey: Key.httpPort)
         httpPort = storedPort == 0 ? Int(environment["A2687_PORT"] ?? "8787") ?? 8787 : storedPort
         let initialPostURL = defaults.string(forKey: Key.postURL) ?? environment["A2687_POST_URL"] ?? ""
@@ -143,6 +154,10 @@ final class AppSettings: ObservableObject {
         codingSessionRefreshInterval = storedSessionInterval == 0 ? 60 : storedSessionInterval
         let storedUsageInterval = defaults.double(forKey: Key.vibeCodingUsageRefreshInterval)
         vibeCodingUsageRefreshInterval = storedUsageInterval == 0 ? 600 : storedUsageInterval
+        let storedYearInterval = defaults.double(forKey: Key.vibeCodingYearRefreshInterval)
+        vibeCodingYearRefreshInterval = storedYearInterval == 0
+            ? VibeCodingYearMonitor.defaultRefreshInterval
+            : storedYearInterval
         r2Endpoint = defaults.string(forKey: Key.r2Endpoint)
             ?? environment["R2_ENDPOINT"]
             ?? ""
@@ -171,6 +186,27 @@ final class AppSettings: ObservableObject {
             return String(stored.dropLast(retired.count)) + ingestPath
         }
         return stored
+    }
+
+    var normalizedHTTPBindAddress: String? {
+        Self.normalizedBindAddress(httpBindAddress)
+    }
+
+    /**
+     * 绑定地址只接受 IP，不接受主机名。
+     *
+     * `127.0.0.1` / `::1` 仅本机；`0.0.0.0` / `::` 所有网卡；也可以填某一块
+     * 网卡的地址。方括号可有可无（`[::1]` 和 `::1` 一样）。
+     */
+    static func normalizedBindAddress(_ raw: String) -> String? {
+        var value = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        if value.hasPrefix("["), value.hasSuffix("]"), value.count >= 2 {
+            value = String(value.dropFirst().dropLast())
+        }
+        guard !value.isEmpty else { return nil }
+        if IPv4Address(value) != nil { return value }
+        if IPv6Address(value) != nil { return value }
+        return nil
     }
 
     var normalizedPeripheralID: UUID? {
@@ -243,6 +279,9 @@ final class AppSettings: ObservableObject {
         }
         if httpServerEnabled {
             guard (1...65535).contains(httpPort) else { throw SettingsError.invalidPort }
+            guard Self.normalizedBindAddress(httpBindAddress) != nil else {
+                throw SettingsError.invalidBindAddress
+            }
         }
         guard postInterval > 0, postTimeout > 0 else { throw SettingsError.invalidTiming }
         if postEnabled {
@@ -262,6 +301,9 @@ final class AppSettings: ObservableObject {
             }
             guard vibeCodingUsageRefreshInterval >= 60 else {
                 throw SettingsError.invalidVibeCodingUsageInterval
+            }
+            guard vibeCodingYearRefreshInterval >= 60 else {
+                throw SettingsError.invalidVibeCodingYearInterval
             }
         }
         let r2Values = [r2Endpoint, r2Bucket, r2AccessKeyID, r2SecretAccessKey]
@@ -300,7 +342,9 @@ final class AppSettings: ObservableObject {
         try keychain.write(r2SecretAccessKey, account: Key.r2SecretAccessKeyAccount)
         defaults.set(peripheralID, forKey: Key.peripheralID)
         defaults.set(powerBankPeripheralID, forKey: Key.powerBankPeripheralID)
+        httpBindAddress = Self.normalizedBindAddress(httpBindAddress) ?? httpBindAddress.trimmingCharacters(in: .whitespacesAndNewlines)
         defaults.set(httpServerEnabled, forKey: Key.httpServerEnabled)
+        defaults.set(httpBindAddress, forKey: Key.httpBindAddress)
         defaults.set(httpPort, forKey: Key.httpPort)
         defaults.set(postEnabled, forKey: Key.postEnabled)
         defaults.set(postURL, forKey: Key.postURL)
@@ -318,6 +362,7 @@ final class AppSettings: ObservableObject {
         defaults.set(tokenTrackerBaseURL, forKey: Key.tokenTrackerBaseURL)
         defaults.set(codingSessionRefreshInterval, forKey: Key.codingSessionRefreshInterval)
         defaults.set(vibeCodingUsageRefreshInterval, forKey: Key.vibeCodingUsageRefreshInterval)
+        defaults.set(vibeCodingYearRefreshInterval, forKey: Key.vibeCodingYearRefreshInterval)
         defaults.set(r2Endpoint, forKey: Key.r2Endpoint)
         defaults.set(r2Bucket, forKey: Key.r2Bucket)
     }
@@ -344,9 +389,10 @@ final class AppSettings: ObservableObject {
 }
 
 enum SettingsError: LocalizedError {
-    case invalidUserID, invalidPeripheralID, invalidPort, invalidTiming, invalidPostURL
+    case invalidUserID, invalidPeripheralID, invalidPort, invalidBindAddress, invalidTiming, invalidPostURL
     case invalidTokenTrackerURL, invalidCodingSessionInterval
     case invalidVibeCodingUsageInterval
+    case invalidVibeCodingYearInterval
     case invalidR2Configuration
 
     var errorDescription: String? {
@@ -354,11 +400,13 @@ enum SettingsError: LocalizedError {
         case .invalidUserID: "Anker 用户 ID 必须是正好 40 个 ASCII 字符。"
         case .invalidPeripheralID: "配对的设备 ID 必须是有效 UUID，或留空重新配对。"
         case .invalidPort: "HTTP 端口必须在 1 到 65535 之间。"
+        case .invalidBindAddress: "绑定地址必须是 IP，例如 127.0.0.1、0.0.0.0 或 ::1。"
         case .invalidTiming: "POST 间隔和超时必须大于 0。"
         case .invalidPostURL: "POST 地址必须是完整的 http:// 或 https:// URL。"
         case .invalidTokenTrackerURL: "启用 Vibe Coding 用量时，TokenTracker 地址必须是完整的 http:// 或 https:// URL。"
         case .invalidCodingSessionInterval: "会话状态刷新间隔不能低于 60 秒。"
         case .invalidVibeCodingUsageInterval: "用量与限额刷新间隔不能低于 60 秒。"
+        case .invalidVibeCodingYearInterval: "年度热力图刷新间隔不能低于 60 秒。"
         case .invalidR2Configuration: "R2 直传配置必须同时填写 HTTPS Endpoint、Bucket、Access Key ID 和 Secret Access Key。"
         }
     }

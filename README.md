@@ -12,16 +12,14 @@ usage, rather than the identity of the whole application.
 - account-scoped 40-character Anker user ID stored in Keychain
 - native dashboard and menu-bar controls
 - disconnect and reconnect actions
-- local HTTP server on all network interfaces
-- the existing minimal `/status` shape and separate `/debug/status`
-- `/health`, `/ports`, `/metrics`, `POST /disconnect`, and `POST /reconnect`
+- optional local HTTP listener with `/health` and per-device SSE
 - a versioned telemetry envelope posted to one shared ingest endpoint
 - direct local Music.app state via Apple Events (separate from Apple Music Web API)
 - optional MusicKit library authorization and Apple Music token upload
 - foreground application reporting, limited to the app's name, bundle ID, and icon,
   with an exact Bundle ID blacklist for remote reporting
 - coding-usage aggregation that never uploads session IDs, project paths, prompts, or replies
-- subscription plan tier and server-side rate-limit windows for Claude Code and Codex
+- subscription plan tier and server-side rate-limit windows for every coding agent in the envelope
 - login launch using `SMAppService.mainApp`
 
 Each module can be disabled without stopping the others. Disabling the charger
@@ -51,13 +49,14 @@ envelope and may contain only the modules that have fresh data:
     "timezone": {},
     "chargingDevices": {},
     "vibeCodingUsage": {},
-    "vibeCodingNow": {}
+    "vibeCodingNow": {},
+    "vibeCodingYear": {}
   }
 }
 ```
 
 `activeModules` lists the **toggles** the user has switched on, not the module
-keys above: vibe coding is one toggle (`vibeCoding`) that feeds two modules.
+keys above: vibe coding is one toggle (`vibeCoding`) that feeds three modules.
 
 Version 4 is the only accepted contract; desktop icons are addressed by SHA-256.
 The Mac renders each icon at 96 px, encodes it once as WebP, signs an S3-compatible
@@ -73,17 +72,18 @@ sent synchronously so it beats the disconnect; crashes, network loss, and forced
 shutdowns still rely on the site's "nothing received for a while" timeout. Both
 paths are needed; neither replaces the other.
 The POST body is deliberately bounded. The app discards TokenTracker's
-project-level details after parsing and uploads only display-ready totals,
-today's numbers, and 30 daily activity buckets. Token inspection stays in
-TokenTracker's own panel; Mac Telemetry Hub only shows the collectors' health.
+project-level details after parsing and uploads only display-ready totals
+and today's numbers. Token inspection stays in TokenTracker's own panel;
+Mac Telemetry Hub only shows the collectors' health.
 
-Vibe coding is split into two modules by **how often it changes**, not by which
+Vibe coding is split into three modules by **how often it changes**, not by which
 endpoint produced it:
 
 | Module | Interval | Contents |
 | --- | --- | --- |
 | `vibeCodingNow` | 60 s | whether each agent is in use right now, its current model, last activity time |
-| `vibeCodingUsage` | 10 min | tokens, cost, the 30-day curve, plan tiers, rate-limit windows, supplemental quota providers, lifetime session count |
+| `vibeCodingUsage` | 10 min | tokens, cost, plan tiers, and rate-limit windows for every agent, plus lifetime session count |
+| `vibeCodingYear` | 1 h (configurable) | last 53 weeks of daily totals plus a compact per-day top-5 model mix, sent as one calendar |
 
 There were three modules before (usage / limits / sessions), one per collector —
 a line drawn by *which command produced the data*, back when limits and usage
@@ -110,20 +110,23 @@ Token、费用、限额和会话都来自本机跑着的 TokenTracker 面板，�
 
 - `tokentracker-usage-daily` 给出哪几天有数据，再对每个有数据的日子问一次
   `tokentracker-usage-model-breakdown`，合成 token/费用历史与模型排行。
-- `tokentracker-usage-limits` 一次带回所有来源的套餐档位和服务端限额窗口，
-  包括补充来源（见 `TelemetryModules.swift` 里的 `supplementalQuotaProviders`，
-  当前是 `cursor`、`grok`、`antigravity`），每家只取一个总额百分比。每家连同
-  自己的显示名和图标 key 一起上报，站点按这里配了几家就渲染几家，自己不留名单。
-  补充来源不会往载荷里加 token / 费用 / 模型明细。
+  同一条按日接口另外喂给 `vibeCodingYear`：过去 53 周的日合计一次发完；有量的日
+  子再问一次按模型拆分，编成模型表 + 每天前五的稀疏 mix。间隔单独控（默认一小
+  时），不跟用量那 10 分钟绑在一起。
+- `tokentracker-usage-limits` 一次带回所有来源的套餐档位和服务端限额窗口。
+  信封里五个来源（见 `TelemetryModules.swift` 的 `vibeCodingAgents`：`claude`、
+  `codex`、`cursor`、`grok`、`antigravity`）走同一套 agent 形状：token、今日用量、
+  套餐、全部限额窗口、展示名和图标都在行内。站点按 id 决定展示形态，不要再拆
+  `quotaProviders`。
 - `tokentracker-sessions` 给出轻量的在用状态：只留模型名、最后活动时刻和条数。
-  前两样走 `vibeCodingNow`（60 秒一轮）；条数是「一共开过多少次」，属于累计量，
-  搭 `vibeCodingUsage` 那份车走。
+  前两样走 `vibeCodingNow`（60 秒一轮，五个来源都发）；条数是「一共开过多少次」，
+  属于累计量，搭 `vibeCodingUsage` 那份车走。
 
 从前这四份是 CodexBar CLI 两条命令加 ccusage 两条、一共四次进程，光那条
 `cost --refresh` 就要十几秒；现在是同一个本机 HTTP 服务的几个 GET。代价是它
 得开着 —— 面板没跑的时候三份各自留下自己的错误，互不牵连。
 
-上报的 `vibe_coding` 载荷形状没变。窗口的个数和长度取自上游的回答，不作假设。
+窗口的个数和长度取自上游的回答，不作假设，也不按展示形态裁一条「总额」。
 会话状态每 60 秒刷一次；用量和限额每 10 分钟刷一次。
 
 `position_ms` in the music module is an anchor, not a stream. Paired with
@@ -190,14 +193,11 @@ air unless the stream has already gone quiet.
 One consequence worth knowing: `raw_status` is no longer refreshed on a timer.
 It holds whatever the last `0x0200` reply carried, normally the one the
 handshake requested, so it carries its own `raw_status_updated_at` in
-`/debug/status`. Port telemetry stays ~1 Hz fresh; the two ages are not
+the dashboard snapshot. Port telemetry stays ~1 Hz fresh; the two ages are not
 interchangeable.
 
 Measured end to end, from the event to the site serving the new state: play and
 pause land in 320–490 ms, application switches in 560–620 ms.
-
-The app also exposes local debugging snapshots at `GET /activity` and
-`GET /telemetry`; the original charger `GET /status` remains compatible.
 
 ## Module permissions
 
@@ -300,16 +300,18 @@ user logs in; it is not a root LaunchDaemon.
 Closing the dashboard window does not stop the service. Use the menu-bar status
 icon to reopen the window, disconnect, reconnect, or quit.
 
-## HTTP API
+## Local HTTP
 
-The default port is `8787` and the listener accepts connections on all local
-interfaces, including the Mac's Tailscale address. If the port is temporarily
-occupied, the app retries every three seconds.
+The default bind is `127.0.0.1:8787` (loopback only). Set the bind address to
+`0.0.0.0`, `::`, or a specific interface IP to listen more widely. If the port
+is temporarily occupied, the app retries every three seconds.
 
-`GET /status` always returns a fixed machine-readable shape. Nullable fields
-are present as JSON `null` rather than being omitted. Numeric voltage, current,
-and power values are rounded to two decimal places; `updated_at` is the Unix
-timestamp of the last decoded charger data.
+- `GET /health` — process liveness, plus each charging link's enabled / connected / phase
+- `GET /sse/charger` and `GET /sse/powerbank` — Server-Sent Events. The first
+  event is the current snapshot; later events follow the device's BLE push
+  (about 1 Hz). There is no local poll timer. Each event is a JSON object with
+  `phase`, `connected`, `lastError`, and `device` (the same charging-device
+  payload used for remote ingest, or `null` before the first telemetry frame).
 
 ## Tests
 

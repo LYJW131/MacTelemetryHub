@@ -26,7 +26,7 @@ private enum SettingsCategory: String, CaseIterable, Identifiable {
         case .general: "后台运行与应用标识"
         case .sources: "前台应用、音乐与用量统计"
         case .charger: "Anker Prime 配对与端口遥测"
-        case .local: "本机 HTTP API 与调试端点"
+        case .local: "本机健康检查与充电设备 SSE"
         case .reporting: "版本化遥测入口与发送策略"
         }
     }
@@ -372,6 +372,7 @@ struct SettingsView: View {
                         )
                         NumericField(title: "会话状态刷新", unit: "秒（最少 60）", placeholder: "60", value: $settings.codingSessionRefreshInterval)
                         NumericField(title: "用量与限额刷新", unit: "秒（最少 60）", placeholder: "600", value: $settings.vibeCodingUsageRefreshInterval)
+                        NumericField(title: "年度热力图刷新", unit: "秒（最少 60）", placeholder: "3600", value: $settings.vibeCodingYearRefreshInterval)
                     }
                     .padding(.top, 5)
                 }
@@ -609,16 +610,21 @@ struct SettingsView: View {
 
     private var localSettings: some View {
         VStack(alignment: .leading, spacing: 0) {
-            settingSection("本地 HTTP API", detail: "监听所有本机网络接口，供调试与局域网客户端读取。", icon: "network") {
-                Toggle("启用本地 HTTP API", isOn: $settings.httpServerEnabled)
+            settingSection("本地 HTTP", detail: "健康检查，以及两条跟随蓝牙推流的充电设备 SSE。", icon: "network") {
+                Toggle("启用本地 HTTP", isOn: $settings.httpServerEnabled)
                     .toggleStyle(.switch)
 
                 if settings.httpServerEnabled {
+                    fieldTitle("绑定地址", detail: "只填 IP。127.0.0.1 仅本机，0.0.0.0 所有 IPv4 网卡，也可以填某一块网卡的地址。")
+                    TextField("127.0.0.1", text: $settings.httpBindAddress)
+                        .font(.body.monospaced())
+                        .textFieldStyle(.roundedBorder)
+
                     HStack(spacing: 16) {
                         VStack(alignment: .leading, spacing: 3) {
                             Text("监听端口")
                                 .font(.callout.weight(.medium))
-                            Text("端点会在保存后重新监听。")
+                            Text("改地址或端口会断开现有 SSE 并重新监听。")
                                 .font(.caption)
                                 .foregroundStyle(.secondary)
                         }
@@ -633,9 +639,12 @@ struct SettingsView: View {
                     VStack(alignment: .leading, spacing: 5) {
                         Label("可用端点", systemImage: "point.3.connected.trianglepath.dotted")
                             .font(.callout.weight(.medium))
-                        Text("/status  ·  /activity  ·  /telemetry  ·  /health")
-                        Text("/apple-music/authorization  ·  /ports  ·  /metrics")
-                        Text("/disconnect  ·  /reconnect")
+                        Text("GET  /health")
+                        Text("GET  /sse/charger")
+                        Text("GET  /sse/powerbank")
+                        Text("SSE 没有本地定时器，充电设备推一帧才发一帧。")
+                            .font(.caption)
+                            .foregroundStyle(.tertiary)
                     }
                     .font(.caption2.monospaced())
                     .foregroundStyle(.secondary)
@@ -651,7 +660,7 @@ struct SettingsView: View {
                     Circle()
                         .fill(!settings.httpServerEnabled ? Color.secondary : service.httpServer.listeningURL == nil ? .orange : .green)
                         .frame(width: 7, height: 7)
-                    Text(!settings.httpServerEnabled ? "HTTP 服务已关闭" : service.httpServer.listeningURL == nil ? "HTTP 服务未启动" : "HTTP 服务正在监听")
+                    Text(!settings.httpServerEnabled ? "本地 HTTP 已关闭" : service.httpServer.listeningURL == nil ? "本地 HTTP 未启动" : "本地 HTTP 正在监听")
                         .font(.callout.weight(.medium))
                     Spacer()
                     if let url = service.httpServer.listeningURL {
@@ -872,7 +881,7 @@ struct SettingsView: View {
             Spacer(minLength: 12)
             Button("取消") { dismiss() }
                 .keyboardShortcut(.cancelAction)
-            Button("保存并重连", systemImage: "checkmark") { save() }
+            Button("保存", systemImage: "checkmark") { save() }
                 .buttonStyle(.borderedProminent)
                 .keyboardShortcut(.defaultAction)
         }
@@ -899,7 +908,7 @@ struct SettingsView: View {
     private func saveSettings() async {
         do {
             try service.applySettings()
-            message = "设置已保存，正在建立新会话。"
+            message = "设置已保存。"
             isError = false
         } catch {
             message = error.localizedDescription

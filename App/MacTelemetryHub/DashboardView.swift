@@ -46,6 +46,7 @@ struct DashboardView: View {
     // 就是这么挂在 service 下面读的，只有别的东西触发重绘时才会跟着变。
     @ObservedObject private var vibeCodingUsageCollector: VibeCodingUsageMonitor
     @ObservedObject private var codingSessions: CodingSessionMonitor
+    @ObservedObject private var vibeCodingYearCollector: VibeCodingYearMonitor
     @State private var selection: DashboardSection = .overview
 
     init(service: ServiceController) {
@@ -58,6 +59,7 @@ struct DashboardView: View {
         appleMusic = service.appleMusic
         vibeCodingUsageCollector = service.vibeCodingUsageCollector
         codingSessions = service.codingSessions
+        vibeCodingYearCollector = service.vibeCodingYearCollector
     }
 
     var body: some View {
@@ -106,9 +108,10 @@ struct DashboardView: View {
                         .fill(!service.settings.httpServerEnabled ? Color.secondary : httpServer.listeningURL == nil ? .orange : .green)
                         .frame(width: 7, height: 7)
                     VStack(alignment: .leading, spacing: 2) {
-                        Text(!service.settings.httpServerEnabled ? "本地 API 已关闭" : httpServer.listeningURL == nil ? "本地 API 未监听" : "本地 API 在线")
+                        Text(!service.settings.httpServerEnabled ? "本地 HTTP 已关闭" : httpServer.listeningURL == nil ? "本地 HTTP 未监听" : "本地 HTTP 在线")
                             .font(.callout.weight(.medium))
-                        Text(httpServer.listeningURL?.absoluteString ?? (service.settings.httpServerEnabled ? "在设置中检查端口" : "远端上报继续运行"))
+                        Text(httpServer.listeningDescription
+                             ?? (service.settings.httpServerEnabled ? "在设置中检查地址和端口" : "远端上报继续运行"))
                             .font(.caption2.monospaced())
                             .foregroundStyle(.secondary)
                             .lineLimit(1)
@@ -515,6 +518,24 @@ struct DashboardView: View {
                 feedbackIsError: service.manualReportFailed(.vibeCoding)
             )
             ModuleStatusCard(
+                title: "年度用量",
+                icon: "calendar",
+                enabled: service.settings.codexBarModuleEnabled,
+                value: vibeCodingYearCollector.lastSuccess == nil ? "等待日历" : "已采集",
+                detail: vibeCodingYearCollector.lastError
+                    ?? vibeCodingYearCollector.lastSuccess?.formatted(date: .omitted, time: .standard),
+                action: { Task { await service.refreshVibeCodingYearNow() } },
+                actionIcon: "arrow.clockwise",
+                actionHelp: "重新读取过去 53 周的日合计并上报",
+                actionEnabled: service.settings.codexBarModuleEnabled,
+                isReporting: service.isRefreshingVibeCodingYear
+                    || service.isManualReportInFlight(.vibeCodingYear),
+                feedback: service.isRefreshingVibeCodingYear
+                    ? "正在读取年度用量…"
+                    : service.manualReportMessage(for: .vibeCodingYear),
+                feedbackIsError: service.manualReportFailed(.vibeCodingYear)
+            )
+            ModuleStatusCard(
                 title: "充电头",
                 icon: "bolt.fill",
                 enabled: service.settings.chargerModuleEnabled,
@@ -701,8 +722,8 @@ struct DashboardView: View {
         HStack(spacing: 10) {
             if let url = httpServer.listeningURL {
                 Circle().fill(.green).frame(width: 7, height: 7)
-                Text("API 在线").font(.caption.weight(.semibold))
-                Text(url.absoluteString)
+                Text("本地 HTTP 在线").font(.caption.weight(.semibold))
+                Text(httpServer.listeningDescription ?? url.absoluteString)
                     .font(.caption.monospaced())
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
@@ -711,7 +732,7 @@ struct DashboardView: View {
                     .font(.caption)
             } else if !service.settings.httpServerEnabled {
                 Image(systemName: "lock.fill").foregroundStyle(.secondary)
-                Text("本地 HTTP API 已关闭")
+                Text("本地 HTTP 已关闭")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             } else {

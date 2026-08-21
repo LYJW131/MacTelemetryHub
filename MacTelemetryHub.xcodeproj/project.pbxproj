@@ -19,7 +19,6 @@
 		B10000000000000000000009 /* A2687Crypto.swift in Sources */ = {isa = PBXBuildFile; fileRef = F10000000000000000000009 /* A2687Crypto.swift */; };
 		B1000000000000000000000A /* A2687Protocol.swift in Sources */ = {isa = PBXBuildFile; fileRef = F1000000000000000000000A /* A2687Protocol.swift */; };
 		B1000000000000000000000B /* Models.swift in Sources */ = {isa = PBXBuildFile; fileRef = F1000000000000000000000B /* Models.swift */; };
-		B1000000000000000000000C /* index.html in Resources */ = {isa = PBXBuildFile; fileRef = F1000000000000000000000C /* index.html */; };
 		B1000000000000000000000D /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = F1000000000000000000000F /* Assets.xcassets */; };
 		B10000000000000000000020 /* DeviceTelemetry.swift in Sources */ = {isa = PBXBuildFile; fileRef = F10000000000000000000020 /* DeviceTelemetry.swift */; };
 		B10000000000000000000021 /* PowerBankProtocol.swift in Sources */ = {isa = PBXBuildFile; fileRef = F10000000000000000000021 /* PowerBankProtocol.swift */; };
@@ -46,7 +45,6 @@
 		F10000000000000000000009 /* A2687Crypto.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = A2687Crypto.swift; sourceTree = "<group>"; };
 		F1000000000000000000000A /* A2687Protocol.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = A2687Protocol.swift; sourceTree = "<group>"; };
 		F1000000000000000000000B /* Models.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Models.swift; sourceTree = "<group>"; };
-		F1000000000000000000000C /* index.html */ = {isa = PBXFileReference; lastKnownFileType = text.html; path = index.html; sourceTree = "<group>"; };
 		F1000000000000000000000D /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
 		F1000000000000000000000E /* Mac Telemetry Hub.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = "Mac Telemetry Hub.app"; sourceTree = BUILT_PRODUCTS_DIR; };
 		F1000000000000000000000F /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
@@ -95,7 +93,6 @@
 				F10000000000000000000012 /* AppleMusicAuthorization.swift */,
 				F1000000000000000000000D /* Info.plist */,
 				F1000000000000000000000F /* Assets.xcassets */,
-				A10000000000000000000013 /* Resources */,
 				F10000000000000000000024 /* ChargingDeviceSlot.swift */,
 				F10000000000000000000027 /* AnkerCloudClient.swift */,
 				F10000000000000000000028 /* ChargerCoverController.swift */,
@@ -123,12 +120,6 @@
 			isa = PBXGroup;
 			children = (F1000000000000000000000E /* Mac Telemetry Hub.app */);
 			name = Products;
-			sourceTree = "<group>";
-		};
-		A10000000000000000000013 /* Resources */ = {
-			isa = PBXGroup;
-			children = (F1000000000000000000000C /* index.html */);
-			path = Resources;
 			sourceTree = "<group>";
 		};
 /* End PBXGroup section */
@@ -178,7 +169,6 @@
 			isa = PBXResourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
-				B1000000000000000000000C /* index.html in Resources */,
 				B1000000000000000000000D /* Assets.xcassets in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;

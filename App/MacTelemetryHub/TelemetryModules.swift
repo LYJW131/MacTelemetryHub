@@ -96,6 +96,29 @@ private enum TokenTrackerAPI {
     }
 }
 
+/**
+ * 信封里五个来源同一形状。站点按 id 决定展示形态：`claude` / `grok` 画全量面板，
+ * 其余只取限额那一行。加一个来源只动这个数组。
+ *
+ * `icon` 是牌子，不是 TokenTracker 的来源键：id 是上游那份数据里的名字，
+ * 这个是站点图标注册表的键，认不出来的退回首字母。
+ */
+private struct VibeCodingAgentSpec: Equatable, Sendable {
+    let id: String
+    let label: String
+    let icon: String
+}
+
+private let vibeCodingAgents: [VibeCodingAgentSpec] = [
+    .init(id: "claude", label: "Claude Code", icon: "anthropic"),
+    .init(id: "codex", label: "Codex", icon: "openai"),
+    .init(id: "cursor", label: "Cursor", icon: "cursor"),
+    .init(id: "grok", label: "Grok Build", icon: "grok"),
+    .init(id: "antigravity", label: "Antigravity", icon: "antigravity"),
+]
+
+private let vibeCodingAgentIDs = vibeCodingAgents.map(\.id)
+
 struct CodingSessionSnapshot: Codable, Equatable, Sendable {
     let currentModel: String?
     let lastActivityAt: String?
@@ -147,7 +170,7 @@ final class CodingSessionMonitor: ObservableObject {
 
         let outcome = await CodingSessionCollector.collect(baseURL: baseURL)
         var fresh = outcome.snapshots
-        for agent in ["claude", "codex"] where fresh[agent] == nil {
+        for agent in vibeCodingAgentIDs where fresh[agent] == nil {
             if let previous = snapshots[agent] { fresh[agent] = previous }
         }
         snapshots = fresh
@@ -167,13 +190,13 @@ final class CodingSessionMonitor: ObservableObject {
      * 站点按 `id` 把这几个字段并回用量模块的 agent 上，所以除了 id 只发状态本身。
      *
      * 会话总数不在这里：它是「一共开过多少次」，一个累计量，跟 token 和费用一起
-     * 走十几分钟那份（见 VibeCodingUsagePayload.merge）。放这里的话，它一涨就得
+     * 走十几分钟那份（见 VibeCodingUsagePayload.withSessionCount）。放这里的话，它一涨就得
      * 发一封 60 秒那轮的信 —— 而这条路是为「此刻」留的。
      */
     private static func makeUploadPayload(
         _ snapshots: [String: CodingSessionSnapshot]
     ) -> JSONValue {
-        let agents = ["claude", "codex"].compactMap { id -> JSONValue? in
+        let agents = vibeCodingAgentIDs.compactMap { id -> JSONValue? in
             guard let snapshot = snapshots[id] else { return nil }
             return .object([
                 "id": .string(id),
@@ -197,7 +220,7 @@ private struct CodingSessionOutcome: Sendable {
 private enum CodingSessionCollector {
     /// 和页面「正在使用」的窗口保持一致。60 秒扫描一次，五分钟内有会话活动就点亮。
     private static let activeWindow: TimeInterval = 5 * 60
-    private static let agents = ["claude", "codex"]
+    private static let agents = vibeCodingAgentIDs
 
     /**
      * 会话状态：此刻在用哪个模型、活没活着、历史会话数。
@@ -317,7 +340,7 @@ struct AppleMusicSnapshot: Codable, Equatable, Sendable {
  * 并入统一遥测信封的 Apple Music token 增量。
  *
  * 两个 token 分别判变，所以字段都是可选的；developer token 的 expiresAt 和它
- * 同进同出。GET /telemetry 使用同一结构，但会把当前三项完整返回。
+ * 同进同出。远端信封只带变化的字段；本机不再另开遥测 HTTP。
  */
 struct AppleMusicCredentialsPayload: Encodable, Sendable {
     let musicUserToken: String?
@@ -343,7 +366,7 @@ struct TelemetryModulesPayload: Encodable, Sendable {
      *
      * - `vibeCodingNow`：此刻在不在用、用的是哪个模型。60 秒一轮，站点收到就推
      *   给浏览器。
-     * - `vibeCodingUsage`：token、费用、曲线、套餐、限额、会话总数 —— 全是累计
+     * - `vibeCodingUsage`：token、费用、套餐、限额、会话总数 —— 全是累计
      *   事实，十几分钟才动一次，站点只拿它刷缓存。
      *
      * 从前是三个：用量、限额、会话状态各一个，一个采集器一个。那条线是按「哪条
@@ -354,15 +377,19 @@ struct TelemetryModulesPayload: Encodable, Sendable {
      *
      * 唯一的例外是会话总数：数出它的是短间隔那个采集器，但它是累计量，归这份
      * 发 —— 发信封那一刻才补进去，见 VibeCodingUsagePayload.withSessionCount。
+     *
+     * - `vibeCodingYear`：过去 53 周的日合计 token，外加每天前五的模型拆分，给
+     *   站点画热力图。整年一次发，间隔单独控，不跟用量那 10 分钟绑在一起。
      */
     let vibeCodingUsage: JSONValue?
     let vibeCodingNow: JSONValue?
+    let vibeCodingYear: JSONValue?
     let includeDesktop: Bool
     let includeAppleMusic: Bool
 
     private enum CodingKeys: String, CodingKey {
         case chargingDevices, desktop, appleMusic, appleMusicCredentials, timezone
-        case vibeCodingUsage, vibeCodingNow
+        case vibeCodingUsage, vibeCodingNow, vibeCodingYear
     }
 
     func encode(to encoder: Encoder) throws {
@@ -374,6 +401,7 @@ struct TelemetryModulesPayload: Encodable, Sendable {
         try container.encodeIfPresent(timezone, forKey: .timezone)
         try container.encodeIfPresent(vibeCodingUsage, forKey: .vibeCodingUsage)
         try container.encodeIfPresent(vibeCodingNow, forKey: .vibeCodingNow)
+        try container.encodeIfPresent(vibeCodingYear, forKey: .vibeCodingYear)
     }
 }
 
@@ -1133,48 +1161,6 @@ func agentPlanLabel(agent: String, tier: String) -> String {
     }
 }
 
-/**
- * 网页上只占一行「总限额」的附加 provider。
- *
- * 加一个 provider 只动这个数组：保留旧快照的名单、挑窗口的规则、上传载荷都从它
- * 来。从前这几处各写一遍名字，漏掉哪一处的表现都不一样，而且都不会报错。
- *
- * 展示名和图标跟着载荷一起发给站点：那边没有名单，这边配几个页面上就是几行。
- */
-private struct SupplementalQuotaProvider {
-    /// TokenTracker 限额响应里的键名，也是站点那一行的稳定 key
-    let id: String
-    /// 站点直接拿去显示的名字
-    let label: String
-    /**
-     * 站点图标注册表的键，认不出来的退回首字母。
-     *
-     * 跟 `id` 分开是因为它俩本来就不是一回事：`id` 是上游那份数据里 provider 的
-     * 键名，这个是牌子 —— `opencodego` 的牌子是 OpenCode。
-     */
-    let icon: String
-    /// 从 usage 的窗口里挑哪一个当「总限额」
-    let totalWindow: TotalWindowPick
-}
-
-/// 每家「总限额」的口径不一样，挑法见各 case。
-private enum TotalWindowPick {
-    /// 上游把 primary 就当总额（Cursor 的 Total、Grok 的周额度）
-    case primarySlot
-    /// 几个并列的池，取用量高的那个 —— Antigravity 的 Gemini / Claude 两池没有
-    /// 合并总量，取高的免得低估剩余压力
-    case mostUsed
-}
-
-private let supplementalQuotaProviders: [SupplementalQuotaProvider] = [
-    .init(id: "cursor", label: "Cursor", icon: "cursor", totalWindow: .primarySlot),
-    // Grok 只给 primary 一个窗口（周重置，且不带 windowMinutes），它就是总额
-    .init(id: "grok", label: "Grok", icon: "grok", totalWindow: .primarySlot),
-    .init(id: "antigravity", label: "Antigravity", icon: "antigravity", totalWindow: .mostUsed),
-]
-
-private let agentLimitProviderIDs = ["claude", "codex"] + supplementalQuotaProviders.map(\.id)
-
 private struct AgentLimitsOutcome: Sendable {
     let plans: [String: AgentPlanSnapshot]
     let errors: [String]
@@ -1187,8 +1173,8 @@ private enum AgentLimitsCollector {
     /**
      * 套餐与限额窗口，一次请求全拿到。
      *
-     * TokenTracker 的 `usage-limits` 一次给十三家，两个 agent 和三个附加 provider
-     * 都在里面 —— 从前是四条 CodexBar 命令并发跑，任意一条挂掉都要单独兜底。
+     * TokenTracker 的 `usage-limits` 一次给十三家，信封里那五个来源都在里面 ——
+     * 从前是四条 CodexBar 命令并发跑，任意一条挂掉都要单独兜底。
      * 现在整条挂了就是整条挂了，每家各自留下自己的 error。
      *
      * 每家还带 `configured`：没配就是没配，不算失败 —— 页面据此整块不渲染，
@@ -1210,7 +1196,7 @@ private enum AgentLimitsCollector {
                 plans: [:],
                 errors: [message],
                 limitErrors: Dictionary(
-                    uniqueKeysWithValues: agentLimitProviderIDs.map { ($0, message) }
+                    uniqueKeysWithValues: vibeCodingAgentIDs.map { ($0, message) }
                 )
             )
         }
@@ -1219,7 +1205,7 @@ private enum AgentLimitsCollector {
         var errors: [String] = []
         var limitErrors: [String: String] = [:]
 
-        for provider in agentLimitProviderIDs {
+        for provider in vibeCodingAgentIDs {
             guard let node = root[provider] as? [String: Any] else { continue }
             if let failure = (node["error"] as? String)?.nilIfEmpty {
                 let message = "TokenTracker \(provider)：\(failure)"
@@ -1234,7 +1220,7 @@ private enum AgentLimitsCollector {
             switch provider {
             case "claude": windows = claudeWindows(node)
             case "codex": windows = codexWindows(node)
-            default: windows = quotaWindows(provider: provider, node: node)
+            default: windows = genericWindows(provider: provider, node: node)
             }
             let tier = planTier(provider: provider, node: node)
             plans[provider] = AgentPlanSnapshot(
@@ -1307,26 +1293,31 @@ private enum AgentLimitsCollector {
         }
     }
 
-    /// 附加 provider 在站点上只占一行「总限额」，挑哪个窗口按各家的口径来。
-    nonisolated private static func quotaWindows(
+    /**
+     * 其余几家的窗口都在 primary / secondary / tertiary / quaternary 槽里。
+     *
+     * 全部送出去，不在这里按展示形态挑一条 —— 那是站点 compact 行自己的事
+     *（用量最高的那一扇）。加一列明细不该再改信封。
+     */
+    nonisolated private static func genericWindows(
         provider: String,
         node: [String: Any]
     ) -> [AgentLimitWindow] {
-        let pick = supplementalQuotaProviders.first { $0.id == provider }?.totalWindow ?? .primarySlot
-        let slots = ["primary_window", "secondary_window", "tertiary_window", "quaternary_window"]
-            .compactMap { node[$0] as? [String: Any] }
-        let selected: [String: Any]?
-        switch pick {
-        case .primarySlot: selected = node["primary_window"] as? [String: Any]
-        case .mostUsed: selected = slots.max { percent($0) < percent($1) }
+        let slots: [(suffix: String, field: String)] = [
+            ("primary", "primary_window"),
+            ("secondary", "secondary_window"),
+            ("tertiary", "tertiary_window"),
+            ("quaternary", "quaternary_window"),
+        ]
+        return slots.compactMap { slot in
+            guard let value = node[slot.field] as? [String: Any] else { return nil }
+            return window(
+                key: "\(provider).\(slot.suffix)",
+                label: (value["label"] as? String)?.nilIfEmpty,
+                minutes: minutes(value),
+                node: value
+            )
         }
-        guard let selected else { return [] }
-        return [window(
-            key: "\(provider).total",
-            label: "Total",
-            minutes: minutes(selected),
-            node: selected
-        )]
     }
 
     nonisolated private static func window(
@@ -1373,7 +1364,7 @@ private enum AgentLimitsCollector {
 }
 
 /**
- * 长间隔那份的采集器：token / 费用 / 曲线，加上套餐与限额，一轮转出一整个
+ * 长间隔那份的采集器：token / 费用，加上套餐与限额，一轮转出一整个
  * `vibeCodingUsage` 载荷（只差会话总数，那个发信封时才补，见
  * `VibeCodingUsagePayload.withSessionCount`）。
  *
@@ -1472,7 +1463,7 @@ final class VibeCodingUsageMonitor: ObservableObject {
         var fresh = outcome.plans
         // 某一 provider 本轮完全失败时也保留它上次的好值；错误通过
         // limitErrors 单独标记。统一命令的一边失败不能把另一边或旧快照清掉。
-        for agent in agentLimitProviderIDs where fresh[agent] == nil {
+        for agent in vibeCodingAgentIDs where fresh[agent] == nil {
             if outcome.limitErrors[agent] != nil, let previous = plans[agent] {
                 fresh[agent] = previous
             }
@@ -1510,12 +1501,8 @@ final class VibeCodingUsageMonitor: ObservableObject {
      * 限额那半的载荷。全都失败时也要发：空 limits 加上 limitsError 才是
      * 「配了但取不到」，什么都不发在站点那边和「没配」长得一模一样。
      *
-     * 两个 agent 的展示名（"Claude Code" / "Codex"）仍由站点自己给：就那两个，
-     * 名单在站点的类型里写死，多发一遍只会多一个要对齐的地方。
-     *
-     * 附加 provider 反过来 —— 名字和图标由这边发。名单在这边，站点那边没有，
-     * 它照单渲染。否则加一个 provider 要改两个仓库，站点漏改的表现是这边在传、
-     * 页面上没有，不报错也看不出来。
+     * 五个来源同一形状，按 id 贴到用量那份的 agents 上。展示名和图标在用量
+     * 那一行里，这里只补套餐和窗口。
      */
     private func limitsPayload() -> JSONValue? {
         if plans.isEmpty && limitErrors.isEmpty { return nil }
@@ -1531,33 +1518,16 @@ final class VibeCodingUsageMonitor: ObservableObject {
                 ])
             })
         }
-        let agents: [JSONValue] = ["claude", "codex"].map { id in
-            let plan = plans[id]
+        let agents: [JSONValue] = vibeCodingAgents.map { spec in
+            let plan = plans[spec.id]
             return .object([
-                "id": .string(id),
+                "id": .string(spec.id),
                 "plan": plan.flatMap(Self.planValue) ?? .null,
                 "limits": windows(plan?.limits ?? []),
-                "limitsError": limitErrors[id].map(JSONValue.string) ?? .null,
+                "limitsError": limitErrors[spec.id].map(JSONValue.string) ?? .null,
             ])
         }
-        let quotaProviders: [JSONValue] = supplementalQuotaProviders.map { provider in
-            let snapshot = plans[provider.id]
-            let window = snapshot?.limits.first
-            return .object([
-                "id": .string(provider.id),
-                "label": .string(provider.label),
-                "icon": .string(provider.icon),
-                "usedPercent": window.map { .number($0.usedPercent) } ?? .null,
-                // 和 agents[].plan / limits[].resetsAt 同名同单位
-                "plan": snapshot.flatMap(Self.planValue) ?? .null,
-                "resetsAt": window?.resetsAt.map { .number(Double($0)) } ?? .null,
-                "limitsError": limitErrors[provider.id].map(JSONValue.string) ?? .null,
-            ])
-        }
-        return .object([
-            "agents": .array(agents),
-            "quotaProviders": .array(quotaProviders),
-        ])
+        return .object(["agents": .array(agents)])
     }
 
     /// 套餐取不到时整格不发。发一个空字符串会在页面上留下一块没有内容的标签
@@ -1570,8 +1540,8 @@ final class VibeCodingUsageMonitor: ObservableObject {
 /**
  * `vibeCodingUsage` 模块载荷的两道拼装。
  *
- * 拼出来的形状和站点的读法一一对应：限额按 `id` 贴到对应的 agent 上，附加
- * provider 平铺在顶层，会话总数落进 totals。
+ * 拼出来的形状和站点的读法一一对应：限额按 `id` 贴到对应的 agent 上，
+ * 会话总数落进 totals。不再拆 `quotaProviders`。
  *
  * 分两道是因为两样东西不在同一个地方就位：限额和用量在同一个采集器里，
  * 采完就能贴；会话总数在另一个采集器手上，发信封那一刻才拿得到。
@@ -1608,7 +1578,6 @@ enum VibeCodingUsagePayload {
                 return .object(fields)
             })
         }
-        if let providers = limitsRoot["quotaProviders"] { root["quotaProviders"] = providers }
         return .object(root)
     }
 
@@ -1632,9 +1601,7 @@ private struct VibeCodingUsageCollection: Sendable {
 }
 
 private enum TokenTrackerUsageCollector {
-    private static let agents = ["claude", "codex"]
-    /// 曲线固定 30 桶：站点按这个数校验，少一个整份都不收
-    private static let activityDays = 30
+    private static let agents = vibeCodingAgents
     /**
      * 总量和模型排行从有记录的第一天算起，不设窗口。
      *
@@ -1673,7 +1640,6 @@ private enum TokenTrackerUsageCollector {
     nonisolated static func collect(baseURL: String) async throws -> VibeCodingUsageCollection {
         let calendar = Calendar.current
         let today = calendar.startOfDay(for: Date())
-        let activityStart = calendar.date(byAdding: .day, value: -(activityDays - 1), to: today) ?? today
 
         let daily = try await TokenTrackerAPI.get(
             baseURL: baseURL,
@@ -1711,10 +1677,9 @@ private enum TokenTrackerUsageCollector {
         }
 
         /*
-         * 头部那一栏说的是「总计」，所以它把所有工具都算进来，不只是下面两块
-         * 面板的 Claude Code 和 Codex —— 光 Cursor 就占了将近一成半的 token，
-         * 漏掉它那一栏就名不副实。曲线、今日用量、当前模型仍然分 agent，
-         * 那几样本来就是各自那一块里的东西。
+         * 头部那一栏说的是「总计」，所以它把 TokenTracker 里所有来源都算进来，
+         * 不只信封里那五行 —— 名单外的工具漏掉的话那一栏就名不副实。
+         * 行内的今日用量、当前模型按 vibeCodingAgents 分。
          */
         var aggregate = DayUsage()
         var mergedModels: [String: Double] = [:]
@@ -1736,38 +1701,31 @@ private enum TokenTrackerUsageCollector {
         }
 
         var agentPayloads: [[String: Any]] = []
-        for agent in agents {
+        for spec in agents {
             var models: [String: Double] = [:]
             for bySource in usage.values {
-                guard let row = bySource[agent] else { continue }
+                guard let row = bySource[spec.id] else { continue }
                 for (name, tokens) in row.models { models[name, default: 0] += tokens }
             }
 
-            let activity: [[String: Any]] = (0..<activityDays).map { offset in
-                let date = calendar.date(byAdding: .day, value: offset, to: activityStart) ?? activityStart
-                return [
-                    "t": date.timeIntervalSince1970 * 1_000,
-                    "tokens": usage[dayString(date)]?[agent]?.total ?? 0,
-                ]
-            }
-            let last30 = activity.reduce(0.0) { $0 + ($1["tokens"] as? Double ?? 0) }
             let todayKey = dayString(today)
-            let todayUsage = usage[todayKey]?[agent] ?? DayUsage()
+            let todayUsage = usage[todayKey]?[spec.id] ?? DayUsage()
 
             // 「最近一个有用量日里的主力模型」。真正的「此刻在用哪个」由会话那份
             // 送来，站点优先用它、取不到才落到这个值上。
             let currentModel = days.sorted().reversed().lazy.compactMap { day -> String? in
-                guard let row = usage[day]?[agent], row.total > 0 else { return nil }
+                guard let row = usage[day]?[spec.id], row.total > 0 else { return nil }
                 return topModel(row.models)
             }.first
 
             agentPayloads.append([
-                "id": agent,
+                "id": spec.id,
+                "label": spec.label,
+                "icon": spec.icon,
                 // unknown 不是模型，是它没记下来的那部分；auto review 留着 —— 它确实跑过
                 "models": models.keys.filter { $0 != "unknown" }.sorted(),
                 "currentModel": currentModel ?? NSNull(),
                 "topModel": topModel(models) ?? NSNull(),
-                "activity": activity,
                 "today": [
                     "date": todayKey,
                     "inputTokens": todayUsage.input,
@@ -1777,7 +1735,6 @@ private enum TokenTrackerUsageCollector {
                     "totalTokens": todayUsage.total,
                     "apiEquivalentCostUSD": todayUsage.cost,
                 ],
-                "last30DaysTokens": last30,
             ])
         }
 
@@ -1833,12 +1790,11 @@ private enum TokenTrackerUsageCollector {
     /**
      * 参与排名的模型。
      *
-     * codex 的自动 review 不是使用者选的模型，unknown 根本不是模型 —— 两个都不
-     * 该出现在「主力模型」和排行里。它们烧掉的 token 仍然照实计入总量，那条路
-     * 走的是 totals，不看这里。
+     * 隐藏规则见 `TokenTrackerModels`。它们烧掉的 token 仍然照实计入总量，那条
+     * 路走的是 totals，不看这里。
      */
     nonisolated private static func rankable(_ models: [String: Double]) -> [String: Double] {
-        models.filter { $0.key != "codex-auto-review" && $0.key != "unknown" && $0.value > 0 }
+        models.filter { TokenTrackerModels.shown($0.key) && $0.value > 0 }
     }
 
     nonisolated private static func topModel(_ models: [String: Double]) -> String? {
@@ -1848,6 +1804,229 @@ private enum TokenTrackerUsageCollector {
     nonisolated private static func dayString(_ date: Date) -> String { dayFormatter.string(from: date) }
 
     /// 按本机时区切天，和请求里那个 tz 参数说的是同一件事
+    nonisolated private static let dayFormatter: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.calendar = Calendar(identifier: .gregorian)
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.timeZone = .current
+        formatter.dateFormat = "yyyy-MM-dd"
+        return formatter
+    }()
+}
+
+/**
+ * 过去 53 周的日合计，外加每天前五的模型拆分。
+ *
+ * `days[i]` 是 origin 起第 i 天的 token，空日子是 0。`models` 是这一年里出现在
+ * 每日前五里的名字表；`mix` 一行是 `[offset, idx, tokens, …]`，只给有拆分的
+ * 日子。切块省不下多少，请求头反而更亏。
+ */
+struct VibeCodingYearSnapshot: Equatable, Sendable {
+    let origin: String
+    let days: [Int]
+    let models: [String]
+    let mix: [[Int]]
+
+    var json: JSONValue {
+        .object([
+            "origin": .string(origin),
+            "days": .array(days.map { .number(Double($0)) }),
+            "models": .array(models.map { .string($0) }),
+            "mix": .array(mix.map { row in .array(row.map { .number(Double($0)) }) }),
+        ])
+    }
+}
+
+/**
+ * 过去一年的日合计和每天前五模型。
+ *
+ * 合计仍来自一次 `tokentracker-usage-daily`。拆分没有按天的接口，只对有量的
+ * 日子再问一次 `tokentracker-usage-model-breakdown`，编成模型表 + 稀疏 offset
+ * 对。和用量那份错开：那边要今日明细和排行，这边给热力图。间隔单独控，默认
+ * 一小时；格子按天变，绑在用量那 10 分钟车上会白发。
+ */
+@MainActor
+final class VibeCodingYearMonitor: ObservableObject {
+    /// GitHub 贡献图同样是 53 列（含本周）。
+    nonisolated static let weeksInWindow = 53
+    nonisolated static let daysInWindow = weeksInWindow * 7
+    nonisolated static let mixTopModels = 5
+    nonisolated static let defaultRefreshInterval: TimeInterval = 3_600
+
+    @Published private(set) var uploadPayload: JSONValue?
+    @Published private(set) var payloadUpdatedAt: Date?
+    @Published private(set) var lastSuccess: Date?
+    @Published private(set) var lastError: String?
+    var onChange: (() -> Void)?
+
+    private var refreshing = false
+    private var lastAttempt: Date?
+
+    func stop() {
+        uploadPayload = nil
+        payloadUpdatedAt = nil
+        lastSuccess = nil
+        lastError = nil
+        lastAttempt = nil
+        refreshing = false
+    }
+
+    func refreshIfNeeded(baseURL: String, interval: Double) async {
+        guard !refreshing else { return }
+        if let lastAttempt, Date().timeIntervalSince(lastAttempt) < interval { return }
+        await refreshNow(baseURL: baseURL)
+    }
+
+    @discardableResult
+    func refreshNow(baseURL: String) async -> Bool {
+        guard !refreshing else { return false }
+        refreshing = true
+        lastAttempt = Date()
+        defer { refreshing = false }
+
+        do {
+            let snapshot = try await VibeCodingYearCollector.collect(baseURL: baseURL)
+            let payload = snapshot.json
+            if uploadPayload != payload {
+                uploadPayload = payload
+                payloadUpdatedAt = Date()
+                onChange?()
+            }
+            lastError = nil
+            lastSuccess = Date()
+            return true
+        } catch {
+            lastError = error.localizedDescription
+            return false
+        }
+    }
+}
+
+private enum TokenTrackerModels {
+    /// unknown 不是模型；codex 自动 review 不是使用者选的。烧掉的 token 仍进合计。
+    nonisolated static func shown(_ name: String) -> Bool {
+        name != "codex-auto-review" && name != "unknown"
+    }
+}
+
+private enum VibeCodingYearCollector {
+    nonisolated static func collect(baseURL: String) async throws -> VibeCodingYearSnapshot {
+        let calendar = Calendar.current
+        let today = calendar.startOfDay(for: Date())
+        let originDate = sunday(onOrBefore: weeksAgo(VibeCodingYearMonitor.weeksInWindow - 1, from: today, calendar: calendar), calendar: calendar)
+        let endDate = calendar.date(byAdding: .day, value: VibeCodingYearMonitor.daysInWindow - 1, to: originDate) ?? today
+        let origin = dayString(originDate)
+        let to = dayString(min(today, endDate))
+
+        let daily = try await TokenTrackerAPI.get(
+            baseURL: baseURL,
+            function: "tokentracker-usage-daily",
+            query: ["from": origin, "to": to]
+        )
+        guard let root = daily as? [String: Any],
+              let rows = root["data"] as? [[String: Any]]
+        else {
+            throw TelemetryModuleError.tokenTracker("usage-daily 响应缺少 data")
+        }
+
+        var tokens: [String: Int] = [:]
+        for row in rows {
+            guard let day = row["day"] as? String else { continue }
+            tokens[day] = Int(TokenTrackerAPI.number(row["total_tokens"]).rounded())
+        }
+
+        var days: [Int] = []
+        days.reserveCapacity(VibeCodingYearMonitor.daysInWindow)
+        var dates: [String] = []
+        dates.reserveCapacity(VibeCodingYearMonitor.daysInWindow)
+        for offset in 0..<VibeCodingYearMonitor.daysInWindow {
+            let date = calendar.date(byAdding: .day, value: offset, to: originDate) ?? originDate
+            let key = dayString(date)
+            dates.append(key)
+            days.append(tokens[key] ?? 0)
+        }
+
+        var mixByOffset: [Int: [(name: String, tokens: Int)]] = [:]
+        try await withThrowingTaskGroup(of: (Int, [(String, Int)]).self) { group in
+            for offset in 0..<VibeCodingYearMonitor.daysInWindow {
+                guard days[offset] > 0 else { continue }
+                let date = dates[offset]
+                group.addTask {
+                    let breakdown = try await TokenTrackerAPI.get(
+                        baseURL: baseURL,
+                        function: "tokentracker-usage-model-breakdown",
+                        query: ["from": date, "to": date]
+                    )
+                    return (offset, Self.topModels(from: breakdown, limit: VibeCodingYearMonitor.mixTopModels))
+                }
+            }
+            for try await (offset, parts) in group {
+                if !parts.isEmpty { mixByOffset[offset] = parts }
+            }
+        }
+
+        var totals: [String: Int] = [:]
+        for parts in mixByOffset.values {
+            for part in parts { totals[part.name, default: 0] += part.tokens }
+        }
+        let models = totals.keys.sorted { left, right in
+            if totals[left] != totals[right] { return (totals[left] ?? 0) > (totals[right] ?? 0) }
+            return left < right
+        }
+        let index = Dictionary(uniqueKeysWithValues: models.enumerated().map { ($1, $0) })
+        let mix: [[Int]] = mixByOffset.keys.sorted().compactMap { offset in
+            let parts = mixByOffset[offset] ?? []
+            guard !parts.isEmpty else { return nil }
+            var row = [offset]
+            for part in parts {
+                guard let idx = index[part.name] else { continue }
+                row.append(idx)
+                row.append(part.tokens)
+            }
+            return row.count > 1 ? row : nil
+        }
+        return VibeCodingYearSnapshot(origin: origin, days: days, models: models, mix: mix)
+    }
+
+    /// 所有来源合并后的前 N；hidden 的模型不进表，token 仍在 `days` 里。
+    nonisolated private static func topModels(from breakdown: Any, limit: Int) -> [(String, Int)] {
+        guard let root = breakdown as? [String: Any],
+              let sources = root["sources"] as? [[String: Any]]
+        else { return [] }
+        var totals: [String: Double] = [:]
+        for source in sources {
+            for model in source["models"] as? [[String: Any]] ?? [] {
+                guard let name = (model["model"] as? String)?.nilIfEmpty,
+                      TokenTrackerModels.shown(name)
+                else { continue }
+                let row = model["totals"] as? [String: Any] ?? [:]
+                totals[name, default: 0] += TokenTrackerAPI.number(row["total_tokens"])
+            }
+        }
+        return totals
+            .filter { $0.value > 0 }
+            .sorted { left, right in
+                if left.value != right.value { return left.value > right.value }
+                return left.key < right.key
+            }
+            .prefix(limit)
+            .map { ($0.key, Int($0.value.rounded())) }
+            .filter { $0.1 > 0 }
+    }
+
+    nonisolated private static func weeksAgo(_ weeks: Int, from date: Date, calendar: Calendar) -> Date {
+        calendar.date(byAdding: .weekOfYear, value: -weeks, to: date) ?? date
+    }
+
+    /// Calendar weekday：1 是周日。
+    nonisolated private static func sunday(onOrBefore date: Date, calendar: Calendar) -> Date {
+        let day = calendar.startOfDay(for: date)
+        let weekday = calendar.component(.weekday, from: day)
+        return calendar.date(byAdding: .day, value: -(weekday - 1), to: day) ?? day
+    }
+
+    nonisolated private static func dayString(_ date: Date) -> String { dayFormatter.string(from: date) }
+
     nonisolated private static let dayFormatter: DateFormatter = {
         let formatter = DateFormatter()
         formatter.calendar = Calendar(identifier: .gregorian)

@@ -29,6 +29,7 @@ xcodebuild \
 APP_BUNDLE="$OUTPUT_DIR/Mac Telemetry Hub.app"
 INSTALLED_APP="$INSTALL_DIR/Mac Telemetry Hub.app"
 mkdir -p "$INSTALL_DIR"
+rm -rf "$INSTALLED_APP"
 ditto --norsrc "$APP_BUNDLE" "$INSTALLED_APP"
 codesign --verify --deep --strict "$INSTALLED_APP"
 

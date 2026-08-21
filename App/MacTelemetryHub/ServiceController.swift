@@ -264,6 +264,7 @@ enum TelemetryModule: String, CaseIterable, Hashable, Sendable {
     case powerBank
     case timezone
     case vibeCoding
+    case vibeCodingYear
 
     var displayName: String {
         switch self {
@@ -273,6 +274,7 @@ enum TelemetryModule: String, CaseIterable, Hashable, Sendable {
         case .powerBank: "充电宝"
         case .timezone: "Mac 时区"
         case .vibeCoding: "Vibe Coding"
+        case .vibeCodingYear: "年度用量"
         }
     }
 }
@@ -498,12 +500,16 @@ final class ServiceController: ObservableObject {
     let timeZone = TimeZoneMonitor()
     let appleMusic = AppleMusicMonitor()
     let appleMusicAuthorization = AppleMusicAuthorizationManager()
-    /// 一个模块一个采集器：长间隔那份（token / 费用 / 曲线 / 套餐 / 限额）和
-    /// 短间隔那份（此刻在不在用）
+    /// 一个模块一个采集器：长间隔那份（token / 费用 / 套餐 / 限额）和
+    /// 短间隔那份（此刻在不在用）。年度热力图另走一块，间隔更长、按周切片。
     let vibeCodingUsageCollector = VibeCodingUsageMonitor()
     let codingSessions = CodingSessionMonitor()
+    let vibeCodingYearCollector = VibeCodingYearMonitor()
+    private let chargingSSE = ChargingSSEBroker()
     lazy private(set) var httpServer = LocalHTTPServer { [weak self] request in
-        guard let self else { return .text("Unavailable\n", status: 503, reason: "Service Unavailable") }
+        guard let self else {
+            return .response(.text("Unavailable\n", status: 503, reason: "Service Unavailable"))
+        }
         return await self.route(request)
     }
 
@@ -513,10 +519,11 @@ final class ServiceController: ObservableObject {
     /// 那个两百多次请求的用量按钮也一起变灰。
     @Published private(set) var isRefreshingVibeCodingUsage = false
     @Published private(set) var isRefreshingVibeCodingSessions = false
+    @Published private(set) var isRefreshingVibeCodingYear = false
     @Published private(set) var appleMusicCredentialsUploadAt: Date?
     @Published private(set) var appleMusicCredentialsUploadError: String?
     @Published private(set) var isUploadingAppleMusicCredentials = false
-    /// MusicKit 最近一次返回的缓存值；本机 /telemetry 也直接暴露这一份。
+    /// MusicKit 最近一次返回的缓存值。
     private var appleMusicCredentials: AppleMusicCredentials?
     private var lastPostedAppleMusicDeveloperToken: String?
     private var lastPostedAppleMusicUserToken: String?
@@ -532,6 +539,7 @@ final class ServiceController: ObservableObject {
     /// 用量那份的门闩看两个采集器里较晚的那个变化时刻，见上报循环里的 usageUpdatedAt
     private var lastPostedVibeCodingUsageAt: Date?
     private var lastPostedVibeCodingNowAt: Date?
+    private var lastPostedVibeCodingYearAt: Date?
     private var lastPostedChargingDevices: ChargingDevicesPayload?
     /// 只跟结构性变化比，管的是「要不要即时发」，不管「要不要带 charger 模块」
     private var lastPostedChargingStructural: ChargingDevicesStructuralSignature?
@@ -638,8 +646,8 @@ final class ServiceController: ObservableObject {
         guard !started else { return }
         started = true
         configureModules()
-        if settings.httpServerEnabled {
-            httpServer.start(port: settings.httpPort)
+        if settings.httpServerEnabled, let host = settings.normalizedHTTPBindAddress {
+            httpServer.start(host: host, port: settings.httpPort)
         }
         restartReporter()
         observePowerTransitions()
@@ -663,6 +671,8 @@ final class ServiceController: ObservableObject {
         appleMusic.stop()
         vibeCodingUsageCollector.stop()
         codingSessions.stop()
+        vibeCodingYearCollector.stop()
+        chargingSSE.closeAll()
         httpServer.stop()
         for link in chargingLinks { link.shutdown() }
     }
@@ -698,13 +708,16 @@ final class ServiceController: ObservableObject {
     }
 
     func applySettings() throws {
-        let oldPort = httpServer.listeningURL?.port
+        let oldHost = httpServer.boundHost
+        let oldPort = httpServer.boundPort
         try settings.save()
-        if settings.httpServerEnabled {
-            if oldPort != settings.httpPort {
-                httpServer.start(port: settings.httpPort)
+        if settings.httpServerEnabled, let host = settings.normalizedHTTPBindAddress {
+            if oldHost != host || oldPort != settings.httpPort || httpServer.listeningURL == nil {
+                chargingSSE.closeAll()
+                httpServer.start(host: host, port: settings.httpPort)
             }
         } else {
+            chargingSSE.closeAll()
             httpServer.stop()
         }
         configureModules()
@@ -738,6 +751,14 @@ final class ServiceController: ObservableObject {
         defer { isRefreshingVibeCodingUsage = false }
         guard await vibeCodingUsageCollector.refreshNow(baseURL: settings.tokenTrackerBaseURL) else { return }
         _ = requestImmediateReport(.vibeCoding)
+    }
+
+    func refreshVibeCodingYearNow() async {
+        guard settings.codexBarModuleEnabled, !isRefreshingVibeCodingYear else { return }
+        isRefreshingVibeCodingYear = true
+        defer { isRefreshingVibeCodingYear = false }
+        guard await vibeCodingYearCollector.refreshNow(baseURL: settings.tokenTrackerBaseURL) else { return }
+        _ = requestImmediateReport(.vibeCodingYear)
     }
 
     func refreshVibeCodingSessionsNow() async {
@@ -842,7 +863,7 @@ final class ServiceController: ObservableObject {
         case .charger: settings.chargerModuleEnabled
         case .powerBank: settings.powerBankModuleEnabled
         case .timezone: settings.timezoneModuleEnabled
-        case .vibeCoding: settings.codexBarModuleEnabled
+        case .vibeCoding, .vibeCodingYear: settings.codexBarModuleEnabled
         }
     }
 
@@ -860,6 +881,8 @@ final class ServiceController: ObservableObject {
         case .vibeCoding:
             vibeCodingUsageCollector.uploadPayload != nil
                 || codingSessions.uploadPayload != nil
+        case .vibeCodingYear:
+            vibeCodingYearCollector.uploadPayload != nil
         }
     }
 
@@ -873,9 +896,40 @@ final class ServiceController: ObservableObject {
         return devices.isEmpty ? nil : ChargingDevicesPayload(devices: devices)
     }
 
-    /// 本地 HTTP 的充电头视图。它服务的是本机状态页，那页只画充电头。
-    var statusPayload: StatusPayload {
-        StatusPayload(connected: chargerLink.isConnected, state: chargerLink.chargerStateForDisplay)
+    private func streamEvent(for link: BluetoothService) -> ChargingStreamEvent {
+        ChargingStreamEvent(
+            phase: link.phase.label,
+            connected: link.isConnected,
+            lastError: link.lastError,
+            device: link.devicePayload
+        )
+    }
+
+    private func publishChargingStream(_ link: BluetoothService) {
+        chargingSSE.publish(streamEvent(for: link), slot: link.slot)
+    }
+
+    /**
+     * 一条充电链路要不要拆掉重连，只看它自己的会话身份。
+     *
+     * 开关、配对 UUID、账号 ID 变了才动这一条。保存别的设置（黑名单、上报地址、
+     * HTTP 端口）不应该把已经连上的充电头和充电宝一起踢掉 —— 那是充电头监测
+     * App 留下的「保存并重连」。
+     */
+    private struct ChargingLinkSession: Equatable {
+        var enabled: Bool
+        var peripheralID: String
+        var userID: String
+    }
+
+    private var lastAppliedChargingSession: [ChargingDeviceSlot: ChargingLinkSession] = [:]
+
+    private func chargingSession(for slot: ChargingDeviceSlot) -> ChargingLinkSession {
+        ChargingLinkSession(
+            enabled: slot.isEnabled(settings),
+            peripheralID: slot.peripheralIDString(settings),
+            userID: settings.userID.trimmingCharacters(in: .whitespacesAndNewlines)
+        )
     }
 
     /**
@@ -886,13 +940,19 @@ final class ServiceController: ObservableObject {
      * 指纹比对是纯本地的，1 Hz 跑它远比白转一圈循环便宜。
      */
     private func configure(link: BluetoothService) {
-        guard link.slot.isEnabled(settings) else {
+        let session = chargingSession(for: link.slot)
+        let previous = lastAppliedChargingSession[link.slot]
+        lastAppliedChargingSession[link.slot] = session
+
+        guard session.enabled else {
             link.onStateChange = nil
             link.disconnect()
+            publishChargingStream(link)
             return
         }
         link.onStateChange = { [weak self] in
             guard let self else { return }
+            publishChargingStream(link)
             if link.slot == .charger {
                 covers.chargerStateDidChange()
             }
@@ -901,7 +961,13 @@ final class ServiceController: ObservableObject {
             guard signature != lastPostedChargingStructural else { return }
             wakeReporter()
         }
-        link.start()
+        if previous == session {
+            return
+        }
+        if previous == nil || previous?.enabled == false {
+            link.start()
+            return
+        }
         link.reconnect()
     }
 
@@ -1001,14 +1067,17 @@ final class ServiceController: ObservableObject {
         if settings.codexBarModuleEnabled {
             codingSessions.onChange = { [weak self] in self?.wakeReporter() }
             vibeCodingUsageCollector.onChange = { [weak self] in self?.wakeReporter() }
+            vibeCodingYearCollector.onChange = { [weak self] in self?.wakeReporter() }
             startVibeCodingCollection()
         } else {
             codingSessions.onChange = nil
             vibeCodingUsageCollector.onChange = nil
+            vibeCodingYearCollector.onChange = nil
             vibeCodingCollectionTask?.cancel()
             vibeCodingCollectionTask = nil
             vibeCodingUsageCollector.stop()
             codingSessions.stop()
+            vibeCodingYearCollector.stop()
         }
     }
 
@@ -1031,7 +1100,7 @@ final class ServiceController: ObservableObject {
         vibeCodingCollectionTask = Task { [weak self] in
             while !Task.isCancelled {
                 guard let self, settings.codexBarModuleEnabled else { return }
-                // 两份互不喂料，间隔也差着一个数量级，所以并发跑
+                // 三份互不喂料，间隔也差着一个数量级，所以并发跑
                 async let sessions: Void = self.codingSessions.refreshIfNeeded(
                     baseURL: settings.tokenTrackerBaseURL,
                     interval: settings.codingSessionRefreshInterval
@@ -1040,7 +1109,11 @@ final class ServiceController: ObservableObject {
                     baseURL: settings.tokenTrackerBaseURL,
                     interval: settings.vibeCodingUsageRefreshInterval
                 )
-                _ = await (sessions, usage)
+                async let year: Void = self.vibeCodingYearCollector.refreshIfNeeded(
+                    baseURL: settings.tokenTrackerBaseURL,
+                    interval: settings.vibeCodingYearRefreshInterval
+                )
+                _ = await (sessions, usage, year)
                 try? await Task.sleep(for: Self.tickInterval)
             }
         }
@@ -1056,6 +1129,7 @@ final class ServiceController: ObservableObject {
         reporterLastError = nil
         lastPostedVibeCodingUsageAt = nil
         lastPostedVibeCodingNowAt = nil
+        lastPostedVibeCodingYearAt = nil
         lastPostedChargingDevices = nil
         lastPostedChargingStructural = nil
         lastPostedDesktop = nil
@@ -1159,6 +1233,9 @@ final class ServiceController: ObservableObject {
                     let nowChanged = vibeCodingChanged(
                         codingSessions.payloadUpdatedAt, lastPostedVibeCodingNowAt
                     )
+                    let yearChanged = vibeCodingChanged(
+                        vibeCodingYearCollector.payloadUpdatedAt, lastPostedVibeCodingYearAt
+                    )
                     let manualModules = pendingManualReports
                     manualModulesForAttempt = manualModules
                     let manualMode = !manualModules.isEmpty
@@ -1177,8 +1254,8 @@ final class ServiceController: ObservableObject {
                     let musicToSend = manualMode
                         ? manualModules.contains(.appleMusic) && music != nil
                         : musicChanged
-                    // 手动上报按整个 vibe coding 走：信封只有一个，两个模块手上
-                    // 有什么就一起发什么。
+                    // 手动上报按整个 vibe coding 走：信封只有一个，用量和此刻
+                    // 手上有什么就一起发什么。年度热力图间隔不同，单独一门。
                     let manualVibeCoding = manualModules.contains(.vibeCoding)
                     let usageToSend = manualMode
                         ? manualVibeCoding && vibeCodingUsageCollector.uploadPayload != nil
@@ -1186,6 +1263,10 @@ final class ServiceController: ObservableObject {
                     let nowToSend = manualMode
                         ? manualVibeCoding && codingSessions.uploadPayload != nil
                         : nowChanged
+                    let yearToSend = manualMode
+                        ? manualModules.contains(.vibeCodingYear)
+                            && vibeCodingYearCollector.uploadPayload != nil
+                        : yearChanged
                     let credentialsToSend: AppleMusicCredentialsPayload?
                     // 手动上报只发用户选中的模块；token 的自动变化留到下一轮。
                     if !manualMode,
@@ -1204,7 +1285,7 @@ final class ServiceController: ObservableObject {
                     let heartbeatDue = lastHeartbeatAt
                         .map { Date().timeIntervalSince($0) >= Self.heartbeatInterval } ?? true
                     let dataChanged = chargerToSend || desktopToSend || timezoneToSend ||
-                        musicToSend || usageToSend || nowToSend ||
+                        musicToSend || usageToSend || nowToSend || yearToSend ||
                         credentialsToSend != nil
                     /**
                      * 只在没有数据要发的时候才补心跳 —— 有数据时那个包本身就证明
@@ -1303,6 +1384,7 @@ final class ServiceController: ObservableObject {
                             appleMusicCredentials: credentialsToSend,
                             vibeCodingUsage: usageToSend ? vibeCodingUsagePayload : nil,
                             vibeCodingNow: nowToSend ? codingSessions.uploadPayload : nil,
+                            vibeCodingYear: yearToSend ? vibeCodingYearCollector.uploadPayload : nil,
                             includeDesktop: desktopToSend,
                             includeAppleMusic: musicToSend
                         )
@@ -1385,6 +1467,9 @@ final class ServiceController: ObservableObject {
                             lastPostedVibeCodingUsageAt = vibeCodingUsageCollector.payloadUpdatedAt
                         }
                         if nowToSend { lastPostedVibeCodingNowAt = codingSessions.payloadUpdatedAt }
+                        if yearToSend {
+                            lastPostedVibeCodingYearAt = vibeCodingYearCollector.payloadUpdatedAt
+                        }
                         if !manualModulesForAttempt.isEmpty {
                             pendingManualReports.subtract(manualModulesForAttempt)
                             let now = Date()
@@ -1549,6 +1634,7 @@ final class ServiceController: ObservableObject {
                 }
                 : nil,
             vibeCodingNow: settings.codexBarModuleEnabled ? codingSessions.uploadPayload : nil,
+            vibeCodingYear: settings.codexBarModuleEnabled ? vibeCodingYearCollector.uploadPayload : nil,
             includeDesktop: settings.desktopModuleEnabled,
             includeAppleMusic: settings.appleMusicModuleEnabled
         )
@@ -1562,6 +1648,7 @@ final class ServiceController: ObservableObject {
         appleMusicCredentials: AppleMusicCredentialsPayload?,
         vibeCodingUsage: JSONValue?,
         vibeCodingNow: JSONValue?,
+        vibeCodingYear: JSONValue? = nil,
         includeDesktop: Bool,
         includeAppleMusic: Bool,
         presence: String = "online"
@@ -1577,6 +1664,7 @@ final class ServiceController: ObservableObject {
                 timezone: timezone,
                 vibeCodingUsage: vibeCodingUsage,
                 vibeCodingNow: vibeCodingNow,
+                vibeCodingYear: vibeCodingYear,
                 includeDesktop: includeDesktop,
                 includeAppleMusic: includeAppleMusic
             ),
@@ -1646,149 +1734,133 @@ final class ServiceController: ObservableObject {
         if settings.desktopModuleEnabled { names.append(TelemetryModule.desktop.rawValue) }
         if settings.appleMusicModuleEnabled { names.append(TelemetryModule.appleMusic.rawValue) }
         if settings.timezoneModuleEnabled { names.append(TelemetryModule.timezone.rawValue) }
-        if settings.codexBarModuleEnabled { names.append(TelemetryModule.vibeCoding.rawValue) }
+        if settings.codexBarModuleEnabled {
+            names.append(TelemetryModule.vibeCoding.rawValue)
+            names.append(TelemetryModule.vibeCodingYear.rawValue)
+        }
         return names
     }
 
-    private func route(_ request: HTTPRequest) async -> HTTPResponse {
-        if request.method == "OPTIONS" { return .text("") }
+    private func route(_ request: HTTPRequest) async -> HTTPHandlerResult {
+        if request.method == "OPTIONS" { return json(EmptyObject()) }
         switch (request.method, request.path) {
         case ("GET", "/"):
-            if let url = Bundle.main.url(forResource: "index", withExtension: "html"),
-               let data = try? Data(contentsOf: url) {
-                return HTTPResponse(status: 200, reason: "OK", contentType: "text/html; charset=utf-8", body: data)
-            }
-            return .text("Mac Telemetry Hub\n", contentType: "text/plain; charset=utf-8")
-        case ("GET", "/status"):
-            return encode(statusPayload)
-        case ("GET", "/activity"):
-            return encode(ActivityLocalPayload(
-                desktop: desktopActivity.snapshot,
-                appleMusic: appleMusic.snapshot
-            ))
-        case ("GET", "/apple-music/authorization"):
-            return encode(AppleMusicAuthorizationPayload(
-                status: appleMusicAuthorization.statusDescription,
-                authorized: appleMusicAuthorization.authorizationStatus == .authorized,
-                hasUserToken: appleMusicAuthorization.hasUserToken,
-                lastError: appleMusicAuthorization.lastError,
-                lastUploadAt: appleMusicCredentialsUploadAt
-            ))
-        case ("GET", "/telemetry"):
-            return encode(telemetryEnvelope)
-        case ("GET", "/health"):
-            return encode(HealthPayload(
-                ok: true,
-                connected: chargerLink.isConnected,
-                autoConnect: chargerLink.desiredConnection,
-                lastError: chargerLink.lastError,
-                updatedAt: chargerLink.chargerStateForDisplay.updatedAt
-            ))
-        case ("GET", "/debug/status"):
-            return encode(DebugPayload(
-                connected: chargerLink.isConnected,
-                autoConnect: chargerLink.desiredConnection,
-                lastError: chargerLink.lastError,
-                phase: chargerLink.phase.label,
-                state: chargerLink.chargerStateForDisplay
-            ))
-        /**
-         * 采集侧最近一次的失败原因。
-         *
-         * 用量那个采集器有两半，各留各的错：用量挂了整轮不发，限额挂了只是那几根
-         * 条留着上次的值 —— 合成一条就分不出是哪种了。TokenTracker 里某个 provider
-         * 还可能单独失败，采集器会保留它上一次的好值并把本轮错误留在这里。
-         * 没有这个端点就只能靠猜。
-         */
-        case ("GET", "/debug/errors"):
-            return encode([
-                "vibeCodingUsage": vibeCodingUsageCollector.lastError,
-                "vibeCodingUsageLimits": vibeCodingUsageCollector.limitsError,
-                "codingSessions": codingSessions.lastError,
-                "appleMusic": appleMusic.lastError,
-                "charger": chargerLink.lastError,
-                "powerBank": powerBankLink.lastError,
-                "reporter": reporterLastError,
+            return json([
+                "health": "/health",
+                "charger": "/sse/charger",
+                "powerBank": "/sse/powerbank",
             ])
-        case ("GET", "/ports"):
-            return encode(statusPayload.ports)
-        case ("GET", let path) where path.hasPrefix("/ports/"):
-            let key = String(path.dropFirst("/ports/".count)).uppercased()
-            guard let port = statusPayload.ports[key] else {
-                return .text("{\"detail\":\"unknown port\"}", contentType: "application/json", status: 404, reason: "Not Found")
-            }
-            return encode(port)
-        case ("GET", "/metrics"):
-            return .text(metrics(), contentType: "text/plain; version=0.0.4; charset=utf-8")
-        case ("POST", "/disconnect"):
-            chargerLink.disconnect()
-            return encode(ActionPayload(ok: true, connected: false, autoConnect: false, lastError: chargerLink.lastError))
-        case ("POST", "/reconnect"):
-            chargerLink.reconnect()
-            return encode(ActionPayload(ok: true, connected: chargerLink.isConnected, autoConnect: true, lastError: chargerLink.lastError))
+        case ("GET", "/health"):
+            return json(HealthPayload(
+                ok: true,
+                charger: .init(
+                    enabled: settings.chargerModuleEnabled,
+                    connected: chargerLink.isConnected,
+                    phase: chargerLink.phase.label
+                ),
+                powerBank: .init(
+                    enabled: settings.powerBankModuleEnabled,
+                    connected: powerBankLink.isConnected,
+                    phase: powerBankLink.phase.label
+                )
+            ))
+        case ("GET", "/sse/charger"):
+            return chargingStream(.charger)
+        case ("GET", "/sse/powerbank"):
+            return chargingStream(.powerBank)
         default:
-            return .text("{\"detail\":\"not found\"}", contentType: "application/json", status: 404, reason: "Not Found")
+            return json(["detail": "not found"], status: 404, reason: "Not Found")
         }
     }
 
-    private func encode<T: Encodable>(_ value: T) -> HTTPResponse {
-        do { return .json(try JSONCoding.encoder().encode(value)) }
-        catch { return .text("{\"detail\":\"encoding failed\"}", contentType: "application/json", status: 500, reason: "Internal Server Error") }
-    }
-
-    private func metrics() -> String {
-        let payload = statusPayload
-        var lines = [
-            "# HELP a2687_connected Charger BLE session is live.",
-            "# TYPE a2687_connected gauge",
-            "a2687_connected \(payload.connected ? 1 : 0)",
-            "# HELP a2687_total_output_power_watts Total output power across all ports.",
-            "# TYPE a2687_total_output_power_watts gauge",
-        ]
-        if let total = payload.totalOutputPowerW { lines.append("a2687_total_output_power_watts \(total)") }
-        for (field, unit, value) in [
-            ("voltage", "volts", { (port: StatusPortPayload) in port.voltageV }),
-            ("current", "amperes", { (port: StatusPortPayload) in port.currentA }),
-            ("power", "watts", { (port: StatusPortPayload) in port.powerW }),
-        ] as [(String, String, (StatusPortPayload) -> Double?)] {
-            let metric = "a2687_port_\(field)_\(unit)"
-            lines.append("# TYPE \(metric) gauge")
-            for key in ["C1", "C2", "C3"] {
-                if let port = payload.ports[key], let number = value(port) {
-                    lines.append("\(metric){port=\"\(key)\"} \(number)")
-                }
+    /**
+     * 订阅一条充电设备的推流。
+     *
+     * 先把当前快照发出去，之后每一帧蓝牙遥测（约 1 Hz）再跟一帧。没有本地定时器，
+     * 设备不推这边就不发。连上瞬间那一次也走这条路，因为断开之后没有帧再来。
+     */
+    private func chargingStream(_ slot: ChargingDeviceSlot) -> HTTPHandlerResult {
+        .stream { [weak self] stream in
+            guard let self, stream.isOpen,
+                  let link = chargingLinks.first(where: { $0.slot == slot }) else {
+                stream.close()
+                return
             }
+            chargingSSE.attach(stream, slot: slot)
+            chargingSSE.send(streamEvent(for: link), to: stream)
         }
-        return lines.joined(separator: "\n") + "\n"
+    }
+
+    private func json<T: Encodable>(
+        _ value: T,
+        status: Int = 200,
+        reason: String = "OK"
+    ) -> HTTPHandlerResult {
+        do {
+            return .response(.json(try JSONCoding.encoder().encode(value), status: status, reason: reason))
+        } catch {
+            return .response(.text(
+                "{\"detail\":\"encoding failed\"}",
+                contentType: "application/json",
+                status: 500,
+                reason: "Internal Server Error"
+            ))
+        }
     }
 }
+
+private struct EmptyObject: Encodable {}
 
 private struct HealthPayload: Encodable {
+    struct Device: Encodable {
+        let enabled: Bool
+        let connected: Bool
+        let phase: String
+    }
+
     let ok: Bool
-    let connected: Bool
-    let autoConnect: Bool
-    let lastError: String?
-    let updatedAt: TimeInterval?
+    let charger: Device
+    let powerBank: Device
 }
 
-private struct DebugPayload: Encodable {
-    let connected: Bool
-    let autoConnect: Bool
-    let lastError: String?
+private struct ChargingStreamEvent: Encodable {
     let phase: String
-    let state: ChargerState
-}
-
-private struct ActionPayload: Encodable {
-    let ok: Bool
     let connected: Bool
-    let autoConnect: Bool
     let lastError: String?
+    let device: ChargingDevicePayload?
 }
 
-private struct ActivityLocalPayload: Encodable {
-    let desktop: DesktopActivitySnapshot?
-    let appleMusic: AppleMusicSnapshot?
+@MainActor
+private final class ChargingSSEBroker {
+    private var streams: [ChargingDeviceSlot: [ObjectIdentifier: HTTPStream]] = [:]
+
+    func attach(_ stream: HTTPStream, slot: ChargingDeviceSlot) {
+        let id = ObjectIdentifier(stream)
+        streams[slot, default: [:]][id] = stream
+        let previous = stream.onClose
+        stream.onClose = { [weak self] in
+            previous?()
+            self?.streams[slot]?[id] = nil
+        }
+    }
+
+    func send(_ event: ChargingStreamEvent, to stream: HTTPStream) {
+        guard let data = try? JSONCoding.encoder().encode(event) else { return }
+        stream.send(json: data)
+    }
+
+    func publish(_ event: ChargingStreamEvent, slot: ChargingDeviceSlot) {
+        guard let data = try? JSONCoding.encoder().encode(event) else { return }
+        for stream in (streams[slot] ?? [:]).values where stream.isOpen {
+            stream.send(json: data)
+        }
+    }
+
+    func closeAll() {
+        let open = streams.values.flatMap(\.values)
+        streams.removeAll()
+        for stream in open { stream.close() }
+    }
 }
 
 private enum ReporterError: LocalizedError {
@@ -1802,15 +1874,4 @@ private enum ReporterError: LocalizedError {
     }
 }
 
-private struct AppleMusicAuthorizationPayload: Encodable, Sendable {
-    let status: String
-    let authorized: Bool
-    let hasUserToken: Bool
-    let lastError: String?
-    let lastUploadAt: Date?
 
-    private enum CodingKeys: String, CodingKey {
-        case status, authorized
-        case hasUserToken, lastError, lastUploadAt
-    }
-}
