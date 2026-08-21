@@ -130,12 +130,18 @@ Token、费用、限额和会话都来自本机跑着的 TokenTracker 面板，�
 窗口的个数和长度取自上游的回答，不作假设，也不按展示形态裁一条「总额」。
 会话状态每 60 秒刷一次；用量和限额每 10 分钟刷一次。
 
-`position_ms` in the music module is an anchor, not a stream. Paired with
-`observed_at` and `state` it lets the site interpolate the playhead on its own,
+`positionMs` in the music module is an anchor, not a stream. Paired with
+`observedAt` and `state` it lets the site interpolate the playhead on its own,
 so the module is re-sent only on a track change, a play/pause transition, or a
 seek — detected as the playhead drifting more than 2.5 s from what the site
 would be showing. A track played straight through uploads once, not once per
 post interval.
+
+`appleMusic.queue` is beta. Music.app has no public Playing Next API, so the
+reporter reads the on-disk `Queue.dat` next to the local library. The object
+always includes `"beta": true`. Treat the shape as experimental; a Music.app
+update can change the file without warning. The site can ignore it until it
+chooses to render it.
 
 Play/pause transitions, track changes, and foreground-application switches skip
 the throttle window entirely: they wake the reporter loop the moment they happen

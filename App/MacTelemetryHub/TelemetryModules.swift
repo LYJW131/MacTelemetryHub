@@ -334,6 +334,8 @@ struct AppleMusicSnapshot: Codable, Equatable, Sendable {
      */
     let repeatOne: Bool
     let observedAt: Int64
+    /// Playing Next。来源不是公开 API，字段本身带 `beta: true`。
+    let queue: AppleMusicQueueSnapshot?
 }
 
 /**
@@ -917,10 +919,9 @@ final class AppleMusicMonitor: ObservableObject {
      * 曲目该放完的那一刻必须立刻去看：接下来要么循环回开头、要么换了下一首，
      * 两种都需要新锚点，而循环那种 Music.app 不发通知（换歌才发）。
      *
-     * 之所以不去判断「是不是单曲循环」：那个问题根本答不了。song repeat 只有
-     * off/one/all，而 all 到底会不会回到同一首取决于播放队列 —— 实测从资料库
-     * 播放时 current playlist 是「音乐」共 730 首，专辑自己有几首完全不相干，
-     * AppleScript 又拿不到队列。与其猜，不如到点了直接去看。
+     * 之所以不去判断「是不是单曲循环」：song repeat 只有 off/one/all，而 all
+     * 会不会回到同一首取决于 Playing Next。那份队列现在能从 Queue.dat 读到
+     * （beta），但循环绕回仍然不发通知，到点了直接去看更省事。
      */
     private func nextPollDelay() -> Duration {
         guard let snapshot, snapshot.state == "playing", snapshot.durationMs > 0 else {
@@ -990,7 +991,8 @@ final class AppleMusicMonitor: ObservableObject {
                 positionMs: 0,
                 durationMs: 0,
                 repeatOne: false,
-                observedAt: Int64(Date().timeIntervalSince1970 * 1_000)
+                observedAt: Int64(Date().timeIntervalSince1970 * 1_000),
+                queue: nil
             )
         }
 
@@ -1054,16 +1056,23 @@ final class AppleMusicMonitor: ObservableObject {
         let cloudStatus = item(8).lowercased()
         if cloudStatus == "uploaded" || cloudStatus == "not uploaded" { return nil }
         let state = rawState == "playing" || rawState == "paused" ? rawState : "stopped"
+        let title = item(2).nilIfEmpty
+        let trackID = item(5).nilIfEmpty
+        let queue = state == "stopped" ? nil : MusicPlayingQueue.read(
+            currentTrackID: trackID,
+            currentTitle: title
+        )
         return AppleMusicSnapshot(
             state: state,
-            title: item(2).nilIfEmpty,
+            title: title,
             artist: item(3).nilIfEmpty,
             album: item(4).nilIfEmpty,
-            trackID: item(5).nilIfEmpty,
+            trackID: trackID,
             positionMs: Int((Double(item(6)) ?? 0) * 1_000),
             durationMs: Int((Double(item(7)) ?? 0) * 1_000),
             repeatOne: item(9) == "one",
-            observedAt: Int64(Date().timeIntervalSince1970 * 1_000)
+            observedAt: Int64(Date().timeIntervalSince1970 * 1_000),
+            queue: queue
         )
     }
 

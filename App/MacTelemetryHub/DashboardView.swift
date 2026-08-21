@@ -599,7 +599,10 @@ struct DashboardView: View {
             .compactMap { $0?.trimmingCharacters(in: .whitespacesAndNewlines) }
             .filter { !$0.isEmpty }
             .joined(separator: " · ")
-        return track.isEmpty ? (appleMusic.lastError ?? "Music.app 已停止") : track
+        if track.isEmpty { return appleMusic.lastError ?? "Music.app 已停止" }
+        guard let queue = snapshot.queue, let index = queue.index,
+              index + 1 < queue.tracks.count else { return track }
+        return "\(track)  ·  下一首 \(queue.tracks[index + 1].title)"
     }
 
     private var coverSection: some View {

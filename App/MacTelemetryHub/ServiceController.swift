@@ -465,6 +465,9 @@ private struct AppleMusicUploadSignature: Equatable {
     let durationMs: Int
     /// 切换循环模式要让网页知道，所以它进签名
     let repeatOne: Bool
+    let queueSource: String?
+    let queueIndex: Int?
+    let queueTrackIDs: [String]
 
     init(_ snapshot: AppleMusicSnapshot) {
         state = snapshot.state
@@ -474,6 +477,9 @@ private struct AppleMusicUploadSignature: Equatable {
         trackID = snapshot.trackID
         durationMs = snapshot.durationMs
         repeatOne = snapshot.repeatOne
+        queueSource = snapshot.queue?.source
+        queueIndex = snapshot.queue?.index
+        queueTrackIDs = snapshot.queue?.tracks.map { $0.trackID ?? $0.title } ?? []
     }
 }
 
@@ -1332,7 +1338,9 @@ final class ServiceController: ObservableObject {
                     let musicUrgent = !manualMode && musicChanged && (
                         musicSeeked ||
                         music?.state != lastPostedAppleMusic?.state ||
-                        music?.trackID != lastPostedAppleMusic?.trackID
+                        music?.trackID != lastPostedAppleMusic?.trackID ||
+                        musicSignature?.queueIndex != lastPostedAppleMusic?.queueIndex ||
+                        musicSignature?.queueTrackIDs != lastPostedAppleMusic?.queueTrackIDs
                     )
                     // 只认应用身份：图标变了（同一个 App 换了图标）也算 desktopChanged，
                     // 但不值得为它绕过节流窗口。
