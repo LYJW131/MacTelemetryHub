@@ -38,9 +38,9 @@ enum JSONValue: Codable, Equatable, Sendable {
 /**
  * TokenTracker 本机面板的接口。
  *
- * 用量、限额、会话三份都从这里取。从前是 CodexBar CLI 两条命令加 ccusage 两条、
- * 一共四次进程；现在是同一个本机 HTTP 服务的几个 GET，快了两个数量级。代价是
- * 它得开着 —— 面板没跑的时候三份各自留下自己的错误，互不牵连。
+ * 限额、会话、年度热力图和用量合计从这里取。各 agent 卡片上的今日 token /
+ * 费用 / HIT 改走 ccusage：TokenTracker 的用量接口读的是它同步进内存的
+ * queue，桌面刷新会节流，正在写的 JSONL 经常要等好几分钟才进今日。
  *
  * 走的是它面板 SPA 用的那套 `functions` 接口，不是它文档里承诺的 CLI：形状
  * 随版本变的风险更大，坏掉的表现是某一块数据变空而不是报错。
@@ -369,13 +369,14 @@ struct TelemetryModulesPayload: Encodable, Sendable {
      * - `vibeCodingNow`：此刻在不在用、用的是哪个模型。60 秒一轮，站点收到就推
      *   给浏览器。
      * - `vibeCodingUsage`：token、费用、套餐、限额、会话总数 —— 全是累计
-     *   事实，十几分钟才动一次，站点只拿它刷缓存。
+     *   事实，十几分钟才动一次，站点只拿它刷缓存。今日那一行的 token / 费用 /
+     *   HIT 来自 ccusage，合计、模型和限额仍来自 TokenTracker。
      *
      * 从前是三个：用量、限额、会话状态各一个，一个采集器一个。那条线是按「哪条
      * 命令产出的」划的 —— 当年限额和用量分别来自 CodexBar 的两条命令，其中那条
-     * 十几秒的扫描一失败，同一轮刚取到的限额也跟着发不出去。如今都来自
-     * TokenTracker 同一个本机服务、跟着同两个间隔转，那道线就只剩历史了，采集器
-     * 也跟着并成两个：一个模块一个采集器一个间隔。
+     * 十几秒的扫描一失败，同一轮刚取到的限额也跟着发不出去。如今限额和合计仍
+     * 来自 TokenTracker，今日用量单独 overlay 一层 ccusage，采集器还是两个：
+     * 一个模块一个采集器一个间隔。
      *
      * 唯一的例外是会话总数：数出它的是短间隔那个采集器，但它是累计量，归这份
      * 发 —— 发信封那一刻才补进去，见 VibeCodingUsagePayload.withSessionCount。
@@ -1383,8 +1384,8 @@ private enum AgentLimitsCollector {
  *
  * 从前限额单独一个采集器、单独一个模块。那条线是按「哪条命令产出的」划的 ——
  * 当年用量来自 CodexBar 一条要跑十几秒的扫描，它一失败会把同一轮刚取到的限额
- * 一起拖下水，拆开才有意义。如今两半都是同一个本机服务上的 GET、跟着同一个
- * 间隔转，拆着只剩两份状态和两个要对齐的地方。
+ * 一起拖下水，拆开才有意义。如今限额和合计仍是 TokenTracker 上的 GET，今日
+ * token / 费用 / HIT 额外 overlay 一层 ccusage，跟着同一个间隔转。
  *
  * 并成一个采集器**不等于共命**，两半的失败各走各的：
  *
@@ -1429,37 +1430,43 @@ final class VibeCodingUsageMonitor: ObservableObject {
         refreshing = false
     }
 
-    func refreshIfNeeded(baseURL: String, interval: Double) async {
+    func refreshIfNeeded(baseURL: String, ccusageCLIPath: String, interval: Double) async {
         guard !refreshing else { return }
         if let lastAttempt, Date().timeIntervalSince(lastAttempt) < interval { return }
-        _ = await refreshNow(baseURL: baseURL)
+        _ = await refreshNow(baseURL: baseURL, ccusageCLIPath: ccusageCLIPath)
     }
 
     /// Bypasses the interval gate for an explicit user refresh, while preserving
     /// the monitor's single-flight guard.
     @discardableResult
-    func refreshNow(baseURL: String) async -> Bool {
+    func refreshNow(baseURL: String, ccusageCLIPath: String) async -> Bool {
         guard !refreshing else { return false }
         refreshing = true
         lastAttempt = Date()
         defer { refreshing = false }
 
-        // 两半并发取：限额只有一次请求，用量要两百多次，串着跑等于白等一次往返
+        // 三份并发：限额一次 GET，TokenTracker 用量要两百多次，ccusage 读本地
+        // 文件大约一秒。串着跑等于白等。
         async let usageTask = TokenTrackerUsageCollector.collect(baseURL: baseURL)
+        async let ccusageTask = CcusageTodayCollector.collect(cliPath: ccusageCLIPath)
         // 限额那条自己吞错误、把原因分到各 provider 上，所以先接它，
         // 不管用量成不成都先把状态收下
         applyLimits(await AgentLimitsCollector.collect(baseURL: baseURL))
 
         let usage: VibeCodingUsageCollection
+        let ccusage: CcusageTodayOutcome
         do {
-            usage = try await usageTask
+            (usage, ccusage) = try await (usageTask, ccusageTask)
         } catch {
             lastError = error.localizedDescription
             return false
         }
-        lastError = nil
+        lastError = ccusage.errors.isEmpty ? nil : ccusage.errors.joined(separator: "；")
 
-        let payload = VibeCodingUsagePayload.withLimits(usage.uploadPayload, limits: limitsPayload())
+        let payload = VibeCodingUsagePayload.withCcusageToday(
+            VibeCodingUsagePayload.withLimits(usage.uploadPayload, limits: limitsPayload()),
+            ccusage.today
+        )
         if uploadPayload != payload {
             uploadPayload = payload
             payloadUpdatedAt = Date()
@@ -1595,6 +1602,28 @@ enum VibeCodingUsagePayload {
     }
 
     /**
+     * 各 agent 卡片上的今日用量改成 ccusage 刚读到的那一行。
+     *
+     * 合计、模型排行、限额仍是 TokenTracker 的。ccusage 没覆盖到的来源
+     *（没装、没数据、价目表缺失）原样留下，不要把 TokenTracker 的今日清成 0。
+     */
+    fileprivate static func withCcusageToday(
+        _ usage: JSONValue,
+        _ today: [String: CcusageTodayRow]
+    ) -> JSONValue {
+        guard !today.isEmpty, case .object(var root) = usage,
+              case let .array(agents)? = root["agents"] else { return usage }
+        root["agents"] = .array(agents.map { agent in
+            guard case .object(var fields) = agent,
+                  case let .string(id)? = fields["id"],
+                  let row = today[id] else { return agent }
+            fields["today"] = row.json
+            return .object(fields)
+        })
+        return .object(root)
+    }
+
+    /**
      * 会话总数落进 totals。
      *
      * 它是「一共开过多少次」，一个累计量，所以归这份而不是 60 秒那轮的
@@ -1611,6 +1640,218 @@ enum VibeCodingUsagePayload {
 
 private struct VibeCodingUsageCollection: Sendable {
     let uploadPayload: JSONValue
+}
+
+private struct CcusageTodayRow: Sendable {
+    let date: String
+    let input: Double
+    let output: Double
+    let cacheRead: Double
+    let cacheCreation: Double
+    let total: Double
+    let cost: Double
+
+    var json: JSONValue {
+        .object([
+            "date": .string(date),
+            "inputTokens": .number(input),
+            "outputTokens": .number(output),
+            "cacheReadTokens": .number(cacheRead),
+            "cacheCreationTokens": .number(cacheCreation),
+            "totalTokens": .number(total),
+            "apiEquivalentCostUSD": .number(cost),
+        ])
+    }
+}
+
+private struct CcusageTodayOutcome: Sendable {
+    let today: [String: CcusageTodayRow]
+    let errors: [String]
+}
+
+/**
+ * 各 agent 卡片上的今日 token / 费用 / HIT。
+ *
+ * TokenTracker 的 `usage-daily` / `usage-model-breakdown` 读的是它同步进内存
+ * 的 queue。桌面刷新会节流，正在写的 JSONL 经常要等好几分钟才进今日，站点上
+ * 那三格就停在旧值。ccusage 直接扫各 CLI 的本地文件，大约一秒，覆盖上去。
+ *
+ * 只动 `agents[].today`。合计、模型排行、限额、会话、年度热力图仍走 TokenTracker。
+ * ccusage 认的来源是 claude / codex / grok；cursor、antigravity 没有对应命令，
+ * 今日继续用 TokenTracker。某一家没数据或价目表缺失时不要覆盖成 0。
+ */
+private enum CcusageTodayCollector {
+    private struct Source: Sendable {
+        let id: String
+        /// Claude 有 `--mode calculate`，按 token × 价目表重算；其余几家没有这个旗。
+        let extra: [String]
+        /// claude 挂了要写进 errors，站点那张主卡片就是它；其余几家失败就跳过。
+        let required: Bool
+    }
+
+    private static let sources: [Source] = [
+        .init(id: "claude", extra: ["--mode", "calculate"], required: true),
+        .init(id: "codex", extra: [], required: false),
+        .init(id: "grok", extra: [], required: false),
+    ]
+
+    private struct AgentResult: Sendable {
+        let id: String
+        let row: CcusageTodayRow?
+        let error: String?
+    }
+
+    nonisolated static func collect(cliPath: String) async throws -> CcusageTodayOutcome {
+        guard FileManager.default.isExecutableFile(atPath: cliPath) else {
+            throw TelemetryModuleError.ccusage("CLI 路径不可执行：\(cliPath)")
+        }
+        let today = dayString(Calendar.current.startOfDay(for: Date()))
+        let compact = today.replacingOccurrences(of: "-", with: "")
+        let timeZone = TimeZone.current.identifier
+
+        return await withTaskGroup(of: AgentResult.self) { group in
+            for source in sources {
+                group.addTask {
+                    collectAgent(
+                        cliPath: cliPath,
+                        source: source,
+                        compactDate: compact,
+                        today: today,
+                        timeZone: timeZone
+                    )
+                }
+            }
+            var rows: [String: CcusageTodayRow] = [:]
+            var errors: [String] = []
+            for await result in group {
+                if let row = result.row { rows[result.id] = row }
+                if let error = result.error { errors.append(error) }
+            }
+            return CcusageTodayOutcome(today: rows, errors: errors)
+        }
+    }
+
+    nonisolated private static func collectAgent(
+        cliPath: String,
+        source: Source,
+        compactDate: String,
+        today: String,
+        timeZone: String
+    ) -> AgentResult {
+        let arguments = [source.id, "daily", "--json", "--no-color",
+                         "--since", compactDate, "--until", compactDate,
+                         "--timezone", timeZone] + source.extra
+        let data: Data
+        do {
+            data = try run(cliPath, arguments)
+        } catch {
+            let message = "ccusage \(source.id) daily：\(error.localizedDescription)"
+            return AgentResult(id: source.id, row: nil, error: source.required ? message : nil)
+        }
+        guard let report = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            let message = "ccusage \(source.id) daily：输出不是有效 JSON"
+            return AgentResult(id: source.id, row: nil, error: source.required ? message : nil)
+        }
+        if let names = unpricedModelNames(report), !names.isEmpty {
+            return AgentResult(
+                id: source.id,
+                row: nil,
+                error: "ccusage 未取到价目表，\(names.joined(separator: "、")) 按 $0 计，\(source.id) 今日未覆盖"
+            )
+        }
+        guard let row = todayRow(report, today: today) else {
+            return AgentResult(id: source.id, row: nil, error: nil)
+        }
+        return AgentResult(id: source.id, row: row, error: nil)
+    }
+
+    nonisolated private static func run(_ executable: String, _ arguments: [String]) throws -> Data {
+        let process = Process()
+        let output = Pipe()
+        process.executableURL = URL(fileURLWithPath: executable)
+        process.arguments = arguments
+        process.standardOutput = output
+        process.standardError = FileHandle.nullDevice
+        var environment = ProcessInfo.processInfo.environment
+        let bin = URL(fileURLWithPath: executable).deletingLastPathComponent().path
+        let path = environment["PATH"] ?? "/usr/bin:/bin:/usr/sbin:/sbin"
+        // shebang 是 `#!/usr/bin/env node`；从菜单栏启动时 PATH 里通常没有 Homebrew。
+        environment["PATH"] = "\(bin):/opt/homebrew/bin:/usr/local/bin:\(path)"
+        process.environment = environment
+        try process.run()
+        let data = output.fileHandleForReading.readDataToEndOfFile()
+        process.waitUntilExit()
+        guard process.terminationStatus == 0 else {
+            throw TelemetryModuleError.ccusage("退出码 \(process.terminationStatus)")
+        }
+        return data
+    }
+
+    nonisolated private static func todayRow(
+        _ report: [String: Any],
+        today: String
+    ) -> CcusageTodayRow? {
+        let days = report["daily"] as? [[String: Any]] ?? []
+        guard let raw = days.first(where: { ($0["date"] as? String) == today }) else {
+            return nil
+        }
+        let input = TokenTrackerAPI.number(raw["inputTokens"])
+        let output = TokenTrackerAPI.number(raw["outputTokens"])
+        let cacheRead = TokenTrackerAPI.number(raw["cacheReadTokens"])
+        let cacheCreation = TokenTrackerAPI.number(raw["cacheCreationTokens"])
+        let total = TokenTrackerAPI.number(raw["totalTokens"])
+        let resolvedTotal = total > 0 ? total : input + output + cacheRead + cacheCreation
+        guard resolvedTotal > 0 else { return nil }
+        return CcusageTodayRow(
+            date: (raw["date"] as? String) ?? today,
+            input: input,
+            output: output,
+            cacheRead: cacheRead,
+            cacheCreation: cacheCreation,
+            total: resolvedTotal,
+            cost: TokenTrackerAPI.number(raw["totalCost"] ?? raw["costUSD"])
+        )
+    }
+
+    /**
+     * 有 token 却算出 0 花费的模型。
+     *
+     * ccusage 的价目表拉自 litellm 的在线 JSON，拉不到时它静默退回编译进
+     * 二进制的那份离线表，退出码仍然是 0。那份表跟不上新模型，于是 Opus
+     * 整段按 $0 计。覆盖上去会把站点上的今日费用压成错的，这一家就先不盖。
+     */
+    nonisolated private static func unpricedModelNames(_ report: [String: Any]) -> [String]? {
+        var names: Set<String> = []
+        for row in report["daily"] as? [[String: Any]] ?? [] {
+            for model in row["modelBreakdowns"] as? [[String: Any]] ?? [] {
+                guard let name = (model["modelName"] as? String)?.nilIfEmpty,
+                      !isHiddenModel(name, model) else { continue }
+                let tokens = TokenTrackerAPI.number(model["inputTokens"])
+                    + TokenTrackerAPI.number(model["outputTokens"])
+                    + TokenTrackerAPI.number(model["cacheReadTokens"])
+                    + TokenTrackerAPI.number(model["cacheCreationTokens"])
+                if tokens > 0, TokenTrackerAPI.number(model["cost"]) == 0 {
+                    names.insert(name)
+                }
+            }
+        }
+        return names.isEmpty ? nil : names.sorted()
+    }
+
+    nonisolated private static func isHiddenModel(_ name: String, _ row: [String: Any]) -> Bool {
+        name == "codex-auto-review" || row["isFallback"] as? Bool == true
+    }
+
+    nonisolated private static func dayString(_ date: Date) -> String { dayFormatter.string(from: date) }
+
+    nonisolated private static let dayFormatter: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.calendar = Calendar(identifier: .gregorian)
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.timeZone = .current
+        formatter.dateFormat = "yyyy-MM-dd"
+        return formatter
+    }()
 }
 
 private enum TokenTrackerUsageCollector {
@@ -1841,7 +2082,19 @@ struct VibeCodingYearSnapshot: Equatable, Sendable {
     let mix: [[Int]]
 
     var json: JSONValue {
-        .object([
+        // 走 JSONSerialization 让 days / mix 保持整数。JSONValue.number 是 Double，
+        // 再经 JSONEncoder 有的实现会写出 1.0；站点 mix 校验要求 Number.isInteger。
+        let raw: [String: Any] = [
+            "origin": origin,
+            "days": days,
+            "models": models,
+            "mix": mix,
+        ]
+        if let data = try? JSONSerialization.data(withJSONObject: raw),
+           let value = try? JSONDecoder().decode(JSONValue.self, from: data) {
+            return value
+        }
+        return .object([
             "origin": .string(origin),
             "days": .array(days.map { .number(Double($0)) }),
             "models": .array(models.map { .string($0) }),
@@ -1978,6 +2231,38 @@ private enum VibeCodingYearCollector {
             }
         }
 
+        /**
+         * 拆分按天裁进 `days[offset]`。
+         *
+         * 日合计先一次取齐，模型拆分再对有量的日子并行去问。TokenTracker 的
+         * 内存 queue 这中间还在涨 —— 正在用的今天尤其如此 —— 拆分合计就会
+         * 大于先记下的那天。站点校验 mix ≤ days，超了整份年度都不收，信封
+         * 连带 400，上报器又一直重发这份坏的年度。裁掉多出来的 token，模型
+         * 表也只从裁完的 mix 里编，名字和行才能对上。
+         */
+        for offset in mixByOffset.keys {
+            let cap = days.indices.contains(offset) ? days[offset] : 0
+            guard cap > 0, let parts = mixByOffset[offset], !parts.isEmpty else {
+                mixByOffset.removeValue(forKey: offset)
+                continue
+            }
+            var remaining = cap
+            var clipped: [(name: String, tokens: Int)] = []
+            for part in parts {
+                let tokens = min(part.tokens, remaining)
+                if tokens > 0 {
+                    clipped.append((part.name, tokens))
+                    remaining -= tokens
+                }
+                if remaining == 0 { break }
+            }
+            if clipped.isEmpty {
+                mixByOffset.removeValue(forKey: offset)
+            } else {
+                mixByOffset[offset] = clipped
+            }
+        }
+
         var totals: [String: Int] = [:]
         for parts in mixByOffset.values {
             for part in parts { totals[part.name, default: 0] += part.tokens }
@@ -2009,7 +2294,7 @@ private enum VibeCodingYearCollector {
         var totals: [String: Double] = [:]
         for source in sources {
             for model in source["models"] as? [[String: Any]] ?? [] {
-                guard let name = (model["model"] as? String)?.nilIfEmpty,
+                guard let name = (model["model"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines).nilIfEmpty,
                       TokenTrackerModels.shown(name)
                 else { continue }
                 let row = model["totals"] as? [String: Any] ?? [:]
@@ -2054,12 +2339,14 @@ private enum TelemetryModuleError: LocalizedError {
     case appleMusic(String)
     case tokenTracker(String)
     case agentLimits(String)
+    case ccusage(String)
 
     var errorDescription: String? {
         switch self {
         case let .appleMusic(message): "Apple Music：\(message)"
         case let .tokenTracker(message): "TokenTracker：\(message)"
         case let .agentLimits(message): "套餐额度：\(message)"
+        case let .ccusage(message): "ccusage：\(message)"
         }
     }
 }

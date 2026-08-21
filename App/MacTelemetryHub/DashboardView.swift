@@ -508,7 +508,7 @@ struct DashboardView: View {
                     ?? vibeCodingUsageCollector.lastSuccess?.formatted(date: .omitted, time: .standard),
                 action: { Task { await service.refreshVibeCodingUsageNow() } },
                 actionIcon: "arrow.clockwise",
-                actionHelp: "重新读取 TokenTracker 用量、费用与限额并上报",
+                actionHelp: "重新读取 ccusage 今日用量与 TokenTracker 限额并上报",
                 actionEnabled: service.settings.codexBarModuleEnabled,
                 isReporting: service.isRefreshingVibeCodingUsage
                     || service.isManualReportInFlight(.vibeCoding),

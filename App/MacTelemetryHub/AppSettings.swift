@@ -27,6 +27,7 @@ final class AppSettings: ObservableObject {
         static let timezoneModuleEnabled = "timezoneModuleEnabled"
         static let codexBarModuleEnabled = "codexBarModuleEnabled"
         static let tokenTrackerBaseURL = "tokenTrackerBaseURL"
+        static let ccusageCLIPath = "ccusageCLIPath"
         static let codingSessionRefreshInterval = "codingSessionRefreshInterval"
         /// 从前是 codexBarCostRefreshInterval + agentLimitsRefreshInterval 两个。
         /// 并成一个采集器之后没有「只刷限额」这回事了，旧键留着也没人读
@@ -68,8 +69,10 @@ final class AppSettings: ObservableObject {
     @Published var appleMusicModuleEnabled: Bool
     @Published var timezoneModuleEnabled: Bool
     @Published var codexBarModuleEnabled: Bool
-    /// TokenTracker 本地面板的根地址。用量、限额、会话三份都从它下面取。
+    /// TokenTracker 本地面板的根地址。限额、会话、年度热力图和用量合计从它取。
     @Published var tokenTrackerBaseURL: String
+    /// ccusage 可执行文件。各 agent 卡片上的今日 token / 费用 / HIT 从它读本地文件。
+    @Published var ccusageCLIPath: String
     /// 短间隔那份：此刻在不在用
     @Published var codingSessionRefreshInterval: Double
     /// 长间隔那份：token、费用、套餐、限额，一个采集器一轮全取
@@ -144,12 +147,24 @@ final class AppSettings: ObservableObject {
         appleMusicModuleEnabled = defaults.object(forKey: Key.appleMusicModuleEnabled) as? Bool ?? true
         timezoneModuleEnabled = defaults.object(forKey: Key.timezoneModuleEnabled) as? Bool ?? true
         codexBarModuleEnabled = defaults.object(forKey: Key.codexBarModuleEnabled) as? Bool ?? false
-        // 端口是 TokenTracker 面板的默认端口；它没跑的时候三份都取不到，
-        // 各自留下自己的错误，不互相牵连
+        // 端口是 TokenTracker 面板的默认端口；它没跑的时候限额 / 会话 / 年度
+        // 都取不到，各自留下自己的错误，不互相牵连。今日用量另走 ccusage。
         let storedBaseURL = defaults.string(forKey: Key.tokenTrackerBaseURL) ?? ""
         tokenTrackerBaseURL = storedBaseURL.isEmpty
             ? environment["TOKENTRACKER_BASE_URL"] ?? "http://127.0.0.1:7680"
             : storedBaseURL
+        let storedCcusagePath = defaults.string(forKey: Key.ccusageCLIPath) ?? ""
+        ccusageCLIPath = storedCcusagePath.hasPrefix("/") &&
+            FileManager.default.isExecutableFile(atPath: storedCcusagePath)
+            ? storedCcusagePath
+            : environment["CCUSAGE_CLI_PATH"]
+                ?? Self.firstExistingPath([
+                    "/Users/\(NSUserName())/.hermes/node/bin/ccusage",
+                    "/Users/\(NSUserName())/.local/bin/ccusage",
+                    "/opt/homebrew/bin/ccusage",
+                    "/usr/local/bin/ccusage",
+                ])
+                ?? ""
         let storedSessionInterval = defaults.double(forKey: Key.codingSessionRefreshInterval)
         codingSessionRefreshInterval = storedSessionInterval == 0 ? 60 : storedSessionInterval
         let storedUsageInterval = defaults.double(forKey: Key.vibeCodingUsageRefreshInterval)
@@ -296,6 +311,9 @@ final class AppSettings: ObservableObject {
             else {
                 throw SettingsError.invalidTokenTrackerURL
             }
+            guard FileManager.default.isExecutableFile(atPath: ccusageCLIPath) else {
+                throw SettingsError.invalidCcusagePath
+            }
             guard codingSessionRefreshInterval >= 60 else {
                 throw SettingsError.invalidCodingSessionInterval
             }
@@ -330,6 +348,7 @@ final class AppSettings: ObservableObject {
         tokenTrackerBaseURL = tokenTrackerBaseURL
             .trimmingCharacters(in: .whitespacesAndNewlines)
             .replacingOccurrences(of: "/+$", with: "", options: .regularExpression)
+        ccusageCLIPath = (ccusageCLIPath as NSString).expandingTildeInPath
         r2Endpoint = r2Endpoint.trimmingCharacters(in: .whitespacesAndNewlines)
         r2Bucket = r2Bucket.trimmingCharacters(in: .whitespacesAndNewlines)
         desktopReportingBlacklist = normalizedDesktopReportingBlacklist.normalizedRawValue
@@ -360,6 +379,7 @@ final class AppSettings: ObservableObject {
         defaults.set(timezoneModuleEnabled, forKey: Key.timezoneModuleEnabled)
         defaults.set(codexBarModuleEnabled, forKey: Key.codexBarModuleEnabled)
         defaults.set(tokenTrackerBaseURL, forKey: Key.tokenTrackerBaseURL)
+        defaults.set(ccusageCLIPath, forKey: Key.ccusageCLIPath)
         defaults.set(codingSessionRefreshInterval, forKey: Key.codingSessionRefreshInterval)
         defaults.set(vibeCodingUsageRefreshInterval, forKey: Key.vibeCodingUsageRefreshInterval)
         defaults.set(vibeCodingYearRefreshInterval, forKey: Key.vibeCodingYearRefreshInterval)
@@ -386,11 +406,15 @@ final class AppSettings: ObservableObject {
         }
         launchAtLoginEnabled = SMAppService.mainApp.status == .enabled
     }
+
+    private static func firstExistingPath(_ candidates: [String]) -> String? {
+        candidates.first { FileManager.default.isExecutableFile(atPath: $0) }
+    }
 }
 
 enum SettingsError: LocalizedError {
     case invalidUserID, invalidPeripheralID, invalidPort, invalidBindAddress, invalidTiming, invalidPostURL
-    case invalidTokenTrackerURL, invalidCodingSessionInterval
+    case invalidTokenTrackerURL, invalidCcusagePath, invalidCodingSessionInterval
     case invalidVibeCodingUsageInterval
     case invalidVibeCodingYearInterval
     case invalidR2Configuration
@@ -404,6 +428,7 @@ enum SettingsError: LocalizedError {
         case .invalidTiming: "POST 间隔和超时必须大于 0。"
         case .invalidPostURL: "POST 地址必须是完整的 http:// 或 https:// URL。"
         case .invalidTokenTrackerURL: "启用 Vibe Coding 用量时，TokenTracker 地址必须是完整的 http:// 或 https:// URL。"
+        case .invalidCcusagePath: "启用 Vibe Coding 用量时，ccusage CLI 路径必须指向可执行文件。"
         case .invalidCodingSessionInterval: "会话状态刷新间隔不能低于 60 秒。"
         case .invalidVibeCodingUsageInterval: "用量与限额刷新间隔不能低于 60 秒。"
         case .invalidVibeCodingYearInterval: "年度热力图刷新间隔不能低于 60 秒。"

@@ -767,7 +767,10 @@ final class ServiceController: ObservableObject {
         guard settings.codexBarModuleEnabled, !isRefreshingVibeCodingUsage else { return }
         isRefreshingVibeCodingUsage = true
         defer { isRefreshingVibeCodingUsage = false }
-        guard await vibeCodingUsageCollector.refreshNow(baseURL: settings.tokenTrackerBaseURL) else { return }
+        guard await vibeCodingUsageCollector.refreshNow(
+            baseURL: settings.tokenTrackerBaseURL,
+            ccusageCLIPath: settings.ccusageCLIPath
+        ) else { return }
         _ = requestImmediateReport(.vibeCoding)
     }
 
@@ -1136,6 +1139,7 @@ final class ServiceController: ObservableObject {
                 )
                 async let usage: Void = self.vibeCodingUsageCollector.refreshIfNeeded(
                     baseURL: settings.tokenTrackerBaseURL,
+                    ccusageCLIPath: settings.ccusageCLIPath,
                     interval: settings.vibeCodingUsageRefreshInterval
                 )
                 async let year: Void = self.vibeCodingYearCollector.refreshIfNeeded(
@@ -1431,7 +1435,10 @@ final class ServiceController: ObservableObject {
                         attemptedAppleMusicCredentials = credentialsToSend != nil
                         let (responseData, response) = try await IsolatedHTTPClient.data(for: request)
                         if let response = response as? HTTPURLResponse, !(200..<300).contains(response.statusCode) {
-                            throw ReporterError.httpStatus(response.statusCode)
+                            throw ReporterError.httpStatus(
+                                response.statusCode,
+                                detail: Self.ingestErrorDetail(responseData)
+                            )
                         }
                         let responsePayload = try JSONDecoder()
                             .decode(TelemetryIngestResponse.self, from: responseData)
@@ -1863,6 +1870,19 @@ final class ServiceController: ObservableObject {
         _ = done.wait(timeout: .now() + 3)
     }
 
+    /// 站点 4xx 的 JSON 是 `{ ok: false, error: "…" }`。只显示状态码的话，
+    /// 年度热力图校验失败会看起来像信封改坏了。
+    private static func ingestErrorDetail(_ data: Data) -> String? {
+        if let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+           let error = (object["error"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines),
+           !error.isEmpty {
+            return error
+        }
+        let text = String(data: data, encoding: .utf8)?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        return text?.isEmpty == false ? text : nil
+    }
+
     private var activeModuleNames: [String] {
         var names: [String] = []
         if settings.chargerModuleEnabled { names.append(TelemetryModule.charger.rawValue) }
@@ -2000,12 +2020,15 @@ private final class ChargingSSEBroker {
 }
 
 private enum ReporterError: LocalizedError {
-    case httpStatus(Int)
+    case httpStatus(Int, detail: String?)
     case invalidTelemetryResponse
     var errorDescription: String? {
         switch self {
-        case let .httpStatus(code): "POST 端点返回 HTTP \(code)"
-        case .invalidTelemetryResponse: "遥测端点响应缺少图标确认状态。"
+        case let .httpStatus(code, detail):
+            if let detail, !detail.isEmpty { return "POST 端点返回 HTTP \(code)：\(detail)" }
+            return "POST 端点返回 HTTP \(code)"
+        case .invalidTelemetryResponse:
+            return "遥测端点响应缺少图标确认状态。"
         }
     }
 }

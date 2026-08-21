@@ -74,8 +74,9 @@ shutdowns still rely on the site's "nothing received for a while" timeout. Both
 paths are needed; neither replaces the other.
 The POST body is deliberately bounded. The app discards TokenTracker's
 project-level details after parsing and uploads only display-ready totals
-and today's numbers. Token inspection stays in TokenTracker's own panel;
-Mac Telemetry Hub only shows the collectors' health.
+and today's numbers. Today's token / cost / HIT on each agent card comes
+from local `ccusage`; Token inspection of full history stays in
+TokenTracker's own panel. Mac Telemetry Hub only shows the collectors' health.
 
 Vibe coding is split into three modules by **how often it changes**, not by which
 endpoint produced it:
@@ -106,9 +107,14 @@ Every module is sent only when its own display content changes.
 
 ## Plan tier and rate-limit windows
 
-Token、费用、限额和会话都来自本机跑着的 TokenTracker 面板，走它 SPA 用的那套
-`/functions/<名字>` 接口。不上传 session ID、项目路径、提示词或回复：
+限额、会话、年度热力图和用量合计来自本机跑着的 TokenTracker 面板，走它 SPA
+用的那套 `/functions/<名字>` 接口。各 agent 卡片上的今日 token / 费用 / HIT
+改走本机 `ccusage`：它直接读各 CLI 的本地用量文件，不经过 TokenTracker 那份
+会节流的内存 queue。不上传 session ID、项目路径、提示词或回复：
 
+- `ccusage <source> daily --json` 覆盖 `agents[].today`（claude / codex / grok）。
+  TokenTracker 的用量接口读的是同步进内存的 queue，桌面刷新会节流，正在写的
+  JSONL 经常要等好几分钟才进今日。
 - `tokentracker-usage-daily` 给出哪几天有数据，再对每个有数据的日子问一次
   `tokentracker-usage-model-breakdown`，合成 token/费用历史与模型排行。
   同一条按日接口另外喂给 `vibeCodingYear`：过去 53 周的日合计一次发完；有量的日
@@ -123,9 +129,9 @@ Token、费用、限额和会话都来自本机跑着的 TokenTracker 面板，�
   前两样走 `vibeCodingNow`（60 秒一轮，五个来源都发）；条数是「一共开过多少次」，
   属于累计量，搭 `vibeCodingUsage` 那份车走。
 
-从前这四份是 CodexBar CLI 两条命令加 ccusage 两条、一共四次进程，光那条
-`cost --refresh` 就要十几秒；现在是同一个本机 HTTP 服务的几个 GET。代价是它
-得开着 —— 面板没跑的时候三份各自留下自己的错误，互不牵连。
+限额和合计仍是 TokenTracker 的几个 GET；今日那一行额外跑一次 ccusage。
+TokenTracker 面板没开着时限额 / 会话 / 年度各自留下自己的错误，不互相牵连。
+ccusage 路径不可执行则用量这一轮不发，留着上一次的好值。
 
 窗口的个数和长度取自上游的回答，不作假设，也不按展示形态裁一条「总额」。
 会话状态每 60 秒刷一次；用量和限额每 10 分钟刷一次。
@@ -228,10 +234,11 @@ pause land in 320–490 ms, application switches in 560–620 ms.
   permission, obtains a Music User Token and a MusicKit-generated developer
   token, and sends them only to the dedicated credentials endpoint described
   below.
-- Coding usage requires the TokenTracker app running its local panel. Point the
-  设置 at its root address — `http://127.0.0.1:7680` by default — and the three
-  collectors read from there. The minimum local-cost refresh interval is 60
-  seconds.
+- Coding usage requires the TokenTracker app running its local panel and a
+  `ccusage` CLI. Point the 设置 at TokenTracker's root address —
+  `http://127.0.0.1:7680` by default — and at the ccusage executable
+  (`/opt/homebrew/bin/ccusage` if installed with Homebrew npm). The minimum
+  local-cost refresh interval is 60 seconds.
 
 ## Open and run in Xcode
 

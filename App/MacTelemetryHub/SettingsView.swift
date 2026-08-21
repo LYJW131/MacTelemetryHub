@@ -358,7 +358,7 @@ struct SettingsView: View {
                     .toggleStyle(.switch)
             }
 
-            settingSection("Vibe Coding 用量", detail: "TokenTracker 聚合 Token、费用、限额和会话状态，全部走它本机的面板接口。不会上传 session ID、项目路径、提示词或回复。", icon: "terminal") {
+            settingSection("Vibe Coding 用量", detail: "今日 token、费用和 HIT 走 ccusage，直接读各 CLI 的本地文件；限额、会话、年度热力图和合计仍走 TokenTracker 本地面板。不会上传 session ID、项目路径、提示词或回复。", icon: "terminal") {
                 Toggle("启用 TokenTracker", isOn: $settings.codexBarModuleEnabled)
                     .toggleStyle(.switch)
 
@@ -366,9 +366,15 @@ struct SettingsView: View {
                     VStack(alignment: .leading, spacing: 12) {
                         monoField(
                             title: "TokenTracker 地址",
-                            detail: "它的本地面板地址；面板没开着时三份数据都取不到",
+                            detail: "限额、会话和年度热力图从它的本地面板取；面板没开着时这三份都取不到",
                             text: $settings.tokenTrackerBaseURL,
                             placeholder: "http://127.0.0.1:7680"
+                        )
+                        monoField(
+                            title: "ccusage CLI",
+                            detail: "各 agent 卡片上的今日 token / 费用 / HIT；它读文件，不经过 TokenTracker 那份会节流的内存 queue",
+                            text: $settings.ccusageCLIPath,
+                            placeholder: "/opt/homebrew/bin/ccusage"
                         )
                         NumericField(title: "会话状态刷新", unit: "秒（最少 60）", placeholder: "60", value: $settings.codingSessionRefreshInterval)
                         NumericField(title: "用量与限额刷新", unit: "秒（最少 60）", placeholder: "600", value: $settings.vibeCodingUsageRefreshInterval)
