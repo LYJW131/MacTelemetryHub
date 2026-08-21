@@ -138,10 +138,11 @@ would be showing. A track played straight through uploads once, not once per
 post interval.
 
 `appleMusic.queue` is beta. Music.app has no public Playing Next API, so the
-reporter reads the on-disk `Queue.dat` next to the local library. The object
-always includes `"beta": true`. Treat the shape as experimental; a Music.app
-update can change the file without warning. The site can ignore it until it
-chooses to render it.
+reporter reads the on-disk `Queue.dat` next to the local library (title and
+persistent ID) and joins artist/album from a single library Apple Event. The
+object always includes `"beta": true`. Treat the shape as experimental; a
+Music.app update can change the file without warning. The site can ignore it
+until it chooses to render it.
 
 Play/pause transitions, track changes, and foreground-application switches skip
 the throttle window entirely: they wake the reporter loop the moment they happen

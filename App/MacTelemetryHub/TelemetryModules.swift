@@ -1058,15 +1058,19 @@ final class AppleMusicMonitor: ObservableObject {
         let state = rawState == "playing" || rawState == "paused" ? rawState : "stopped"
         let title = item(2).nilIfEmpty
         let trackID = item(5).nilIfEmpty
+        let artist = item(3).nilIfEmpty
+        let album = item(4).nilIfEmpty
         let queue = state == "stopped" ? nil : MusicPlayingQueue.read(
             currentTrackID: trackID,
-            currentTitle: title
+            currentTitle: title,
+            currentArtist: artist,
+            currentAlbum: album
         )
         return AppleMusicSnapshot(
             state: state,
             title: title,
-            artist: item(3).nilIfEmpty,
-            album: item(4).nilIfEmpty,
+            artist: artist,
+            album: album,
             trackID: trackID,
             positionMs: Int((Double(item(6)) ?? 0) * 1_000),
             durationMs: Int((Double(item(7)) ?? 0) * 1_000),

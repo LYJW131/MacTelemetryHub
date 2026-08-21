@@ -479,7 +479,9 @@ private struct AppleMusicUploadSignature: Equatable {
         repeatOne = snapshot.repeatOne
         queueSource = snapshot.queue?.source
         queueIndex = snapshot.queue?.index
-        queueTrackIDs = snapshot.queue?.tracks.map { $0.trackID ?? $0.title } ?? []
+        queueTrackIDs = snapshot.queue?.tracks.map {
+            "\($0.trackID ?? "")\t\($0.title)\t\($0.artist ?? "")\t\($0.album ?? "")"
+        } ?? []
     }
 }
 

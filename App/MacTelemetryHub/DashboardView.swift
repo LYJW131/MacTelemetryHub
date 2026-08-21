@@ -602,7 +602,10 @@ struct DashboardView: View {
         if track.isEmpty { return appleMusic.lastError ?? "Music.app 已停止" }
         guard let queue = snapshot.queue, let index = queue.index,
               index + 1 < queue.tracks.count else { return track }
-        return "\(track)  ·  下一首 \(queue.tracks[index + 1].title)"
+        let next = queue.tracks[index + 1]
+        var nextLabel = next.title
+        if let artist = next.artist, !artist.isEmpty { nextLabel += " · \(artist)" }
+        return "\(track)  ·  下一首 \(nextLabel)"
     }
 
     private var coverSection: some View {
