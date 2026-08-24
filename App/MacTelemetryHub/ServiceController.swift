@@ -1883,10 +1883,27 @@ final class ServiceController: ObservableObject {
         return text?.isEmpty == false ? text : nil
     }
 
+    /**
+     * 信封里的 `activeModules`：站点拿它决定这一轮心跳该给哪些模块续期。
+     *
+     * 充电头和充电宝比别的模块多一道连接判断。其余模块的数据源和上报器是同一个
+     * 进程 —— 这份信封能发出去，就说明前台应用、时区、Vibe Coding 的来源都还在，
+     * 开关本身已经是充分的存活证明。这两个不是：读数从 BLE 那头来，链路断了 App
+     * 照样活着、照样发心跳，于是「开关开着」被站点读成「设备在线」，`charger:latest`
+     * 早就过期了，`charger:lastPush` 还在被每一轮心跳顶新，断流那条判断永远不成立。
+     *
+     * 「连着但安静」和「没连上」是两回事，只有后者该从这个清单里消失。充电头空载
+     * 时本来就没有新读数可发，心跳续期正是为这段安静时间准备的，把它一起摘掉会让
+     * 站点误判成拔线；而没连上时摘掉它，站点那边的过期计时才真的开始走。
+     */
     private var activeModuleNames: [String] {
         var names: [String] = []
-        if settings.chargerModuleEnabled { names.append(TelemetryModule.charger.rawValue) }
-        if settings.powerBankModuleEnabled { names.append(TelemetryModule.powerBank.rawValue) }
+        if settings.chargerModuleEnabled, chargerLink.isConnected {
+            names.append(TelemetryModule.charger.rawValue)
+        }
+        if settings.powerBankModuleEnabled, powerBankLink.isConnected {
+            names.append(TelemetryModule.powerBank.rawValue)
+        }
         if settings.desktopModuleEnabled { names.append(TelemetryModule.desktop.rawValue) }
         if settings.appleMusicModuleEnabled { names.append(TelemetryModule.appleMusic.rawValue) }
         if settings.timezoneModuleEnabled { names.append(TelemetryModule.timezone.rawValue) }

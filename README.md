@@ -58,6 +58,12 @@ envelope and may contain only the modules that have fresh data:
 
 `activeModules` lists the **toggles** the user has switched on, not the module
 keys above: vibe coding is one toggle (`vibeCoding`) that feeds three modules.
+`charger` and `powerBank` are the exception: they are listed only while the
+toggle is on **and** the BLE link is actually connected, because their data
+comes from outside this process — a dropped link would otherwise keep the site
+renewing their heartbeat forever. Connected but idle still counts as active:
+a charger with nothing plugged in has no new readings to send, and that is
+exactly what heartbeat renewal is for.
 
 Version 4 is the only accepted contract; desktop icons are addressed by SHA-256.
 The Mac renders each icon at 96 px, encodes it once as WebP, signs an S3-compatible
