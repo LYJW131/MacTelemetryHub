@@ -1,7 +1,22 @@
+import AppKit
 import SwiftUI
+
+/**
+ * 关控制面板不能把上报器一起带走。
+ *
+ * SwiftUI 的 `Window` 算一个普通窗口，`MenuBarExtra` 不算。关掉面板以后系统
+ * 以为一个窗口都不剩了，默认就把进程杀掉 —— 菜单栏图标跟着消失，看起来像
+ * 上报器自己退出。登录项只在登录时拉起，不会在这里补救。
+ */
+final class AppDelegate: NSObject, NSApplicationDelegate {
+    func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
+        false
+    }
+}
 
 @main
 struct MacTelemetryHubApp: App {
+    @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
     @StateObject private var service = ServiceController()
 
     var body: some Scene {
