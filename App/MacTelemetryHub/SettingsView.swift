@@ -600,7 +600,10 @@ struct SettingsView: View {
                     } else {
                         pairedRow(powerBankLink)
                     }
-                    Text("充电宝空闲时会自己休眠并停止广播；手机 App 连着它的时候本机也连不上。扫不到就先按一下机身按钮。")
+                    Toggle("空闲时智能休眠", isOn: $settings.powerBankIdleSleepEnabled)
+                        .toggleStyle(.switch)
+                        .padding(.top, 8)
+                    Text("待机约五分钟后断开蓝牙，之后隔一段时间再连上去看有没有充放电。仍空闲就继续睡，间隔逐渐加长。充电头不受影响。手机 App 连充电宝时也需要本机先放开。")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)

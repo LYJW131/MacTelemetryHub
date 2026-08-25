@@ -993,6 +993,7 @@ final class ServiceController: ObservableObject {
             wakeReporter()
         }
         if previous == session {
+            link.refreshIdleSleepPolicy()
             return
         }
         if previous == nil || previous?.enabled == false {

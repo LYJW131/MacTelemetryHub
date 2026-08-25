@@ -86,4 +86,20 @@ enum ChargingDeviceSlot: String, CaseIterable, Identifiable, Sendable {
      */
     var streamIdleTimeout: Duration { .seconds(10) }
     var streamStallTimeout: Duration { .seconds(20) }
+
+    /**
+     * 空闲智能休眠只给充电宝。充电头插在墙上，连着不费它的电池。
+     *
+     * 充电宝空闲时自己会停广播；本机占着 GATT 会把它吊醒，手机 App 也连不上。
+     * 长时间没有充放电就主动断开，隔一会儿再连上去看一眼。
+     */
+    var supportsIdleSleep: Bool { self == .powerBank }
+    /// 连着却一直待机，过了这段才断开。
+    var idleBeforeSleep: Duration { .seconds(5 * 60) }
+    /// 重连后等多久还没握手成功，就算这次它没在广播，回去继续睡。
+    var idleProbeConnectTimeout: Duration { .seconds(25) }
+    /// 连上后看多久遥测才判断是否仍空闲。握手后再等几帧 1 Hz 推流。
+    var idleProbeHold: Duration { .seconds(15) }
+    var idleNapStart: Duration { .seconds(5 * 60) }
+    var idleNapCap: Duration { .seconds(30 * 60) }
 }

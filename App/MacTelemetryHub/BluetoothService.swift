@@ -13,6 +13,8 @@ final class BluetoothService: NSObject, ObservableObject {
         case handshaking
         case connected
         case disconnected
+        /// 充电宝空闲，GATT 已拆掉，过一会儿会再连上去看一眼。
+        case idleSleeping
 
         var label: String {
             switch self {
@@ -23,6 +25,7 @@ final class BluetoothService: NSObject, ObservableObject {
             case .handshaking: "正在认证"
             case .connected: "已连接"
             case .disconnected: "未连接"
+            case .idleSleeping: "智能休眠"
             }
         }
     }
@@ -101,9 +104,17 @@ final class BluetoothService: NSObject, ObservableObject {
     private var lastFrameAt = ContinuousClock.now
     private var retryTask: Task<Void, Never>?
     private var pairingScanTask: Task<Void, Never>?
+    private var idleSleepTask: Task<Void, Never>?
     private var pending: PendingResponse?
     private var observesWorkspacePower = false
     private var isSystemSleeping = false
+    /// 正在空闲休眠：GATT 已拆，不要走掉线那条 5 秒定向重连。
+    private var isIdleSleeping = false
+    /// 这一次连接是休眠后的探视，连上后只看 `idleProbeHold`，不是再等五分钟。
+    private var probingAfterNap = false
+    private var idleSince: ContinuousClock.Instant?
+    private var idleProbeDeadline: ContinuousClock.Instant?
+    private var nextNapDuration: Duration
     /// 配对扫描开着的时长。够走完一轮广播间隔，又不至于让用户对着列表干等。
     private static let pairingScanWindow = Duration.seconds(15)
     private var reconnectDelay: Duration { slot.reconnectDelay }
@@ -151,12 +162,14 @@ final class BluetoothService: NSObject, ObservableObject {
         self.settings = settings
         self.slot = slot
         decoder = slot.makeDecoder()
+        nextNapDuration = slot.idleNapStart
         super.init()
     }
 
     func start() {
         guard central == nil else { return }
         desiredConnection = true
+        resetIdleSleep()
         if !observesWorkspacePower {
             NSWorkspace.shared.notificationCenter.addObserver(
                 self,
@@ -178,14 +191,29 @@ final class BluetoothService: NSObject, ObservableObject {
     func disconnect() {
         desiredConnection = false
         lastError = "已手动断开"
+        resetIdleSleep()
         destroyBluetoothSession()
     }
 
     func reconnect() {
         desiredConnection = true
         lastError = nil
+        resetIdleSleep()
         destroyBluetoothSession()
         scheduleRetry(after: .seconds(1))
+    }
+
+    /// 开关变了：关掉就取消休眠并连回去，开着则等现有连接自己进入待机计时。
+    func refreshIdleSleepPolicy() {
+        guard slot.supportsIdleSleep else { return }
+        guard settings.powerBankIdleSleepEnabled else {
+            let wasSleeping = isIdleSleeping
+            resetIdleSleep()
+            if wasSleeping, desiredConnection, !isSystemSleeping {
+                scheduleRetry(after: .seconds(1))
+            }
+            return
+        }
     }
 
     /// Official `0x021F`. Returns the ACK payload — `11 A1 01 31` means pixels are not on the charger.
@@ -255,6 +283,7 @@ final class BluetoothService: NSObject, ObservableObject {
 
     func shutdown() {
         desiredConnection = false
+        resetIdleSleep()
         destroyBluetoothSession()
         if observesWorkspacePower {
             NSWorkspace.shared.notificationCenter.removeObserver(
@@ -322,12 +351,17 @@ final class BluetoothService: NSObject, ObservableObject {
         guard isSystemSleeping else { return }
         isSystemSleeping = false
         guard desiredConnection else { return }
+        if isIdleSleeping {
+            lastError = "Mac 已唤醒，正在检查充电宝"
+            beginIdleProbe()
+            return
+        }
         lastError = "Mac 已唤醒，正在重新建立蓝牙会话"
         scheduleRetry(after: .seconds(1))
     }
 
     private func startCentralIfNeeded() {
-        guard desiredConnection, !isSystemSleeping, central == nil else { return }
+        guard desiredConnection, !isSystemSleeping, !isIdleSleeping, central == nil else { return }
         central = CBCentralManager(delegate: self, queue: .main)
     }
 
@@ -349,7 +383,9 @@ final class BluetoothService: NSObject, ObservableObject {
         assembler.reset()
         manager?.delegate = nil
         central = nil
-        phase = .disconnected
+        if !isIdleSleeping {
+            phase = .disconnected
+        }
     }
 
     /**
@@ -365,6 +401,7 @@ final class BluetoothService: NSObject, ObservableObject {
     private func beginConnect() {
         guard desiredConnection,
               !isSystemSleeping,
+              !isIdleSleeping,
               let central,
               central.state == .poweredOn else { return }
         do {
@@ -399,7 +436,7 @@ final class BluetoothService: NSObject, ObservableObject {
     }
 
     private func scheduleRetry(after delay: Duration = .seconds(5)) {
-        guard desiredConnection, !isSystemSleeping else { return }
+        guard desiredConnection, !isSystemSleeping, !isIdleSleeping else { return }
         retryTask?.cancel()
         retryTask = Task { [weak self] in
             try? await Task.sleep(for: delay)
@@ -438,6 +475,7 @@ final class BluetoothService: NSObject, ObservableObject {
                 guard !Task.isCancelled else { return }
                 phase = .connected
                 lastError = nil
+                armIdleProbeHoldIfNeeded()
                 startStreamWatchdog()
             } catch is CancellationError {
                 return
@@ -533,6 +571,7 @@ final class BluetoothService: NSObject, ObservableObject {
 
                 if idle < streamIdleTimeout {
                     rearmed = false
+                    tickIdleSleep()
                     continue
                 }
                 if idle >= streamStallTimeout {
@@ -544,6 +583,93 @@ final class BluetoothService: NSObject, ObservableObject {
                 rearmed = true
                 try? armTelemetry()
             }
+        }
+    }
+
+    private func resetIdleSleep() {
+        idleSleepTask?.cancel()
+        idleSleepTask = nil
+        isIdleSleeping = false
+        probingAfterNap = false
+        idleSince = nil
+        idleProbeDeadline = nil
+        nextNapDuration = slot.idleNapStart
+    }
+
+    private func armIdleProbeHoldIfNeeded() {
+        guard probingAfterNap else { return }
+        probingAfterNap = false
+        idleSince = .now
+        idleProbeDeadline = .now + slot.idleProbeHold
+    }
+
+    /**
+     * 充电宝空闲休眠。
+     *
+     * 连着待机满 `idleBeforeSleep` 就拆 GATT，让设备自己睡、手机也连得上。
+     * 过一会儿再连：连不上或连上仍待机，就回去继续睡，间隔倍增直到上限。
+     * 一旦有充放电，间隔清回起点，连接保持。
+     */
+    private func tickIdleSleep() {
+        guard slot.supportsIdleSleep, settings.powerBankIdleSleepEnabled else { return }
+        guard phase == .connected, let state = powerBankState else { return }
+        if state.isBusy {
+            idleSince = nil
+            idleProbeDeadline = nil
+            nextNapDuration = slot.idleNapStart
+            return
+        }
+        if idleSince == nil { idleSince = .now }
+        if let deadline = idleProbeDeadline {
+            if ContinuousClock.now >= deadline { enterIdleSleep() }
+            return
+        }
+        if let idleSince, ContinuousClock.now - idleSince >= slot.idleBeforeSleep {
+            enterIdleSleep()
+        }
+    }
+
+    private func enterIdleSleep() {
+        guard slot.supportsIdleSleep, desiredConnection else { return }
+        idleSleepTask?.cancel()
+        idleProbeDeadline = nil
+        idleSince = nil
+        probingAfterNap = false
+        isIdleSleeping = true
+        lastError = nil
+        destroyBluetoothSession()
+        phase = .idleSleeping
+        scheduleIdleProbe()
+    }
+
+    private func scheduleIdleProbe() {
+        let delay = nextNapDuration
+        nextNapDuration = min(delay * 2, slot.idleNapCap)
+        idleSleepTask?.cancel()
+        idleSleepTask = Task { [weak self] in
+            try? await Task.sleep(for: delay)
+            guard !Task.isCancelled, let self else { return }
+            beginIdleProbe()
+        }
+    }
+
+    private func beginIdleProbe() {
+        guard desiredConnection else { return }
+        if isSystemSleeping {
+            isIdleSleeping = true
+            phase = .idleSleeping
+            return
+        }
+        isIdleSleeping = false
+        probingAfterNap = true
+        lastError = nil
+        scheduleRetry(after: .seconds(1))
+        idleSleepTask?.cancel()
+        idleSleepTask = Task { [weak self] in
+            try? await Task.sleep(for: self?.slot.idleProbeConnectTimeout ?? .seconds(25))
+            guard !Task.isCancelled, let self else { return }
+            guard desiredConnection, phase != .connected else { return }
+            enterIdleSleep()
         }
     }
 
@@ -624,6 +750,7 @@ final class BluetoothService: NSObject, ObservableObject {
             if decoder.handleFrame(command: frame.command, payload: payload) {
                 objectWillChange.send()
                 onStateChange?()
+                tickIdleSleep()
             }
             if let pending, pending.command == frame.command {
                 pending.timeout.cancel()
@@ -710,6 +837,10 @@ extension BluetoothService: @preconcurrency CBCentralManagerDelegate {
         cancelSessionTasks()
         writeCharacteristic = nil
         notifyCharacteristic = nil
+        if isIdleSleeping {
+            phase = .idleSleeping
+            return
+        }
         phase = .disconnected
         if desiredConnection, !isSystemSleeping {
             // 例行掉线（拔掉、休眠、超出范围）两边都一样：定向重连，不写成故障。

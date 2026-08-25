@@ -184,3 +184,28 @@ import Testing
     #expect(AnkerPassportCrypto.parseHashCode("0x1da2ddca") == 0x1DA2DDCA)
     #expect(AnkerPassportCrypto.parseHashCode("43B2E02C") == 0x43B2E02C)
 }
+
+@Test func powerBankIdleIgnoresStaleVoltageAndCountsChargeOrDischarge() {
+    var idle = PowerBankState()
+    idle.batteryPercent = 80
+    idle.inputPowerW = 0
+    idle.outputPowerW = 0
+    idle.charging = false
+    idle.ports = [
+        PowerBankPort(name: "A", mode: 0, voltageV: 5.1, attached: true),
+        PowerBankPort(name: "B", mode: 0, voltageV: 12, attached: false),
+    ]
+    #expect(!idle.isBusy)
+    #expect(idle.ports[0].isEnergized)
+
+    var charging = idle
+    charging.inputPowerW = 30
+    charging.charging = true
+    charging.ports[0].mode = 2
+    #expect(charging.isBusy)
+
+    var discharging = idle
+    discharging.outputPowerW = 12
+    discharging.ports = [PowerBankPort(name: "C1", mode: 1, powerW: 12)]
+    #expect(discharging.isBusy)
+}

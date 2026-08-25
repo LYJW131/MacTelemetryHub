@@ -104,7 +104,7 @@ private struct MenuBarView: View {
     private func chargingMenuActions(_ link: BluetoothService) -> some View {
         if link.slot.isEnabled(service.settings) {
             Button("断开\(link.slot.displayName)", systemImage: "bolt.slash") { link.disconnect() }
-                .disabled(!link.isConnected)
+                .disabled(!link.desiredConnection)
             Button("重连\(link.slot.displayName)", systemImage: "arrow.clockwise") { link.reconnect() }
         }
     }

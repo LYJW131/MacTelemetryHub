@@ -7,6 +7,7 @@ usage, rather than the identity of the whole application.
 ## What the app includes
 
 - independently switchable charger, foreground-app, Apple Music, Mac timezone, and coding-usage modules
+- power-bank idle sleep: drop BLE after several minutes of no charge or discharge, then reconnect periodically to look again
 - CoreBluetooth discovery or a pinned peripheral UUID for the charger module
 - AES-GCM + ephemeral P-256 ECDH session handshake
 - account-scoped 40-character Anker user ID stored in Keychain

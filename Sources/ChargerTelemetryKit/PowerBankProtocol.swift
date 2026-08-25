@@ -73,6 +73,20 @@ public struct PowerBankState: Codable, Equatable, Sendable {
 
     public var isThermallyLimited: Bool { thermalState == 2 }
 
+    /**
+     * 正在充或放。空闲休眠看这个，不看有没有遥测帧 —— 待机时 0x0300 照样 1 Hz。
+     *
+     * 口上的残留电压（`isEnergized`）不算：A 口开着涓流、底座寄存器没清，都不是
+     * 使用者正在用。
+     */
+    public var isBusy: Bool {
+        if charging == true { return true }
+        if (inputPowerW ?? 0) > 0.05 { return true }
+        if (outputPowerW ?? 0) > 0.05 { return true }
+        if ports.contains(where: \.isActive) { return true }
+        return false
+    }
+
     public var temperatures: [Int] {
         [temperature1C, temperature2C].compactMap { $0 }
     }

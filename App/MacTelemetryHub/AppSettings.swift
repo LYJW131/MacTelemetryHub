@@ -11,6 +11,7 @@ final class AppSettings: ObservableObject {
         static let peripheralID = "peripheralID"
         static let powerBankPeripheralID = "powerBankPeripheralID"
         static let powerBankModuleEnabled = "powerBankModuleEnabled"
+        static let powerBankIdleSleepEnabled = "powerBankIdleSleepEnabled"
         static let httpServerEnabled = "httpServerEnabled"
         static let httpBindAddress = "httpBindAddress"
         static let httpPort = "httpPort"
@@ -63,6 +64,8 @@ final class AppSettings: ObservableObject {
     @Published var telemetrySecret: String
     @Published var chargerModuleEnabled: Bool
     @Published var powerBankModuleEnabled: Bool
+    /// 充电宝长时间没有充放电就断开蓝牙，隔一段时间再连上去看一眼。
+    @Published var powerBankIdleSleepEnabled: Bool
     @Published var desktopModuleEnabled: Bool
     @Published var desktopReportingBlacklist: String
     @Published var windowTitleApplicationWhitelist: String
@@ -139,6 +142,7 @@ final class AppSettings: ObservableObject {
         chargerModuleEnabled = defaults.object(forKey: Key.chargerModuleEnabled) as? Bool ?? true
         // 默认关：没配对过的机器打开它只会一直停在「未配对」。
         powerBankModuleEnabled = defaults.object(forKey: Key.powerBankModuleEnabled) as? Bool ?? false
+        powerBankIdleSleepEnabled = defaults.object(forKey: Key.powerBankIdleSleepEnabled) as? Bool ?? true
         desktopModuleEnabled = defaults.object(forKey: Key.desktopModuleEnabled) as? Bool ?? true
         desktopReportingBlacklist = defaults.string(forKey: Key.desktopReportingBlacklist) ?? ""
         windowTitleApplicationWhitelist = defaults.string(
@@ -372,6 +376,7 @@ final class AppSettings: ObservableObject {
         defaults.set(deviceID, forKey: Key.deviceID)
         defaults.set(chargerModuleEnabled, forKey: Key.chargerModuleEnabled)
         defaults.set(powerBankModuleEnabled, forKey: Key.powerBankModuleEnabled)
+        defaults.set(powerBankIdleSleepEnabled, forKey: Key.powerBankIdleSleepEnabled)
         defaults.set(desktopModuleEnabled, forKey: Key.desktopModuleEnabled)
         defaults.set(desktopReportingBlacklist, forKey: Key.desktopReportingBlacklist)
         defaults.set(windowTitleApplicationWhitelist, forKey: Key.windowTitleApplicationWhitelist)

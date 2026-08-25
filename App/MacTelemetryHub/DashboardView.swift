@@ -395,6 +395,8 @@ struct DashboardView: View {
             return "链路已停止。"
         case .disconnected:
             return "定向连接已挂起，\(link.slot.displayName)上电后会自动接入。"
+        case .idleSleeping:
+            return "长时间没有充放电，已断开蓝牙。隔一段时间会再连上去看一眼。"
         }
     }
 
