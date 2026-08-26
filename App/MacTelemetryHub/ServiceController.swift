@@ -581,6 +581,20 @@ final class ServiceController: ObservableObject {
     private var lastHeartbeatAt: Date?
     private var started = false
     private var observesPower = false
+    /**
+     * 已经宣告过离线，别再发在线的包了。
+     *
+     * 关盖时锁屏和睡眠是同时发生的两件事：`com.apple.loginwindow` 抢到前台会
+     * 排一个 400ms 的防抖，而 `willSleepNotification` 的观察者同步发出 offline。
+     * 观察者返回后系统还要几百毫秒才真的挂起，防抖恰好在这段窗口里到点，于是
+     * 那封「前台应用 = 锁屏」的信封跟在 offline 后面发了出去 —— 它的 presence
+     * 默认是 online（见 makeTelemetryEnvelope），站点每封都算一次在线心跳，
+     * 刚宣告的离线就这么被复活成「已锁屏」，一直挂到心跳窗口超时才翻回去。
+     *
+     * 站点那边修不了：迟到那封的 heartbeatAt 确实更晚，不是乱序，是这边真的
+     * 在 offline 之后又发了 online。所以宣告离线的同时把嘴闭上，`didWake` 再开。
+     */
+    private var suspended = false
 
     /// 事件驱动的模块用它把上报循环提前叫醒，不必干等到下一个周期
     private var wakeContinuation: CheckedContinuation<Void, Never>?
@@ -674,7 +688,7 @@ final class ServiceController: ObservableObject {
 
     func stop() {
         // 抢在拆掉一切之前声明离线。同步发 —— 调用方紧接着就要退出进程了。
-        sendHeartbeat("offline", blocking: true)
+        declareOffline()
         reporterTask?.cancel()
         // 循环可能正挂在 waitForNextTick 上，叫醒它才能立刻看到 cancel 并退出
         wakeReporter()
@@ -706,10 +720,13 @@ final class ServiceController: ObservableObject {
         let center = NSWorkspace.shared.notificationCenter
         center.addObserver(forName: NSWorkspace.willSleepNotification, object: nil, queue: .main) { [weak self] _ in
             // 必须同步：观察者一返回系统就接着睡了
-            MainActor.assumeIsolated { self?.sendHeartbeat("offline", blocking: true) }
+            MainActor.assumeIsolated { self?.declareOffline() }
         }
         center.addObserver(forName: NSWorkspace.didWakeNotification, object: nil, queue: .main) { [weak self] _ in
-            MainActor.assumeIsolated { self?.sendHeartbeat("online") }
+            MainActor.assumeIsolated {
+                self?.suspended = false
+                self?.sendHeartbeat("online")
+            }
         }
         /**
          * 菜单里的「退出」会先调 stop()，但 Cmd-Q、Dock 退出、注销都不走那条路，
@@ -721,8 +738,23 @@ final class ServiceController: ObservableObject {
             object: nil,
             queue: .main
         ) { [weak self] _ in
-            MainActor.assumeIsolated { self?.sendHeartbeat("offline", blocking: true) }
+            MainActor.assumeIsolated { self?.declareOffline() }
         }
+    }
+
+    /**
+     * 宣告离线，然后闭嘴。睡眠、Cmd-Q、菜单退出三条优雅离开共用这一条路。
+     *
+     * `suspended` 必须先立起来再发：那一条是阻塞发送，主线程被挡住的这几秒里
+     * 排队的防抖和上报循环都动不了，等轮到它们时看到的必须已经是闭嘴状态 ——
+     * 否则关盖那下发出去的就是 offline 后面跟一封 online（见 suspended）。
+     * 防抖顺手掐掉：光靠 suspended 拦住发送也够，但没必要让它白醒一趟。
+     */
+    private func declareOffline() {
+        suspended = true
+        desktopSettleTask?.cancel()
+        desktopSettleTask = nil
+        sendHeartbeat("offline", blocking: true)
     }
 
     func applySettings() throws {
@@ -1328,7 +1360,9 @@ final class ServiceController: ObservableObject {
                      * 心跳和数据走同一个端点、同一个 v4 信封，区别只在 modules 空不空。
                      * 于是「这台 Mac 还活着」在接收端只有一个写入点。
                      */
-                    if heartbeatDue, !dataChanged {
+                    // sendHeartbeat 自己也会拦住睡眠期间的在线心跳；这里再判一次
+                    // 只是别让门闩白推进 —— 否则醒来后还得再等满一个间隔。
+                    if heartbeatDue, !dataChanged, !suspended {
                         sendHeartbeat("online")
                         lastHeartbeatAt = Date()
                     }
@@ -1391,7 +1425,10 @@ final class ServiceController: ObservableObject {
                     // urgent 一直为真，即时上报就变成每圈一次的重试风暴。
                     let urgent = (manualMode || musicUrgent || desktopUrgent || timezoneUrgent ||
                         chargerUrgent || credentialsToSend != nil) && Date() >= backoffUntil
-                    let shouldPost = Date() >= backoffUntil && (manualMode || urgent || Date() >= nextPostAt)
+                    // 宣告过离线就不再发数据包。跳过不丢东西：lastPosted 门闩没推进，
+                    // 醒来那一下这些变化仍然是 urgent，会立刻补发。
+                    let shouldPost = !suspended && Date() >= backoffUntil &&
+                        (manualMode || urgent || Date() >= nextPostAt)
 
                     if let url, anythingChanged, shouldPost {
                         let desktopPayload: DesktopActivitySnapshot?
@@ -1827,6 +1864,9 @@ final class ServiceController: ObservableObject {
      * 发丢，也不能把睡眠拖住。发丢了还有心跳超时兜底，那条路本来就没拆。
      */
     private func sendHeartbeat(_ presence: String, blocking: Bool = false) {
+        // 宣告过离线之后只剩 offline 能发。这是「闭嘴」的唯一落实处，
+        // 拦得住上报循环的补心跳，也拦得住此后任何一条想说在线的路。
+        guard presence == "offline" || !suspended else { return }
         guard settings.postEnabled, let url = URL(string: settings.postURL) else { return }
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
