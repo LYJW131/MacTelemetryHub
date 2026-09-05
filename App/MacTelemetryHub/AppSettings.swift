@@ -26,12 +26,10 @@ final class AppSettings: ObservableObject {
         static let windowTitleApplicationWhitelist = "windowTitleApplicationWhitelist"
         static let appleMusicModuleEnabled = "appleMusicModuleEnabled"
         static let timezoneModuleEnabled = "timezoneModuleEnabled"
-        static let codexBarModuleEnabled = "codexBarModuleEnabled"
-        static let tokenTrackerBaseURL = "tokenTrackerBaseURL"
-        static let ccusageCLIPath = "ccusageCLIPath"
+        static let vibeCodingModuleEnabled = "vibeCodingModuleEnabled"
+        static let ccusageCLIPath = "codingUsageCLIPath"
         static let codingSessionRefreshInterval = "codingSessionRefreshInterval"
-        /// 从前是 codexBarCostRefreshInterval + agentLimitsRefreshInterval 两个。
-        /// 并成一个采集器之后没有「只刷限额」这回事了，旧键留着也没人读
+        /// 完整用量采集间隔；账号限额由独立上报器处理。
         static let vibeCodingUsageRefreshInterval = "vibeCodingUsageRefreshInterval"
         static let vibeCodingYearRefreshInterval = "vibeCodingYearRefreshInterval"
         static let r2Endpoint = "r2Endpoint"
@@ -71,14 +69,12 @@ final class AppSettings: ObservableObject {
     @Published var windowTitleApplicationWhitelist: String
     @Published var appleMusicModuleEnabled: Bool
     @Published var timezoneModuleEnabled: Bool
-    @Published var codexBarModuleEnabled: Bool
-    /// TokenTracker 本地面板的根地址。限额、会话、年度热力图和用量合计从它取。
-    @Published var tokenTrackerBaseURL: String
-    /// ccusage 可执行文件。各 agent 卡片上的今日 token / 费用 / HIT 从它读本地文件。
+    @Published var vibeCodingModuleEnabled: Bool
+    /// ccusage 可执行文件，读取本地完整历史与会话摘要。
     @Published var ccusageCLIPath: String
     /// 短间隔那份：此刻在不在用
     @Published var codingSessionRefreshInterval: Double
-    /// 长间隔那份：token、费用、套餐、限额，一个采集器一轮全取
+    /// 长间隔那份：全历史 token 与费用，限额由 NAS 独立采集。
     @Published var vibeCodingUsageRefreshInterval: Double
     /// 年度热力图：过去 53 周日合计。格子按天变，默认一小时。
     @Published var vibeCodingYearRefreshInterval: Double
@@ -150,25 +146,20 @@ final class AppSettings: ObservableObject {
         ) ?? ""
         appleMusicModuleEnabled = defaults.object(forKey: Key.appleMusicModuleEnabled) as? Bool ?? true
         timezoneModuleEnabled = defaults.object(forKey: Key.timezoneModuleEnabled) as? Bool ?? true
-        codexBarModuleEnabled = defaults.object(forKey: Key.codexBarModuleEnabled) as? Bool ?? false
-        // 端口是 TokenTracker 面板的默认端口；它没跑的时候限额 / 会话 / 年度
-        // 都取不到，各自留下自己的错误，不互相牵连。今日用量另走 ccusage。
-        let storedBaseURL = defaults.string(forKey: Key.tokenTrackerBaseURL) ?? ""
-        tokenTrackerBaseURL = storedBaseURL.isEmpty
-            ? environment["TOKENTRACKER_BASE_URL"] ?? "http://127.0.0.1:7680"
-            : storedBaseURL
+        vibeCodingModuleEnabled = defaults.object(forKey: Key.vibeCodingModuleEnabled) as? Bool ?? false
         let storedCcusagePath = defaults.string(forKey: Key.ccusageCLIPath) ?? ""
-        ccusageCLIPath = storedCcusagePath.hasPrefix("/") &&
+        let bundledCcusage = Bundle.main.executableURL?.deletingLastPathComponent().appendingPathComponent("ccusage").path
+        ccusageCLIPath = environment["CCUSAGE_CLI_PATH"] ?? (storedCcusagePath.hasPrefix("/") &&
             FileManager.default.isExecutableFile(atPath: storedCcusagePath)
             ? storedCcusagePath
-            : environment["CCUSAGE_CLI_PATH"]
+            : bundledCcusage.flatMap { FileManager.default.isExecutableFile(atPath: $0) ? $0 : nil }
                 ?? Self.firstExistingPath([
                     "/Users/\(NSUserName())/.hermes/node/bin/ccusage",
                     "/Users/\(NSUserName())/.local/bin/ccusage",
                     "/opt/homebrew/bin/ccusage",
                     "/usr/local/bin/ccusage",
                 ])
-                ?? ""
+                ?? "")
         let storedSessionInterval = defaults.double(forKey: Key.codingSessionRefreshInterval)
         codingSessionRefreshInterval = storedSessionInterval == 0 ? 60 : storedSessionInterval
         let storedUsageInterval = defaults.double(forKey: Key.vibeCodingUsageRefreshInterval)
@@ -308,13 +299,7 @@ final class AppSettings: ObservableObject {
                 throw SettingsError.invalidPostURL
             }
         }
-        if codexBarModuleEnabled {
-            guard let url = URL(string: tokenTrackerBaseURL),
-                  ["http", "https"].contains(url.scheme?.lowercased() ?? ""),
-                  url.host != nil
-            else {
-                throw SettingsError.invalidTokenTrackerURL
-            }
+        if vibeCodingModuleEnabled {
             guard FileManager.default.isExecutableFile(atPath: ccusageCLIPath) else {
                 throw SettingsError.invalidCcusagePath
             }
@@ -348,10 +333,6 @@ final class AppSettings: ObservableObject {
         powerBankPeripheralID = powerBankPeripheralID.trimmingCharacters(in: .whitespacesAndNewlines)
         postURL = postURL.trimmingCharacters(in: .whitespacesAndNewlines)
         telemetrySecret = telemetrySecret.trimmingCharacters(in: .whitespacesAndNewlines)
-        // 末尾斜杠去掉，拼路径时才不会出现 //functions/…
-        tokenTrackerBaseURL = tokenTrackerBaseURL
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-            .replacingOccurrences(of: "/+$", with: "", options: .regularExpression)
         ccusageCLIPath = (ccusageCLIPath as NSString).expandingTildeInPath
         r2Endpoint = r2Endpoint.trimmingCharacters(in: .whitespacesAndNewlines)
         r2Bucket = r2Bucket.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -382,8 +363,7 @@ final class AppSettings: ObservableObject {
         defaults.set(windowTitleApplicationWhitelist, forKey: Key.windowTitleApplicationWhitelist)
         defaults.set(appleMusicModuleEnabled, forKey: Key.appleMusicModuleEnabled)
         defaults.set(timezoneModuleEnabled, forKey: Key.timezoneModuleEnabled)
-        defaults.set(codexBarModuleEnabled, forKey: Key.codexBarModuleEnabled)
-        defaults.set(tokenTrackerBaseURL, forKey: Key.tokenTrackerBaseURL)
+        defaults.set(vibeCodingModuleEnabled, forKey: Key.vibeCodingModuleEnabled)
         defaults.set(ccusageCLIPath, forKey: Key.ccusageCLIPath)
         defaults.set(codingSessionRefreshInterval, forKey: Key.codingSessionRefreshInterval)
         defaults.set(vibeCodingUsageRefreshInterval, forKey: Key.vibeCodingUsageRefreshInterval)
@@ -419,7 +399,7 @@ final class AppSettings: ObservableObject {
 
 enum SettingsError: LocalizedError {
     case invalidUserID, invalidPeripheralID, invalidPort, invalidBindAddress, invalidTiming, invalidPostURL
-    case invalidTokenTrackerURL, invalidCcusagePath, invalidCodingSessionInterval
+    case invalidCcusagePath, invalidCodingSessionInterval
     case invalidVibeCodingUsageInterval
     case invalidVibeCodingYearInterval
     case invalidR2Configuration
@@ -432,10 +412,9 @@ enum SettingsError: LocalizedError {
         case .invalidBindAddress: "绑定地址必须是 IP，例如 127.0.0.1、0.0.0.0 或 ::1。"
         case .invalidTiming: "POST 间隔和超时必须大于 0。"
         case .invalidPostURL: "POST 地址必须是完整的 http:// 或 https:// URL。"
-        case .invalidTokenTrackerURL: "启用 Vibe Coding 用量时，TokenTracker 地址必须是完整的 http:// 或 https:// URL。"
         case .invalidCcusagePath: "启用 Vibe Coding 用量时，ccusage CLI 路径必须指向可执行文件。"
         case .invalidCodingSessionInterval: "会话状态刷新间隔不能低于 60 秒。"
-        case .invalidVibeCodingUsageInterval: "用量与限额刷新间隔不能低于 60 秒。"
+        case .invalidVibeCodingUsageInterval: "用量刷新间隔不能低于 60 秒。"
         case .invalidVibeCodingYearInterval: "年度热力图刷新间隔不能低于 60 秒。"
         case .invalidR2Configuration: "R2 直传配置必须同时填写 HTTPS Endpoint、Bucket、Access Key ID 和 Secret Access Key。"
         }

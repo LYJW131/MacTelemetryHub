@@ -10,6 +10,7 @@ INSTALL_DIR="${MAC_TELEMETRY_INSTALL_DIR:-$HOME/Applications}"
 DEVELOPMENT_TEAM_ID="${MAC_TELEMETRY_DEVELOPMENT_TEAM:-2VTXNMR2GL}"
 trap 'rm -rf "$STAGING_DIR"' EXIT
 
+Tools/install-ccusage.sh
 Tools/generate-icons.sh
 
 xcodebuild \

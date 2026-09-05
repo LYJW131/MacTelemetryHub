@@ -39,7 +39,7 @@ envelope and may contain only the modules that have fresh data:
   "version": 4,
   "heartbeatAt": 1760000000000,
   "presence": "online",
-  "activeModules": ["desktop", "appleMusic", "timezone", "charger", "vibeCoding"],
+  "activeModules": ["desktop", "appleMusic", "timezone", "charger", "vibeCoding", "vibeCodingYear"],
   "modules": {
     "desktop": {
       "applicationName": "Safari",
@@ -57,8 +57,8 @@ envelope and may contain only the modules that have fresh data:
 }
 ```
 
-`activeModules` lists the **toggles** the user has switched on, not the module
-keys above: vibe coding is one toggle (`vibeCoding`) that feeds three modules.
+`activeModules` lists enabled capabilities, not the payload keys above. One coding
+usage toggle enables `vibeCoding` and `vibeCodingYear`, which feed three modules.
 `charger` and `powerBank` are the exception: they are listed only while the
 toggle is on **and** the BLE link is actually connected, because their data
 comes from outside this process — a dropped link would otherwise keep the site
@@ -79,62 +79,130 @@ reporter is alive. `presence: "offline"` covers graceful exits (quit, sleep) and
 sent synchronously so it beats the disconnect; crashes, network loss, and forced
 shutdowns still rely on the site's "nothing received for a while" timeout. Both
 paths are needed; neither replaces the other.
-The POST body is deliberately bounded. The app discards TokenTracker's
-project-level details after parsing and uploads only display-ready totals
-and today's numbers. Today's token / cost / HIT on each agent card comes
-from local `ccusage`; Token inspection of full history stays in
-TokenTracker's own panel. Mac Telemetry Hub only shows the collectors' health.
+The POST body is deliberately bounded. `CodingUsageKit` reduces original local
+and cloud records to display-ready totals, today's usage, model names, and a
+compact calendar. Session identities are hashed only for local deduplication;
+session IDs, project paths, prompts, replies, and Cursor credentials are never
+included in coding telemetry.
 
 Vibe coding is split into three modules by **how often it changes**, not by which
 endpoint produced it:
 
 | Module | Interval | Contents |
 | --- | --- | --- |
-| `vibeCodingNow` | 60 s | whether each agent is in use right now, its current model, last activity time |
-| `vibeCodingUsage` | 10 min | tokens and cost for every agent, plus lifetime session count (rate limits reported by `reporters/agent-limits-reporter`) |
-| `vibeCodingYear` | 1 h (configurable) | last 53 weeks of daily totals plus a compact per-day top-5 model mix, sent as one calendar |
+| `vibeCodingNow` | 60 s | activity inferred from local session metadata, current model, and last activity time |
+| `vibeCodingUsage` | 10 min | retained token history, today's usage, API-equivalent valuation, session count, and per-source collection status |
+| `vibeCodingYear` | 1 h | 371 days from the same ledger, with daily totals and a compact top-5 model mix |
 
-There were three modules before (usage / limits / sessions), one per collector —
-a line drawn by *which command produced the data*, back when limits and usage
-came from two separate CodexBar invocations and the slow one could take the
-freshly fetched limits down with it. Rate-limit windows and plan tiers have now
-moved to the container reporter (`reporters/agent-limits-reporter` in the lyjwpage repo)
-running 24/7 on the NAS, leaving only usage and sessions here.
-The session count is spliced in at send time (`VibeCodingUsagePayload`), since
-it is counted by the other collector.
+These intervals are configurable, with a 60-second minimum. Session collection
+runs independently of the slower cloud history refresh. The calendar reads the
+local ledger without starting a second history download. Usage and session counts
+are assembled by the shared engine before upload.
+
+Plan tiers and rate-limit windows belong to the NAS container
+`reporters/agent-limits-reporter` in the lyjwpage repository. It reports through
+`/api/ingest/agents`; this app reports usage through `/api/ingest/mac` and does not
+fetch or forward those account limits.
 
 Every module is sent only when its own display content changes.
 
 ## Coding agent usage and sessions
 
-会话、年度热力图和用量合计来自本机跑着的 TokenTracker 面板，走它 SPA
-用的那套 `/functions/<名字>` 接口（各 agent 的套餐档位与服务端限额已改由 lyjwpage 仓库的
-`reporters/agent-limits-reporter` 容器上报器走 `/api/ingest/agents` 24 小时独立上报，不再由 Mac 上报）。
-各 agent 卡片上的今日 token / 费用 / HIT 改走本机 `ccusage`：它直接读各 CLI 的本地用量文件，
-不经过 TokenTracker 那份会节流的内存 queue。不上传 session ID、项目路径、提示词或回复：
+采集实现位于 `Sources/CodingUsageKit/`，App 只负责调度和显示状态。应用无需运行
+TokenTracker，也不连接它的 HTTP 面板，不读取或导入它的 queue、缓存和汇总文件。
+首次历史重建只使用本机仍存在的原始数据与 Cursor 云端目前可返回的记录。
 
-- `ccusage <source> daily --json` 覆盖 `agents[].today`（claude / codex / grok）。
-  TokenTracker 的用量接口读的是同步进内存的 queue，桌面刷新会节流，正在写的
-  JSONL 经常要等好几分钟才进今日。
-- `tokentracker-usage-daily` 给出哪几天有数据，再对每个有数据的日子问一次
-  `tokentracker-usage-model-breakdown`，合成 token/费用历史与模型排行。
-  同一条按日接口另外喂给 `vibeCodingYear`：过去 53 周的日合计一次发完；有量的日
-  子再问一次按模型拆分，编成模型表 + 每天前五的稀疏 mix。间隔单独控（默认一小
-  时），不跟用量那 10 分钟绑在一起。
-- 各 agent 的套餐档位和服务端限额窗口（从前通过 `tokentracker-usage-limits` 获取）
-  已改由 lyjwpage 仓库的 `reporters/agent-limits-reporter` 容器上报器负责。
-  信封里五个来源（见 `TelemetryModules.swift` 的 `vibeCodingAgents`：`claude`、
-  `codex`、`cursor`、`grok`、`antigravity`）走同一套 agent 形状：token、今日用量、
-  展示名和图标都在行内。
-- `tokentracker-sessions` 给出轻量的在用状态：只留模型名、最后活动时刻和条数。
-  前两样走 `vibeCodingNow`（60 秒一轮，五个来源都发）；条数是「一共开过多少次」，
-  属于累计量，搭 `vibeCodingUsage` 那份车走。
+| 来源 | 用量历史 | 会话与此刻状态 |
+| --- | --- | --- |
+| Claude、Codex、Grok、Antigravity | 固定版本的 `ccusage` 读取本机原始日志或数据库；Antigravity 使用其本地 SQLite 用量记录 | `ccusage <source> session` 的本机会话元数据 |
+| 其他被 `ccusage` 发现且支持的来源 | 同样读取本机原始历史，动态纳入按来源统计 | 同样读取本机会话元数据 |
+| Cursor | 独立 Swift reader 分页读取 Cursor 账号云端历史 | 当前没有本机会话适配器，不把云端历史冒充正在使用状态 |
 
-用量合计仍是 TokenTracker 的几个 GET；今日那一行额外跑一次 ccusage。
-TokenTracker 面板没开着时会话 / 年度各自留下自己的错误，不互相牵连。
-ccusage 路径不可执行则用量这一轮不发，留着上一次的好值。
+本地采集先通过 `ccusage daily --by-agent --json --offline` 发现来源，再按来源读取
+`daily` 和 `session`。所有日桶统一为 `Asia/Shanghai`，命令不传 `--since` 或 `--until`，
+不把“今日”或“近一年”当成累计用量的历史范围。年度图是完整账本的一个窗口。
+活动天数按所有来源中 token 大于零的日期取并集；会话数只统计实际读到且去重的本机会话。
 
-会话状态每 60 秒刷一次；用量每 10 分钟刷一次（限额由容器上报器独立上报）。
+Cursor 的 `state.vscdb` 只提供本机登录态；历史来自
+`POST https://cursor.com/api/dashboard/get-filtered-usage-events`。采集器固定本次查询的
+起止时刻，从 epoch 起请求所有可见记录，核对每一页的服务端总数。缺页、总数变化、
+异常格式、重复整页、鉴权失败或分页上限均会报错，不能作为完整历史写入。
+没有稳定事件 ID 时，只剔除服务端总数能够证明重复的相邻页边界记录。
+账号只保留基于身份的哈希，重新登录换 token 不会生成新账号；切换账号则隔离历史。
+
+用量账本默认位于
+`~/Library/Application Support/MacTelemetryHub/CodingUsage/history.json`，按来源、账号和日期
+保存聚合值，并以文件锁和原子写入保护并发刷新。一次成功的完整日桶可以接受上游更正，
+包括 token 下调；没有返回的旧活动日、失败来源和异常缩短的历史范围保留已有数据并显示诊断。
+原始日志删除、离线或云端不再返回某个月份，不会自动清空已经保存的历史。
+这不能恢复首次采集前就已丢失、且云端也不可获取的记录。
+
+Token 分列互斥：`inputTokens` 不包含缓存读写，`cacheReadTokens` 与
+`cacheCreationTokens` 分开统计；`reasoningTokens` 是 `outputTokens` 的子集，总量只加前述
+四项。Cursor JSON 的 `cacheWriteTokens` 直接映射缓存创建量。CSV 只用于严格对账，
+当前导出中的 `Input (w/ Cache Write)` 也是独立的缓存创建列，不与另一输入列相减。
+
+每个 agent 的 `usageStatus` 包含状态、上次采集时间、覆盖日期、`precision` 和
+`costComplete`。旧版 Cursor 按请求计量记录可能没有 token 分列：保留诊断，并展示已计量
+部分，不推算出虚构 token。`precision` 描述 token 的测量口径，费用本身始终是
+`apiEquivalentCostUSD`，不是订阅费、剩余额度或实际账单扣款。Cursor 按内置公开 API
+价格快照估值，不使用导出 `Cost`、`chargedCents` 或套餐扣费替代；本地来源使用 ccusage
+的 API 估值。未知模型、路由名或缺失价格保留 token，并将费用标为不完整。价格快照的
+来源、版本和适用边界见 `CodingUsagePricing.swift`；历史估值不代表逐日原始账单。
+
+### Pinned ccusage helper
+
+`Tools/install-ccusage.sh` 下载官方 ccusage CI 预览构建，固定提交为
+`51bc8650630de569e5a07f72c65a2e7de8657e11`。选择该构建是因为它包含 Antigravity SQLite
+支持。脚本按本机架构选择 `darwin-arm64` 或 `darwin-x64`，校验对应归档的 SHA-256，
+再检查 Antigravity 子命令，输出到 `.build/ccusage/ccusage`；不会修改全局 npm/Homebrew
+安装。`CCUSAGE_ARCH=arm64` 或 `x86_64` 可显式选择构建架构，需与目标 Mac 匹配。
+
+```bash
+Tools/install-ccusage.sh
+.build/ccusage/ccusage --version
+```
+
+`build-release.sh` 已在 Xcode 构建前调用安装脚本；Xcode 的 Embed ccusage 阶段将辅助程序
+复制到应用的 `Contents/MacOS/ccusage` 并签名，同时打包 ccusage、价格数据和 Cursor 适配代码
+的许可证。直接在 Xcode 运行前也需先执行安装脚本。
+
+新版采集模块使用 `vibeCodingModuleEnabled`，首次安装或从旧版升级后默认关闭，需在设置中
+明确启用。CLI 路径依次选择 `CCUSAGE_CLI_PATH` 环境变量、新的 `codingUsageCLIPath` 自定义
+设置、应用内置程序、最后才是已知系统路径。旧版保存的 `ccusageCLIPath` 不再继承，避免旧的
+全局安装覆盖支持 Antigravity 的内置构建。通常直接使用内置程序即可。
+
+### Read-only source diagnostics
+
+Swift package 提供与 App 共用采集实现的 `coding-usage`。诊断命令只读取原始来源，
+不会向站点上报；它会写入显式指定的诊断账本以及可选输出文件。使用独立目录即可与 App
+的生产账本分开检查：
+
+```bash
+mkdir -p /tmp/mac-telemetry-coding-usage
+swift run coding-usage collect \
+  --ledger /tmp/mac-telemetry-coding-usage/history.json \
+  --ccusage "$PWD/.build/ccusage/ccusage" \
+  --output /tmp/mac-telemetry-coding-usage/snapshot.json \
+  --offline
+
+swift run coding-usage snapshot \
+  --ledger /tmp/mac-telemetry-coding-usage/history.json
+
+swift run coding-usage sessions \
+  --ledger /tmp/mac-telemetry-coding-usage/history.json \
+  --ccusage "$PWD/.build/ccusage/ccusage"
+```
+
+- `--ledger` 必填；`snapshot` 只读该账本，不运行采集器，也不需要 `--ccusage`。
+- `--ccusage` 在 `collect` 和 `sessions` 中必填，指向可执行程序。
+- `--output` 可选，写入完整的 `usage`、`now`、`year` JSON；标准输出仅显示数量和来源健康摘要。
+- `collect --offline` 让 ccusage 使用已有/内置价格信息，**仍会请求 Cursor 云端历史**。
+- `collect --local-only` 跳过 Cursor；需要本地离线诊断时同时传 `--offline --local-only`。
+- `sessions` 只刷新本机会话元数据，固定使用离线价格模式，不请求 Cursor，也不重算历史 token。
+
+来源失败会进入结果的状态字段，命令仍可能正常输出；检查 `sources[].state` 与 `error`，
+不能仅凭退出码认定所有来源完整。
 
 `positionMs` in the music module is an anchor, not a stream. Paired with
 `observedAt` and `state` it lets the site interpolate the playhead on its own,
@@ -234,15 +302,15 @@ pause land in 320–490 ms, application switches in 560–620 ms.
   permission, obtains a Music User Token and a MusicKit-generated developer
   token, and sends them only to the dedicated credentials endpoint described
   below.
-- Coding usage requires the TokenTracker app running its local panel and a
-  `ccusage` CLI. Point the 设置 at TokenTracker's root address —
-  `http://127.0.0.1:7680` by default — and at the ccusage executable
-  (`/opt/homebrew/bin/ccusage` if installed with Homebrew npm). The minimum
-  local-cost refresh interval is 60 seconds.
+- Coding usage reads the original local logs/databases with the bundled `ccusage`
+  helper. Cursor cloud history uses Cursor.app's existing local login state and
+  sends its credential only to Cursor's HTTPS endpoints. Enable the coding usage
+  module and check the CLI path in Settings; no local panel URL is needed. Each
+  collection interval has a 60-second minimum.
 
 ## Open and run in Xcode
 
-1. Open `MacTelemetryHub.xcodeproj`.
+1. Run `Tools/install-ccusage.sh`, then open `MacTelemetryHub.xcodeproj`.
 2. Select the `MacTelemetryHub` target, then **Signing & Capabilities**.
 3. Select your Apple Developer team and keep **Automatically manage signing**
    enabled.
@@ -299,12 +367,16 @@ client never contains your MusicKit private key.
 ```bash
 chmod +x build-release.sh
 ./build-release.sh
-open "build/Mac Telemetry Hub.app"
+open "$HOME/Applications/Mac Telemetry Hub.app"
 ```
 
-This script makes a local ad-hoc signature. For login launch and a stable TCC
-Bluetooth grant, move the app to `/Applications` and use an Apple Development
-or Developer ID signature from Xcode.
+The script prepares the pinned ccusage helper and icons, builds with an Apple
+Development signature, installs into `~/Applications`, and verifies the signed
+bundle. Set `MAC_TELEMETRY_DEVELOPMENT_TEAM` to override the script's development
+team and `MAC_TELEMETRY_INSTALL_DIR` to choose another installation directory.
+Xcode must be able to provision that team. The diagnostic `coding-usage` command
+is a separate Swift package executable; the app bundles the ccusage helper and
+links `CodingUsageKit` directly.
 
 ## Login launch
 
@@ -339,4 +411,7 @@ swift test
 
 Tests cover the Python-compatible AES-GCM frame vector, fragmented FF09 frame
 assembly, user-ID injection, live port/cable/device parsing, and the fixed
-minimal JSON response.
+minimal JSON response. `CodingUsageKitTests` additionally covers source parsing,
+token/cache/reasoning invariants, Cursor pagination and CSV formats, price
+completeness, historical correction and retention, account isolation, process
+cancellation, and engine-to-ledger mapping without real credentials or network.

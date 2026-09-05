@@ -30,6 +30,10 @@
 		B10000000000000000000027 /* AnkerCloudClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = F10000000000000000000027 /* AnkerCloudClient.swift */; };
 		B10000000000000000000028 /* ChargerCoverController.swift in Sources */ = {isa = PBXBuildFile; fileRef = F10000000000000000000028 /* ChargerCoverController.swift */; };
 		B10000000000000000000029 /* MusicPlayingQueue.swift in Sources */ = {isa = PBXBuildFile; fileRef = F10000000000000000000029 /* MusicPlayingQueue.swift */; };
+		B10000000000000000000030 /* CodingUsageKit in Frameworks */ = {isa = PBXBuildFile; productRef = P10000000000000000000001 /* CodingUsageKit */; };
+		B10000000000000000000031 /* CodingUsageMonitors.swift in Sources */ = {isa = PBXBuildFile; fileRef = F10000000000000000000031 /* CodingUsageMonitors.swift */; };
+		B10000000000000000000032 /* ccusage in Helpers */ = {isa = PBXBuildFile; fileRef = F10000000000000000000032 /* ccusage */; settings = {ATTRIBUTES = (CodeSignOnCopy, ); }; };
+		B10000000000000000000033 /* ccusage license in Resources */ = {isa = PBXBuildFile; fileRef = F10000000000000000000033 /* ccusage license */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -59,16 +63,31 @@
 		F10000000000000000000027 /* AnkerCloudClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AnkerCloudClient.swift; sourceTree = "<group>"; };
 		F10000000000000000000028 /* ChargerCoverController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChargerCoverController.swift; sourceTree = "<group>"; };
 		F10000000000000000000029 /* MusicPlayingQueue.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MusicPlayingQueue.swift; sourceTree = "<group>"; };
+		F10000000000000000000031 /* CodingUsageMonitors.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CodingUsageMonitors.swift; sourceTree = "<group>"; };
+		F10000000000000000000032 /* ccusage */ = {isa = PBXFileReference; lastKnownFileType = "compiled.mach-o.executable"; path = .build/ccusage/ccusage; sourceTree = SOURCE_ROOT; };
+		F10000000000000000000033 /* ccusage license */ = {isa = PBXFileReference; lastKnownFileType = text; path = "Resources/ccusage-LICENSE.txt"; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
 		A10000000000000000000003 /* Frameworks */ = {
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
-			files = ();
+			files = (B10000000000000000000030 /* CodingUsageKit in Frameworks */, );
 			runOnlyForDeploymentPostprocessing = 0;
 		};
 /* End PBXFrameworksBuildPhase section */
+
+/* Begin PBXCopyFilesBuildPhase section */
+		A10000000000000000000040 /* Embed ccusage */ = {
+			isa = PBXCopyFilesBuildPhase;
+			buildActionMask = 2147483647;
+			dstPath = "";
+			dstSubfolderSpec = 6;
+			files = (B10000000000000000000032 /* ccusage in Helpers */, );
+			name = "Embed ccusage";
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXCopyFilesBuildPhase section */
 
 /* Begin PBXGroup section */
 		A10000000000000000000001 = {
@@ -77,6 +96,7 @@
 				A10000000000000000000010 /* MacTelemetryHub */,
 				A10000000000000000000011 /* ChargerTelemetryKit */,
 				A10000000000000000000012 /* Products */,
+				F10000000000000000000032 /* ccusage */,
 			);
 			sourceTree = "<group>";
 		};
@@ -92,6 +112,8 @@
 				F10000000000000000000007 /* SettingsView.swift */,
 				F10000000000000000000008 /* UIComponents.swift */,
 				F10000000000000000000010 /* TelemetryModules.swift */,
+				F10000000000000000000031 /* CodingUsageMonitors.swift */,
+				F10000000000000000000033 /* ccusage license */,
 				F10000000000000000000012 /* AppleMusicAuthorization.swift */,
 				F1000000000000000000000D /* Info.plist */,
 				F1000000000000000000000F /* Assets.xcassets */,
@@ -135,10 +157,12 @@
 				A10000000000000000000002 /* Sources */,
 				A10000000000000000000003 /* Frameworks */,
 				A10000000000000000000004 /* Resources */,
+				A10000000000000000000040 /* Embed ccusage */,
 			);
 			buildRules = ();
 			dependencies = ();
 			name = MacTelemetryHub;
+			packageProductDependencies = (P10000000000000000000001 /* CodingUsageKit */, );
 			productName = "Mac Telemetry Hub";
 			productReference = F1000000000000000000000E /* Mac Telemetry Hub.app */;
 			productType = "com.apple.product-type.application";
@@ -161,6 +185,7 @@
 			knownRegions = (zh_CN, en, Base);
 			mainGroup = A10000000000000000000001;
 			productRefGroup = A10000000000000000000012 /* Products */;
+			packageReferences = (L10000000000000000000001 /* Local package */, );
 			projectDirPath = "";
 			projectRoot = "";
 			targets = (A10000000000000000000020 /* MacTelemetryHub */);
@@ -173,6 +198,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				B1000000000000000000000D /* Assets.xcassets in Resources */,
+				B10000000000000000000033 /* ccusage license in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -192,6 +218,7 @@
 				B10000000000000000000007 /* SettingsView.swift in Sources */,
 				B10000000000000000000008 /* UIComponents.swift in Sources */,
 				B10000000000000000000010 /* TelemetryModules.swift in Sources */,
+				B10000000000000000000031 /* CodingUsageMonitors.swift in Sources */,
 				B10000000000000000000012 /* AppleMusicAuthorization.swift in Sources */,
 				B10000000000000000000009 /* A2687Crypto.swift in Sources */,
 				B1000000000000000000000A /* A2687Protocol.swift in Sources */,
@@ -210,6 +237,14 @@
 			runOnlyForDeploymentPostprocessing = 0;
 		};
 /* End PBXSourcesBuildPhase section */
+
+/* Begin XCLocalSwiftPackageReference section */
+		L10000000000000000000001 /* Local package */ = {isa = XCLocalSwiftPackageReference; relativePath = .; };
+/* End XCLocalSwiftPackageReference section */
+
+/* Begin XCSwiftPackageProductDependency section */
+		P10000000000000000000001 /* CodingUsageKit */ = {isa = XCSwiftPackageProductDependency; productName = CodingUsageKit; };
+/* End XCSwiftPackageProductDependency section */
 
 /* Begin XCBuildConfiguration section */
 		C10000000000000000000001 /* Debug */ = {

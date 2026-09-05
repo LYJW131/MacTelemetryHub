@@ -358,26 +358,20 @@ struct SettingsView: View {
                     .toggleStyle(.switch)
             }
 
-            settingSection("Vibe Coding 用量", detail: "今日 token、费用和 HIT 走 ccusage，直接读各 CLI 的本地文件；限额、会话、年度热力图和合计仍走 TokenTracker 本地面板。不会上传 session ID、项目路径、提示词或回复。", icon: "terminal") {
-                Toggle("启用 TokenTracker", isOn: $settings.codexBarModuleEnabled)
+            settingSection("Vibe Coding 用量", detail: "ccusage 读取本地完整用量与会话；Cursor 直接同步账号云端历史。Mac 保存历史并统一上报摘要，限额由 NAS 独立上报。不会上传 session ID、项目路径、提示词或回复。", icon: "terminal") {
+                Toggle("启用用量采集", isOn: $settings.vibeCodingModuleEnabled)
                     .toggleStyle(.switch)
 
-                if settings.codexBarModuleEnabled {
+                if settings.vibeCodingModuleEnabled {
                     VStack(alignment: .leading, spacing: 12) {
                         monoField(
-                            title: "TokenTracker 地址",
-                            detail: "限额、会话和年度热力图从它的本地面板取；面板没开着时这三份都取不到",
-                            text: $settings.tokenTrackerBaseURL,
-                            placeholder: "http://127.0.0.1:7680"
-                        )
-                        monoField(
                             title: "ccusage CLI",
-                            detail: "各 agent 卡片上的今日 token / 费用 / HIT；它读文件，不经过 TokenTracker 那份会节流的内存 queue",
+                            detail: "默认使用随应用附带的版本；自定义 CLI 需支持 Antigravity",
                             text: $settings.ccusageCLIPath,
-                            placeholder: "/opt/homebrew/bin/ccusage"
+                            placeholder: "应用内置 ccusage 的绝对路径"
                         )
                         NumericField(title: "会话状态刷新", unit: "秒（最少 60）", placeholder: "60", value: $settings.codingSessionRefreshInterval)
-                        NumericField(title: "用量与限额刷新", unit: "秒（最少 60）", placeholder: "600", value: $settings.vibeCodingUsageRefreshInterval)
+                        NumericField(title: "用量刷新", unit: "秒（最少 60）", placeholder: "600", value: $settings.vibeCodingUsageRefreshInterval)
                         NumericField(title: "年度热力图刷新", unit: "秒（最少 60）", placeholder: "3600", value: $settings.vibeCodingYearRefreshInterval)
                     }
                     .padding(.top, 5)

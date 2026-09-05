@@ -482,14 +482,14 @@ struct DashboardView: View {
             ModuleStatusCard(
                 title: "会话状态",
                 icon: "terminal",
-                enabled: service.settings.codexBarModuleEnabled,
+                enabled: service.settings.vibeCodingModuleEnabled,
                 value: codingSessions.lastSuccess == nil ? "等待扫描" : "扫描完成",
                 detail: codingSessions.lastError
                     ?? codingSessions.lastSuccess?.formatted(date: .omitted, time: .standard),
                 action: { Task { await service.refreshVibeCodingSessionsNow() } },
                 actionIcon: "arrow.clockwise",
-                actionHelp: "重新读取 TokenTracker 会话状态并上报",
-                actionEnabled: service.settings.codexBarModuleEnabled,
+                actionHelp: "重新读取本地会话状态并上报",
+                actionEnabled: service.settings.vibeCodingModuleEnabled,
                 isReporting: service.isRefreshingVibeCodingSessions
                     || service.isManualReportInFlight(.vibeCoding),
                 feedback: service.isRefreshingVibeCodingSessions
@@ -500,14 +500,14 @@ struct DashboardView: View {
             ModuleStatusCard(
                 title: "用量",
                 icon: "chart.bar",
-                enabled: service.settings.codexBarModuleEnabled,
+                enabled: service.settings.vibeCodingModuleEnabled,
                 value: vibeCodingUsageCollector.lastSuccess == nil ? "等待统计" : "聚合完成",
                 detail: vibeCodingUsageCollector.lastError
                     ?? vibeCodingUsageCollector.lastSuccess?.formatted(date: .omitted, time: .standard),
                 action: { Task { await service.refreshVibeCodingUsageNow() } },
                 actionIcon: "arrow.clockwise",
-                actionHelp: "重新读取 ccusage 今日用量并上报",
-                actionEnabled: service.settings.codexBarModuleEnabled,
+                actionHelp: "重新统计本地与 Cursor 云端完整历史并上报",
+                actionEnabled: service.settings.vibeCodingModuleEnabled,
                 isReporting: service.isRefreshingVibeCodingUsage
                     || service.isManualReportInFlight(.vibeCoding),
                 feedback: service.isRefreshingVibeCodingUsage
@@ -518,14 +518,14 @@ struct DashboardView: View {
             ModuleStatusCard(
                 title: "年度用量",
                 icon: "calendar",
-                enabled: service.settings.codexBarModuleEnabled,
+                enabled: service.settings.vibeCodingModuleEnabled,
                 value: vibeCodingYearCollector.lastSuccess == nil ? "等待日历" : "已采集",
                 detail: vibeCodingYearCollector.lastError
                     ?? vibeCodingYearCollector.lastSuccess?.formatted(date: .omitted, time: .standard),
                 action: { Task { await service.refreshVibeCodingYearNow() } },
                 actionIcon: "arrow.clockwise",
                 actionHelp: "重新读取过去 53 周的日合计并上报",
-                actionEnabled: service.settings.codexBarModuleEnabled,
+                actionEnabled: service.settings.vibeCodingModuleEnabled,
                 isReporting: service.isRefreshingVibeCodingYear
                     || service.isManualReportInFlight(.vibeCodingYear),
                 feedback: service.isRefreshingVibeCodingYear
