@@ -38,9 +38,12 @@ enum JSONValue: Codable, Equatable, Sendable {
 /**
  * TokenTracker 本机面板的接口。
  *
- * 限额、会话、年度热力图和用量合计从这里取。各 agent 卡片上的今日 token /
- * 费用 / HIT 改走 ccusage：TokenTracker 的用量接口读的是它同步进内存的
- * queue，桌面刷新会节流，正在写的 JSONL 经常要等好几分钟才进今日。
+ * 会话、年度热力图和用量合计从这里取。各 agent 的套餐与服务端限额
+ * 已改由 NAS 上的容器上报器（reporters/agent-limits-reporter）
+ * 走 `/api/ingest/agents` 独立上报。
+ * 各 agent 卡片上的今日 token / 费用 / HIT 改走 ccusage：TokenTracker
+ * 的用量接口读的是它同步进内存的 queue，桌面刷新会节流，正在写的
+ * JSONL 经常要等好几分钟才进今日。
  *
  * 走的是它面板 SPA 用的那套 `functions` 接口，不是它文档里承诺的 CLI：形状
  * 随版本变的风险更大，坏掉的表现是某一块数据变空而不是报错。
@@ -97,8 +100,7 @@ private enum TokenTrackerAPI {
 }
 
 /**
- * 信封里五个来源同一形状。站点按 id 决定展示形态：`claude` / `grok` 画全量面板，
- * 其余只取限额那一行。加一个来源只动这个数组。
+ * 信封里五个来源同一形状。加一个来源只动这个数组。
  *
  * `icon` 是牌子，不是 TokenTracker 的来源键：id 是上游那份数据里的名字，
  * 这个是站点图标注册表的键，认不出来的退回首字母。
@@ -368,16 +370,12 @@ struct TelemetryModulesPayload: Encodable, Sendable {
      *
      * - `vibeCodingNow`：此刻在不在用、用的是哪个模型。60 秒一轮，站点收到就推
      *   给浏览器。
-     * - `vibeCodingUsage`：token、费用、套餐、限额、会话总数 —— 全是累计
-     *   事实，十几分钟才动一次，站点只拿它刷缓存。今日那一行的 token / 费用 /
-     *   HIT 来自 ccusage，合计、模型和限额仍来自 TokenTracker。
+     * - `vibeCodingUsage`：token、费用、会话总数 —— 全是累计事实，十几分钟才动一次，
+     *   站点只拿它刷缓存。今日那一行的 token / 费用 / HIT 来自 ccusage，合计与模型
+     *   来自 TokenTracker。各 agent 的套餐与服务端限额已改由 NAS 上的容器上报器
+     *   （reporters/agent-limits-reporter）走 `/api/ingest/agents` 独立上报。
      *
-     * 从前是三个：用量、限额、会话状态各一个，一个采集器一个。那条线是按「哪条
-     * 命令产出的」划的 —— 当年限额和用量分别来自 CodexBar 的两条命令，其中那条
-     * 十几秒的扫描一失败，同一轮刚取到的限额也跟着发不出去。如今限额和合计仍
-     * 来自 TokenTracker，今日用量单独 overlay 一层 ccusage，采集器还是两个：
-     * 一个模块一个采集器一个间隔。
-     *
+     * 会话状态与用量各一个采集器、一个间隔。
      * 唯一的例外是会话总数：数出它的是短间隔那个采集器，但它是累计量，归这份
      * 发 —— 发信封那一刻才补进去，见 VibeCodingUsagePayload.withSessionCount。
      *
@@ -1112,293 +1110,18 @@ extension DesktopActivitySnapshot {
 }
 
 
-struct AgentLimitWindow: Codable, Equatable, Sendable {
-    /// 桶 + 窗口的稳定标识，如 "codex.primary" / "weekly_scoped"
-    let key: String
-    /// 桶名 / 作用域名，如 "GPT-5.3-Codex-Spark" / "Fable"；没有就 nil
-    let label: String?
-    /**
-     * 来源方给的粗分组，如 "session" / "weekly"。
-     *
-     * 和 `windowMinutes` 是互补的：Codex 给分钟数不给分组，Claude 给分组不给时长，
-     * 两个都可能为 nil 但不会同时为 nil —— UI 就靠这个不变量出窗口名。
-     * 不许由 group 反推分钟数，「session 就是 5 小时」是猜的。
-     */
-    let group: String?
-    let windowMinutes: Int?
-    let usedPercent: Double
-    /// Unix 秒
-    let resetsAt: Int64?
-}
-
-struct AgentPlanSnapshot: Codable, Equatable, Sendable {
-    /// 后端原始值，如 "prolite" / "Max"。上游不报套餐时为 nil，页面上那一格不渲染
-    let tier: String?
-    /// 展示名，如 "Pro Lite"。tier 为 nil 时同样为 nil
-    let label: String?
-    let limits: [AgentLimitWindow]
-}
-
-/// Providers report raw plan enums ("prolite"). Preserve the display labels used
-/// before the collector migrations so changing sources does not leak enum IDs into
-/// the website.
-func agentPlanLabel(agent: String, tier: String) -> String {
-    switch agent {
-    case "codex":
-        switch tier.lowercased() {
-        case "free": return "Free"
-        case "go": return "Go"
-        case "plus": return "Plus"
-        case "pro": return "Pro"
-        case "prolite": return "Pro Lite"
-        case "team": return "Team"
-        case "business": return "Business"
-        case "enterprise": return "Enterprise"
-        case "edu": return "Edu"
-        default: return tier
-        }
-    case "claude":
-        if tier.hasPrefix("Claude ") {
-            return String(tier.dropFirst("Claude ".count))
-        }
-        switch tier {
-        case "default_claude_max_5x": return "Max 5x"
-        case "default_claude_max_20x": return "Max 20x"
-        case "default_claude_pro": return "Pro"
-        case "claude_max": return "Max"
-        case "claude_pro": return "Pro"
-        case "claude_free": return "Free"
-        default: return tier
-        }
-    default:
-        return tier
-    }
-}
-
-private struct AgentLimitsOutcome: Sendable {
-    let plans: [String: AgentPlanSnapshot]
-    let errors: [String]
-    /// 按 agent 分开的限额失败原因，要跟着载荷发给网页 —— 页面得能把
-    /// 「这个 agent 没配」和「配了但取不到」分开，两者都是空数组。
-    let limitErrors: [String: String]
-}
-
-private enum AgentLimitsCollector {
-    /**
-     * 套餐与限额窗口，一次请求全拿到。
-     *
-     * TokenTracker 的 `usage-limits` 一次给十三家，信封里那五个来源都在里面 ——
-     * 从前是四条 CodexBar 命令并发跑，任意一条挂掉都要单独兜底。
-     * 现在整条挂了就是整条挂了，每家各自留下自己的 error。
-     *
-     * 每家还带 `configured`：没配就是没配，不算失败 —— 页面据此整块不渲染，
-     * 和「配了但取不到」分得开。
-     */
-    nonisolated static func collect(baseURL: String) async -> AgentLimitsOutcome {
-        let root: [String: Any]
-        do {
-            guard let object = try await TokenTrackerAPI.get(
-                baseURL: baseURL,
-                function: "tokentracker-usage-limits"
-            ) as? [String: Any] else {
-                throw TelemetryModuleError.tokenTracker("usage-limits 输出不是对象")
-            }
-            root = object
-        } catch {
-            let message = error.localizedDescription
-            return AgentLimitsOutcome(
-                plans: [:],
-                errors: [message],
-                limitErrors: Dictionary(
-                    uniqueKeysWithValues: vibeCodingAgentIDs.map { ($0, message) }
-                )
-            )
-        }
-
-        var plans: [String: AgentPlanSnapshot] = [:]
-        var errors: [String] = []
-        var limitErrors: [String: String] = [:]
-
-        for provider in vibeCodingAgentIDs {
-            guard let node = root[provider] as? [String: Any] else { continue }
-            if let failure = (node["error"] as? String)?.nilIfEmpty {
-                let message = "TokenTracker \(provider)：\(failure)"
-                errors.append(message)
-                limitErrors[provider] = message
-                continue
-            }
-            // 没配的那几家直接跳过：不是失败，页面上整块不渲染
-            guard node["configured"] as? Bool ?? false else { continue }
-
-            let windows: [AgentLimitWindow]
-            switch provider {
-            case "claude": windows = claudeWindows(node)
-            case "codex": windows = codexWindows(node)
-            default: windows = genericWindows(provider: provider, node: node)
-            }
-            let tier = planTier(provider: provider, node: node)
-            plans[provider] = AgentPlanSnapshot(
-                tier: tier,
-                label: tier.map { agentPlanLabel(agent: provider, tier: $0) },
-                limits: windows
-            )
-            if windows.isEmpty {
-                let message = "TokenTracker \(provider) 响应里没有限额窗口"
-                errors.append(message)
-                limitErrors[provider] = message
-            }
-        }
-        return AgentLimitsOutcome(plans: plans, errors: errors, limitErrors: limitErrors)
-    }
-
-    /**
-     * Claude 的窗口按名字给，不给时长。
-     *
-     * `five_hour` / `seven_day` 这两个名字本身就是时长声明，站点那边要拿分钟数
-     * 算窗口名（「5-hour limit」「Weekly」），所以在这里翻译成 300 / 10080。
-     * 这不是「由分组反推时长」那种猜测 —— 字段名说的就是五小时和七天。
-     */
-    nonisolated private static func claudeWindows(_ node: [String: Any]) -> [AgentLimitWindow] {
-        var windows: [AgentLimitWindow] = []
-        if let five = node["five_hour"] as? [String: Any] {
-            windows.append(window(key: "claude.primary", label: nil, minutes: 300, node: five))
-        }
-        let weekly = node["seven_day"] as? [String: Any]
-        if let weekly {
-            windows.append(window(key: "weekly_all", label: nil, minutes: 10_080, node: weekly))
-        }
-        // 作用域周额度（Fable / Opus）不带自己的重置时刻，它跟总的周窗口同时翻篇。
-        // 从前 CodexBar 那版也是拿总周窗口的时刻补上的，页面上那行的倒计时靠它。
-        let weeklyReset = weekly.flatMap { TokenTrackerAPI.unixSeconds(resetValue($0)) }
-        if let opus = node["seven_day_opus"] as? [String: Any] {
-            windows.append(window(
-                key: "claude-weekly-scoped-opus",
-                label: "Opus only",
-                minutes: 10_080,
-                node: opus,
-                fallbackReset: weeklyReset
-            ))
-        }
-        for scoped in node["weekly_scoped"] as? [[String: Any]] ?? [] {
-            guard let name = (scoped["label"] as? String)?.nilIfEmpty else { continue }
-            windows.append(window(
-                key: "claude-weekly-scoped-\(name.lowercased())",
-                label: "\(name) only",
-                minutes: 10_080,
-                node: scoped,
-                fallbackReset: weeklyReset
-            ))
-        }
-        return windows
-    }
-
-    /// Codex 反过来：窗口自带 `limit_window_seconds`，名字里没有时长。
-    /// Spark 是和主额度并列的独立配额，不是它的子集，所以各占一行。
-    nonisolated private static func codexWindows(_ node: [String: Any]) -> [AgentLimitWindow] {
-        let slots: [(key: String, label: String?, field: String)] = [
-            ("codex.primary", nil, "primary_window"),
-            ("codex.secondary", nil, "secondary_window"),
-            ("codex-spark-session", "Codex Spark 5h", "spark_primary_window"),
-            ("codex-spark-weekly", "Codex Spark Weekly", "spark_secondary_window"),
-        ]
-        return slots.compactMap { slot in
-            guard let value = node[slot.field] as? [String: Any] else { return nil }
-            return window(key: slot.key, label: slot.label, minutes: minutes(value), node: value)
-        }
-    }
-
-    /**
-     * 其余几家的窗口都在 primary / secondary / tertiary / quaternary 槽里。
-     *
-     * 全部送出去，不在这里按展示形态挑一条 —— 那是站点 compact 行自己的事
-     *（用量最高的那一扇）。加一列明细不该再改信封。
-     */
-    nonisolated private static func genericWindows(
-        provider: String,
-        node: [String: Any]
-    ) -> [AgentLimitWindow] {
-        let slots: [(suffix: String, field: String)] = [
-            ("primary", "primary_window"),
-            ("secondary", "secondary_window"),
-            ("tertiary", "tertiary_window"),
-            ("quaternary", "quaternary_window"),
-        ]
-        return slots.compactMap { slot in
-            guard let value = node[slot.field] as? [String: Any] else { return nil }
-            return window(
-                key: "\(provider).\(slot.suffix)",
-                label: (value["label"] as? String)?.nilIfEmpty,
-                minutes: minutes(value),
-                node: value
-            )
-        }
-    }
-
-    nonisolated private static func window(
-        key: String,
-        label: String?,
-        minutes: Int?,
-        node: [String: Any],
-        fallbackReset: Int64? = nil
-    ) -> AgentLimitWindow {
-        AgentLimitWindow(
-            key: key,
-            label: label,
-            group: nil,
-            windowMinutes: minutes,
-            usedPercent: percent(node),
-            resetsAt: TokenTrackerAPI.unixSeconds(resetValue(node)) ?? fallbackReset
-        )
-    }
-
-    /// Claude 那几个窗口叫 `utilization`，其余几家叫 `used_percent`
-    nonisolated private static func percent(_ node: [String: Any]) -> Double {
-        TokenTrackerAPI.number(node["utilization"] ?? node["used_percent"])
-    }
-
-    /// 同理，Claude 是 `resets_at`，其余几家是 `reset_at`
-    nonisolated private static func resetValue(_ node: [String: Any]) -> Any? {
-        node["resets_at"] ?? node["reset_at"]
-    }
-
-    nonisolated private static func minutes(_ node: [String: Any]) -> Int? {
-        let seconds = TokenTrackerAPI.number(node["limit_window_seconds"])
-        return seconds > 0 ? Int(seconds / 60) : nil
-    }
-
-    /// Codex 报的是枚举值（"prolite"），其余几家直接给展示名；都为空就是没有套餐信息
-    nonisolated private static func planTier(provider: String, node: [String: Any]) -> String? {
-        if provider == "codex" {
-            return (node["plan_type"] as? String)?.nilIfEmpty
-                ?? (node["plan_label"] as? String)?.nilIfEmpty
-        }
-        return (node["plan_label"] as? String)?.nilIfEmpty
-    }
-
-}
-
 /**
- * 长间隔那份的采集器：token / 费用，加上套餐与限额，一轮转出一整个
- * `vibeCodingUsage` 载荷（只差会话总数，那个发信封时才补，见
- * `VibeCodingUsagePayload.withSessionCount`）。
+ * 长间隔那份的采集器：token / 费用，一轮转出一整个 `vibeCodingUsage` 载荷
+ *（只差会话总数，那个发信封时才补，见 `VibeCodingUsagePayload.withSessionCount`）。
  *
- * 从前限额单独一个采集器、单独一个模块。那条线是按「哪条命令产出的」划的 ——
- * 当年用量来自 CodexBar 一条要跑十几秒的扫描，它一失败会把同一轮刚取到的限额
- * 一起拖下水，拆开才有意义。如今限额和合计仍是 TokenTracker 上的 GET，今日
- * token / 费用 / HIT 额外 overlay 一层 ccusage，跟着同一个间隔转。
+ * 各 agent 的套餐与服务端限额已拆由 NAS 上的容器上报器（reporters/agent-limits-reporter）
+ * 走 `/api/ingest/agents` 24 小时独立上报，这里只管用量。
  *
- * 并成一个采集器**不等于共命**，两半的失败各走各的：
- *
- * - **限额挂了**：用量照发。限额沿用上一次的好值，并带上 limitsError ——
- *   页面据此把「没配」和「配了但取不到」分开，两者都是空数组。
- * - **用量挂了**：整轮不发。限额是按 id 贴在 agents 上的，站点那边没有主干就
- *   没有 agents 可贴，硬发出去也是整份被判废。限额仍然收进状态，下一轮用量
- *   成功时一起出去。
+ * 用量合计仍是 TokenTracker 上的 GET，今日 token / 费用 / HIT 额外 overlay 一层
+ * ccusage，跟着同一个间隔转。用量挂了则整轮不发。
  */
 @MainActor
 final class VibeCodingUsageMonitor: ObservableObject {
-    /// 各 provider 最近一次取到的套餐与限额窗口。这一轮取不到就留着上次的好值
-    @Published private(set) var plans: [String: AgentPlanSnapshot] = [:]
     @Published private(set) var uploadPayload: JSONValue?
     /// 载荷真正变化的时刻，判变门闩看它 —— 理由同 CodingSessionMonitor。
     /// 这份载荷带着 `collectedAt`，所以每采一次都算变化，仍是一个间隔发一次。
@@ -1406,10 +1129,6 @@ final class VibeCodingUsageMonitor: ObservableObject {
     @Published private(set) var lastSuccess: Date?
     /// 用量那半的失败原因。它挂了就整轮不发，所以这条为空才谈得上有新数据
     @Published private(set) var lastError: String?
-    /// 限额那半的失败原因，合成一句给界面看；按 provider 分开的那份在 limitErrors 里
-    @Published private(set) var limitsError: String?
-    /// 按 provider 分开的限额失败原因，随载荷发给网页 —— 页面要能把「没配」和「取不到」分开
-    @Published private(set) var limitErrors: [String: String] = [:]
     /// 载荷变化时叫醒上报循环。采集不再挂在那条循环上，所以得跟前台应用、
     /// 音乐一样自己回头敲一下门。
     var onChange: (() -> Void)?
@@ -1419,13 +1138,10 @@ final class VibeCodingUsageMonitor: ObservableObject {
     private var lastAttempt: Date?
 
     func stop() {
-        plans = [:]
         uploadPayload = nil
         payloadUpdatedAt = nil
         lastSuccess = nil
         lastError = nil
-        limitsError = nil
-        limitErrors = [:]
         lastAttempt = nil
         refreshing = false
     }
@@ -1445,13 +1161,10 @@ final class VibeCodingUsageMonitor: ObservableObject {
         lastAttempt = Date()
         defer { refreshing = false }
 
-        // 三份并发：限额一次 GET，TokenTracker 用量要两百多次，ccusage 读本地
-        // 文件大约一秒。串着跑等于白等。
+        // 两份并发：TokenTracker 用量要两百多次，ccusage 读本地文件大约一秒。
+        // 串着跑等于白等。
         async let usageTask = TokenTrackerUsageCollector.collect(baseURL: baseURL)
         async let ccusageTask = CcusageTodayCollector.collect(cliPath: ccusageCLIPath)
-        // 限额那条自己吞错误、把原因分到各 provider 上，所以先接它，
-        // 不管用量成不成都先把状态收下
-        applyLimits(await AgentLimitsCollector.collect(baseURL: baseURL))
 
         let usage: VibeCodingUsageCollection
         let ccusage: CcusageTodayOutcome
@@ -1464,7 +1177,7 @@ final class VibeCodingUsageMonitor: ObservableObject {
         lastError = ccusage.errors.isEmpty ? nil : ccusage.errors.joined(separator: "；")
 
         let payload = VibeCodingUsagePayload.withCcusageToday(
-            VibeCodingUsagePayload.withLimits(usage.uploadPayload, limits: limitsPayload()),
+            usage.uploadPayload,
             ccusage.today
         )
         if uploadPayload != payload {
@@ -1475,136 +1188,20 @@ final class VibeCodingUsageMonitor: ObservableObject {
         lastSuccess = Date()
         return true
     }
-
-    /// 把这一轮的限额收进状态：取到的更新，没取到的留着上次的好值。
-    private func applyLimits(_ outcome: AgentLimitsOutcome) {
-        // 内容没变就留着旧快照，下游（上传门闩、@Published 订阅者）才不会被
-        // 每一轮采集都惊动一次。
-        var fresh = outcome.plans
-        // 某一 provider 本轮完全失败时也保留它上次的好值；错误通过
-        // limitErrors 单独标记。统一命令的一边失败不能把另一边或旧快照清掉。
-        for agent in vibeCodingAgentIDs where fresh[agent] == nil {
-            if outcome.limitErrors[agent] != nil, let previous = plans[agent] {
-                fresh[agent] = previous
-            }
-        }
-        for (agent, snapshot) in fresh {
-            /**
-             * 这一轮没取到限额时，沿用上一次拿到的那几条，不要清空。
-             *
-             * 清空会让页面上那几根条整个消失 —— 而「取不到」和「没有限额」是
-             * 两回事，前者该继续显示上次的值并标明它不是当前值。失败原因走
-             * limitErrors 单独送出去，页面据此决定怎么标。
-             */
-            var merged = snapshot
-            if snapshot.limits.isEmpty,
-               outcome.limitErrors[agent] != nil,
-               let previous = plans[agent], !previous.limits.isEmpty {
-                merged = AgentPlanSnapshot(
-                    tier: snapshot.tier,
-                    label: snapshot.label,
-                    limits: previous.limits
-                )
-            }
-            if let previous = plans[agent], previous == merged {
-                fresh[agent] = previous
-            } else {
-                fresh[agent] = merged
-            }
-        }
-        plans = fresh
-        limitsError = outcome.errors.isEmpty ? nil : outcome.errors.joined(separator: "；")
-        limitErrors = outcome.limitErrors
-    }
-
-    /**
-     * 限额那半的载荷。全都失败时也要发：空 limits 加上 limitsError 才是
-     * 「配了但取不到」，什么都不发在站点那边和「没配」长得一模一样。
-     *
-     * 五个来源同一形状，按 id 贴到用量那份的 agents 上。展示名和图标在用量
-     * 那一行里，这里只补套餐和窗口。
-     */
-    private func limitsPayload() -> JSONValue? {
-        if plans.isEmpty && limitErrors.isEmpty { return nil }
-        func windows(_ limits: [AgentLimitWindow]) -> JSONValue {
-            .array(limits.map { window in
-                .object([
-                    "key": .string(window.key),
-                    "label": window.label.map(JSONValue.string) ?? .null,
-                    "group": window.group.map(JSONValue.string) ?? .null,
-                    "windowMinutes": window.windowMinutes.map { .number(Double($0)) } ?? .null,
-                    "usedPercent": .number(window.usedPercent),
-                    "resetsAt": window.resetsAt.map { .number(Double($0)) } ?? .null,
-                ])
-            })
-        }
-        let agents: [JSONValue] = vibeCodingAgents.map { spec in
-            let plan = plans[spec.id]
-            return .object([
-                "id": .string(spec.id),
-                "plan": plan.flatMap(Self.planValue) ?? .null,
-                "limits": windows(plan?.limits ?? []),
-                "limitsError": limitErrors[spec.id].map(JSONValue.string) ?? .null,
-            ])
-        }
-        return .object(["agents": .array(agents)])
-    }
-
-    /// 套餐取不到时整格不发。发一个空字符串会在页面上留下一块没有内容的标签
-    private static func planValue(_ snapshot: AgentPlanSnapshot) -> JSONValue? {
-        guard let tier = snapshot.tier, let label = snapshot.label else { return nil }
-        return .object(["tier": .string(tier), "label": .string(label)])
-    }
 }
 
 /**
- * `vibeCodingUsage` 模块载荷的两道拼装。
+ * `vibeCodingUsage` 模块载荷的拼装。
  *
- * 拼出来的形状和站点的读法一一对应：限额按 `id` 贴到对应的 agent 上，
- * 会话总数落进 totals。不再拆 `quotaProviders`。
- *
- * 分两道是因为两样东西不在同一个地方就位：限额和用量在同一个采集器里，
- * 采完就能贴；会话总数在另一个采集器手上，发信封那一刻才拿得到。
+ * 各 agent 卡片上的今日用量 overlay 一层 ccusage，会话总数在发信封时落进 totals。
+ * 各 agent 的套餐档位与限额已拆由 NAS 上的容器上报器（reporters/agent-limits-reporter）
+ * 走 `/api/ingest/agents` 独立上报，这里不再拼接 plan / limits / limitsError。
  */
 enum VibeCodingUsagePayload {
     /**
-     * 限额贴进用量。
-     *
-     * 限额缺席时整片字段都不发，而不是发一串 null —— 站点那边「没有这几个键」
-     * 就是「没配」，整块不渲染；「配了但取不到」由 limitsError 表达，那是有键的。
-     */
-    static func withLimits(_ usage: JSONValue, limits: JSONValue?) -> JSONValue {
-        guard case .object(var root) = usage else { return usage }
-
-        var limitsRoot: [String: JSONValue] = [:]
-        if case let .object(fields)? = limits { limitsRoot = fields }
-
-        var limitsByAgent: [String: [String: JSONValue]] = [:]
-        if case let .array(rows)? = limitsRoot["agents"] {
-            for row in rows {
-                guard case let .object(fields) = row,
-                      case let .string(id)? = fields["id"] else { continue }
-                limitsByAgent[id] = fields
-            }
-        }
-        if !limitsByAgent.isEmpty, case let .array(agents)? = root["agents"] {
-            root["agents"] = .array(agents.map { agent in
-                guard case .object(var fields) = agent,
-                      case let .string(id)? = fields["id"],
-                      let limit = limitsByAgent[id] else { return agent }
-                fields["plan"] = limit["plan"] ?? .null
-                fields["limits"] = limit["limits"] ?? .array([])
-                fields["limitsError"] = limit["limitsError"] ?? .null
-                return .object(fields)
-            })
-        }
-        return .object(root)
-    }
-
-    /**
      * 各 agent 卡片上的今日用量改成 ccusage 刚读到的那一行。
      *
-     * 合计、模型排行、限额仍是 TokenTracker 的。ccusage 没覆盖到的来源
+     * 合计与模型排行仍是 TokenTracker 的。ccusage 没覆盖到的来源
      *（没装、没数据、价目表缺失）原样留下，不要把 TokenTracker 的今日清成 0。
      */
     fileprivate static func withCcusageToday(
@@ -1676,7 +1273,7 @@ private struct CcusageTodayOutcome: Sendable {
  * 的 queue。桌面刷新会节流，正在写的 JSONL 经常要等好几分钟才进今日，站点上
  * 那三格就停在旧值。ccusage 直接扫各 CLI 的本地文件，大约一秒，覆盖上去。
  *
- * 只动 `agents[].today`。合计、模型排行、限额、会话、年度热力图仍走 TokenTracker。
+ * 只动 `agents[].today`。合计、模型排行、会话、年度热力图仍走 TokenTracker。
  * ccusage 认的来源是 claude / codex / grok；cursor、antigravity 没有对应命令，
  * 今日继续用 TokenTracker。某一家没数据或价目表缺失时不要覆盖成 0。
  */

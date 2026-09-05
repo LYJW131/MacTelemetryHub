@@ -478,8 +478,7 @@ struct DashboardView: View {
                 feedbackIsError: service.manualReportFailed(.timezone)
             )
             // Vibe coding 一行拆两行，一个采集器一行，也正好是一个上报模块一行：
-            // 「此刻在不在用」60 秒一轮，用量和限额十分钟一轮，两边的失败原因
-            // 互不相干，合成一行时限额取不到这件事在本机根本看不见。
+            // 「此刻在不在用」60 秒一轮，用量十分钟一轮，两边的失败原因互不相干。
             ModuleStatusCard(
                 title: "会话状态",
                 icon: "terminal",
@@ -499,18 +498,15 @@ struct DashboardView: View {
                 feedbackIsError: service.manualReportFailed(.vibeCoding)
             )
             ModuleStatusCard(
-                title: "用量 / 限额",
+                title: "用量",
                 icon: "chart.bar",
                 enabled: service.settings.codexBarModuleEnabled,
                 value: vibeCodingUsageCollector.lastSuccess == nil ? "等待统计" : "聚合完成",
-                // 用量挂了整轮不发，限额挂了只是那几根条留着上次的值 —— 两种都要说，
-                // 而且要分得出是哪种
                 detail: vibeCodingUsageCollector.lastError
-                    ?? vibeCodingUsageCollector.limitsError.map { "限额：\($0)" }
                     ?? vibeCodingUsageCollector.lastSuccess?.formatted(date: .omitted, time: .standard),
                 action: { Task { await service.refreshVibeCodingUsageNow() } },
                 actionIcon: "arrow.clockwise",
-                actionHelp: "重新读取 ccusage 今日用量与 TokenTracker 限额并上报",
+                actionHelp: "重新读取 ccusage 今日用量并上报",
                 actionEnabled: service.settings.codexBarModuleEnabled,
                 isReporting: service.isRefreshingVibeCodingUsage
                     || service.isManualReportInFlight(.vibeCoding),

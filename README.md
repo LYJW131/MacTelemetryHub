@@ -21,7 +21,7 @@ usage, rather than the identity of the whole application.
   with an exact Bundle ID blacklist for remote reporting
 - coding-usage aggregation that never uploads session IDs, project paths, prompts, or replies
 - charger cover name plus the original JPEG uploaded to R2 (no resize or transcode; the point is to leave Anker's signed URL)
-- subscription plan tier and server-side rate-limit windows for every coding agent in the envelope
+- coding agent usage aggregation in the envelope (subscription plan tiers and rate-limit windows are reported separately by `reporters/agent-limits-reporter` in the lyjwpage repo)
 - login launch using `SMAppService.mainApp`
 
 Each module can be disabled without stopping the others. Disabling the charger
@@ -91,33 +91,27 @@ endpoint produced it:
 | Module | Interval | Contents |
 | --- | --- | --- |
 | `vibeCodingNow` | 60 s | whether each agent is in use right now, its current model, last activity time |
-| `vibeCodingUsage` | 10 min | tokens, cost, plan tiers, and rate-limit windows for every agent, plus lifetime session count |
+| `vibeCodingUsage` | 10 min | tokens and cost for every agent, plus lifetime session count (rate limits reported by `reporters/agent-limits-reporter`) |
 | `vibeCodingYear` | 1 h (configurable) | last 53 weeks of daily totals plus a compact per-day top-5 model mix, sent as one calendar |
 
 There were three modules before (usage / limits / sessions), one per collector —
 a line drawn by *which command produced the data*, back when limits and usage
 came from two separate CodexBar invocations and the slow one could take the
-freshly fetched limits down with it. All three now come from the same local
-service on the same two schedules, so only the real line is left: "right now"
-versus "cumulative", and the collectors were merged to match — two modules, two
-collectors, two refresh intervals.
-
-Merging the two halves into one collector does not make them share a fate.
-Limits failing does not hold up usage: the bars keep their last good values and
-carry a `limitsError` so the site can tell "not configured" from "configured but
-unreachable". Usage failing drops the whole round instead — limits are attached
-to `agents[]` by id, and without the trunk there is nothing to attach them to.
+freshly fetched limits down with it. Rate-limit windows and plan tiers have now
+moved to the container reporter (`reporters/agent-limits-reporter` in the lyjwpage repo)
+running 24/7 on the NAS, leaving only usage and sessions here.
 The session count is spliced in at send time (`VibeCodingUsagePayload`), since
 it is counted by the other collector.
 
 Every module is sent only when its own display content changes.
 
-## Plan tier and rate-limit windows
+## Coding agent usage and sessions
 
-限额、会话、年度热力图和用量合计来自本机跑着的 TokenTracker 面板，走它 SPA
-用的那套 `/functions/<名字>` 接口。各 agent 卡片上的今日 token / 费用 / HIT
-改走本机 `ccusage`：它直接读各 CLI 的本地用量文件，不经过 TokenTracker 那份
-会节流的内存 queue。不上传 session ID、项目路径、提示词或回复：
+会话、年度热力图和用量合计来自本机跑着的 TokenTracker 面板，走它 SPA
+用的那套 `/functions/<名字>` 接口（各 agent 的套餐档位与服务端限额已改由 lyjwpage 仓库的
+`reporters/agent-limits-reporter` 容器上报器走 `/api/ingest/agents` 24 小时独立上报，不再由 Mac 上报）。
+各 agent 卡片上的今日 token / 费用 / HIT 改走本机 `ccusage`：它直接读各 CLI 的本地用量文件，
+不经过 TokenTracker 那份会节流的内存 queue。不上传 session ID、项目路径、提示词或回复：
 
 - `ccusage <source> daily --json` 覆盖 `agents[].today`（claude / codex / grok）。
   TokenTracker 的用量接口读的是同步进内存的 queue，桌面刷新会节流，正在写的
@@ -127,21 +121,20 @@ Every module is sent only when its own display content changes.
   同一条按日接口另外喂给 `vibeCodingYear`：过去 53 周的日合计一次发完；有量的日
   子再问一次按模型拆分，编成模型表 + 每天前五的稀疏 mix。间隔单独控（默认一小
   时），不跟用量那 10 分钟绑在一起。
-- `tokentracker-usage-limits` 一次带回所有来源的套餐档位和服务端限额窗口。
+- 各 agent 的套餐档位和服务端限额窗口（从前通过 `tokentracker-usage-limits` 获取）
+  已改由 lyjwpage 仓库的 `reporters/agent-limits-reporter` 容器上报器负责。
   信封里五个来源（见 `TelemetryModules.swift` 的 `vibeCodingAgents`：`claude`、
   `codex`、`cursor`、`grok`、`antigravity`）走同一套 agent 形状：token、今日用量、
-  套餐、全部限额窗口、展示名和图标都在行内。站点按 id 决定展示形态，不要再拆
-  `quotaProviders`。
+  展示名和图标都在行内。
 - `tokentracker-sessions` 给出轻量的在用状态：只留模型名、最后活动时刻和条数。
   前两样走 `vibeCodingNow`（60 秒一轮，五个来源都发）；条数是「一共开过多少次」，
   属于累计量，搭 `vibeCodingUsage` 那份车走。
 
-限额和合计仍是 TokenTracker 的几个 GET；今日那一行额外跑一次 ccusage。
-TokenTracker 面板没开着时限额 / 会话 / 年度各自留下自己的错误，不互相牵连。
+用量合计仍是 TokenTracker 的几个 GET；今日那一行额外跑一次 ccusage。
+TokenTracker 面板没开着时会话 / 年度各自留下自己的错误，不互相牵连。
 ccusage 路径不可执行则用量这一轮不发，留着上一次的好值。
 
-窗口的个数和长度取自上游的回答，不作假设，也不按展示形态裁一条「总额」。
-会话状态每 60 秒刷一次；用量和限额每 10 分钟刷一次。
+会话状态每 60 秒刷一次；用量每 10 分钟刷一次（限额由容器上报器独立上报）。
 
 `positionMs` in the music module is an anchor, not a stream. Paired with
 `observedAt` and `state` it lets the site interpolate the playhead on its own,

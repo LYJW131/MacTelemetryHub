@@ -518,7 +518,7 @@ final class ServiceController: ObservableObject {
     let timeZone = TimeZoneMonitor()
     let appleMusic = AppleMusicMonitor()
     let appleMusicAuthorization = AppleMusicAuthorizationManager()
-    /// 一个模块一个采集器：长间隔那份（token / 费用 / 套餐 / 限额）和
+    /// 一个模块一个采集器：长间隔那份（token / 费用）和
     /// 短间隔那份（此刻在不在用）。年度热力图另走一块，间隔更长、按周切片。
     let vibeCodingUsageCollector = VibeCodingUsageMonitor()
     let codingSessions = CodingSessionMonitor()
@@ -790,7 +790,7 @@ final class ServiceController: ObservableObject {
      * 两个采集器各自的「立刻重取」，互不牵连。
      *
      * 分开是为了「只想看看此刻在不在用」时不必等那两百多次请求的用量跑完。
-     * 限额没有自己的按钮 —— 它和用量在同一个采集器里，本来就是一轮取完的。
+     * 各 agent 的限额已拆由 NAS 上的容器上报器负责，这里只管用量。
      *
      * 采集器自己带单飞门闩，这里的标志只管按钮状态。即时上报仍是一次：
      * 信封只有一个，`requestImmediateReport` 也只按模块开关走一遍。
