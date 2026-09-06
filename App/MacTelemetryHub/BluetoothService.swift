@@ -103,10 +103,17 @@ final class BluetoothService: NSObject, ObservableObject {
     /// cannot make a healthy stream look stalled.
     private var lastFrameAt = ContinuousClock.now
     private var retryTask: Task<Void, Never>?
+    private var retryWorkItem: DispatchWorkItem?
     private var pairingScanTask: Task<Void, Never>?
     private var idleSleepTask: Task<Void, Never>?
+    private var idleSleepWorkItem: DispatchWorkItem?
     private var pending: PendingResponse?
-    private var observesWorkspacePower = false
+    private var workspaceObservers: [NSObjectProtocol] = []
+    private var connectionPumpTimer: Timer?
+    private var centralWaitingSince: ContinuousClock.Instant?
+    private var connectingSince: ContinuousClock.Instant?
+    private var isRecoveryScan = false
+    private var recoveryScanStopItem: DispatchWorkItem?
     private var isSystemSleeping = false
     /// 正在空闲休眠：GATT 已拆，不要走掉线那条 5 秒定向重连。
     private var isIdleSleeping = false
@@ -167,24 +174,12 @@ final class BluetoothService: NSObject, ObservableObject {
     }
 
     func start() {
-        guard central == nil else { return }
         desiredConnection = true
+        isSystemSleeping = false
         resetIdleSleep()
-        if !observesWorkspacePower {
-            NSWorkspace.shared.notificationCenter.addObserver(
-                self,
-                selector: #selector(workspaceScreensDidWake(_:)),
-                name: NSWorkspace.screensDidWakeNotification,
-                object: nil
-            )
-            NSWorkspace.shared.notificationCenter.addObserver(
-                self,
-                selector: #selector(workspaceWillSleep(_:)),
-                name: NSWorkspace.willSleepNotification,
-                object: nil
-            )
-            observesWorkspacePower = true
-        }
+        observeWorkspacePower()
+        startConnectionPump()
+        guard central == nil else { return }
         startCentralIfNeeded()
     }
 
@@ -192,14 +187,17 @@ final class BluetoothService: NSObject, ObservableObject {
         desiredConnection = false
         lastError = "已手动断开"
         resetIdleSleep()
+        stopConnectionPump()
         destroyBluetoothSession()
     }
 
     func reconnect() {
         desiredConnection = true
         lastError = nil
+        isSystemSleeping = false
         resetIdleSleep()
         destroyBluetoothSession()
+        startConnectionPump()
         scheduleRetry(after: .seconds(1))
     }
 
@@ -210,6 +208,7 @@ final class BluetoothService: NSObject, ObservableObject {
             let wasSleeping = isIdleSleeping
             resetIdleSleep()
             if wasSleeping, desiredConnection, !isSystemSleeping {
+                startConnectionPump()
                 scheduleRetry(after: .seconds(1))
             }
             return
@@ -284,38 +283,29 @@ final class BluetoothService: NSObject, ObservableObject {
     func shutdown() {
         desiredConnection = false
         resetIdleSleep()
+        stopConnectionPump()
         destroyBluetoothSession()
-        if observesWorkspacePower {
-            NSWorkspace.shared.notificationCenter.removeObserver(
-                self,
-                name: NSWorkspace.screensDidWakeNotification,
-                object: nil
-            )
-            NSWorkspace.shared.notificationCenter.removeObserver(
-                self,
-                name: NSWorkspace.willSleepNotification,
-                object: nil
-            )
-            observesWorkspacePower = false
+        let center = NSWorkspace.shared.notificationCenter
+        for observer in workspaceObservers {
+            center.removeObserver(observer)
         }
+        workspaceObservers.removeAll()
     }
 
     /**
-     * 配对扫描：唯一还会开扫描的地方。
+     * 配对扫描：给用户挑一台新设备。
      *
-     * 平时一律按存下的 UUID 定向连接，从不扫描。只有还没配对过（或者存的 UUID
-     * 系统已经不认识）时，用户在设置里按一下才扫这 15 秒，挑一台存下 UUID，
-     * 之后再也不扫。
+     * 平时按存下的 UUID 定向连接。唤醒或重连时还有一次只认这台 UUID 的短扫描
+     * （`startRecoveryScan`），不进这个列表，也不会改配对。
      */
     func startPairingScan() {
-        guard !isSystemSleeping else {
-            lastError = "Mac 正在睡眠，无法扫描"
-            return
-        }
+        isSystemSleeping = false
         discovered = []
         isPairingScan = true
+        stopRecoveryScan()
         // 想配对就是想连，刚点过「断开」也一样
         desiredConnection = true
+        startConnectionPump()
         startCentralIfNeeded()
         // 蓝牙还没就绪时先立旗，等 poweredOn 回调接手
         guard let central, central.state == .poweredOn else { return }
@@ -340,15 +330,60 @@ final class BluetoothService: NSObject, ObservableObject {
         central?.stopScan()
     }
 
-    @objc private func workspaceWillSleep(_ notification: Notification) {
+    /**
+     * 睡眠 / 唤醒必须挂在 `queue: .main` 上。
+     *
+     * `addObserver(selector:)` 在通知发出的那条线程回调。didWake 经常不在主线程，
+     * 和 @MainActor 的状态交叉。上报循环那边已经用 queue:.main；蓝牙这边以前没有。
+     */
+    private func observeWorkspacePower() {
+        guard workspaceObservers.isEmpty else { return }
+        let center = NSWorkspace.shared.notificationCenter
+        workspaceObservers = [
+            center.addObserver(
+                forName: NSWorkspace.willSleepNotification,
+                object: nil,
+                queue: .main
+            ) { [weak self] _ in
+                MainActor.assumeIsolated { self?.handleSystemSleep() }
+            },
+            center.addObserver(
+                forName: NSWorkspace.didWakeNotification,
+                object: nil,
+                queue: .main
+            ) { [weak self] _ in
+                MainActor.assumeIsolated { self?.handleSystemWake(fromSystemSleep: true) }
+            },
+            center.addObserver(
+                forName: NSWorkspace.screensDidWakeNotification,
+                object: nil,
+                queue: .main
+            ) { [weak self] _ in
+                MainActor.assumeIsolated { self?.handleSystemWake(fromSystemSleep: false) }
+            },
+        ]
+    }
+
+    private func handleSystemSleep() {
         isSystemSleeping = true
+        stopConnectionPump()
         guard desiredConnection else { return }
         lastError = "Mac 正在睡眠，已释放蓝牙连接"
         destroyBluetoothSession()
     }
 
-    @objc private func workspaceScreensDidWake(_ notification: Notification) {
-        guard isSystemSleeping else { return }
+    /**
+     * 唤醒后只要还想连、现在又没连上，就重建会话。
+     *
+     * 以前只在 `isSystemSleeping == true` 时动手：willSleep 漏了（Power Nap、
+     * 关盖被取消、外接屏）的话 didWake 直接 return，旧 CBCentralManager 已经是
+     * 僵尸，点重连也只是再 `Task.sleep` 一次 —— 睡眠回来之后这条协作线程经常
+     * 不再醒，于是永远停在「未连接」。
+     *
+     * 系统唤醒时如果还显示已连接，也拆掉重来：没收到 willSleep 时 GATT 多半已经死了。
+     * 只亮屏不算，避免每次熄屏都踢掉充电头。
+     */
+    private func handleSystemWake(fromSystemSleep: Bool) {
         isSystemSleeping = false
         guard desiredConnection else { return }
         if isIdleSleeping {
@@ -356,8 +391,13 @@ final class BluetoothService: NSObject, ObservableObject {
             beginIdleProbe()
             return
         }
+        if phase == .connected {
+            guard fromSystemSleep else { return }
+        }
         lastError = "Mac 已唤醒，正在重新建立蓝牙会话"
-        scheduleRetry(after: .seconds(1))
+        destroyBluetoothSession()
+        startConnectionPump()
+        scheduleRetry(after: .seconds(2))
     }
 
     private func startCentralIfNeeded() {
@@ -368,6 +408,7 @@ final class BluetoothService: NSObject, ObservableObject {
     private func destroyBluetoothSession() {
         cancelSessionTasks()
         stopPairingScan()
+        stopRecoveryScan()
         discovered = []
         let manager = central
         manager?.stopScan()
@@ -383,20 +424,89 @@ final class BluetoothService: NSObject, ObservableObject {
         assembler.reset()
         manager?.delegate = nil
         central = nil
+        connectingSince = nil
+        centralWaitingSince = nil
         if !isIdleSleeping {
             phase = .disconnected
         }
     }
 
     /**
-     * 挂一个指向存下那台设备的定向连接，然后就不管了。
+     * 主线程 Timer，不靠 `Task.sleep`。
      *
-     * CoreBluetooth 的 connect 没有超时：请求挂在那里，交给蓝牙控制器去等，设备
-     * 一上电就连上。这比「扫 15 秒 → 拆掉会话 → 退避 → 再扫」省得多，也不会漏掉
-     * 两次尝试之间那段空窗 —— 本进程根本不收广播，等待是控制器那一层的事。
+     * 睡眠回来之后 Swift 协作任务经常不再被调度，定向重连那一次 1 秒 sleep
+     * 就停在那儿。RunLoop 上的 Timer 会继续走。没连上就每两秒推一把：
+     * central 没了就建，poweredOn 迟迟不来就扔掉重建，卡在「正在连接」太久
+     * 也拆掉重来，并且顺手扫一下配对那台的广播 —— bluetoothd 重启后
+     * retrievePeripherals 经常是空的，只挂定向 connect 不会回调。
+     */
+    private func startConnectionPump() {
+        if let connectionPumpTimer, connectionPumpTimer.isValid { return }
+        connectionPumpTimer?.invalidate()
+        let timer = Timer(timeInterval: 2, repeats: true) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                self?.tickConnectionPump()
+            }
+        }
+        RunLoop.main.add(timer, forMode: .common)
+        connectionPumpTimer = timer
+        tickConnectionPump()
+    }
+
+    private func stopConnectionPump() {
+        connectionPumpTimer?.invalidate()
+        connectionPumpTimer = nil
+        centralWaitingSince = nil
+        connectingSince = nil
+    }
+
+    private func tickConnectionPump() {
+        guard desiredConnection, !isSystemSleeping, !isIdleSleeping else { return }
+        if phase == .connected {
+            connectingSince = nil
+            centralWaitingSince = nil
+            return
+        }
+        if central == nil {
+            startCentralIfNeeded()
+            return
+        }
+        guard let central else { return }
+        if central.state != .poweredOn {
+            connectingSince = nil
+            if central.state == .poweredOff || central.state == .unauthorized || central.state == .unsupported {
+                return
+            }
+            if centralWaitingSince == nil { centralWaitingSince = .now }
+            if let centralWaitingSince, ContinuousClock.now - centralWaitingSince >= .seconds(5) {
+                lastError = "蓝牙未就绪，正在重建会话"
+                destroyBluetoothSession()
+                startCentralIfNeeded()
+            }
+            return
+        }
+        centralWaitingSince = nil
+        if case .connecting = phase {
+            if connectingSince == nil { connectingSince = .now }
+            if let connectingSince, ContinuousClock.now - connectingSince >= .seconds(25) {
+                lastError = "\(slot.displayName)连接没有完成，正在重试"
+                destroyBluetoothSession()
+                startCentralIfNeeded()
+            }
+            return
+        }
+        connectingSince = nil
+        if phase != .handshaking {
+            beginConnect()
+        }
+    }
+
+    /**
+     * 定向连接，并在唤醒 / 重连时补一次针对已配对 UUID 的短扫描。
      *
-     * 代价是必须先有 UUID。没有就停在 .awaitingPairing 等用户去设置里配对一次，
-     * 绝不自己开扫描。充电头和充电宝走同一条路。
+     * 平时仍然不靠扫描发现新设备。bluetoothd 睡醒之后 `retrievePeripherals`
+     * 经常暂时是空的，CoreBluetooth 的 connect 又没有超时，只挂定向请求会
+     * 永远停在「未连接」或「正在连接」。扫到自己那台就连，不是配对流程。
      */
     private func beginConnect() {
         guard desiredConnection,
@@ -412,41 +522,98 @@ final class BluetoothService: NSObject, ObservableObject {
             return
         }
 
+        retryWorkItem?.cancel()
+        retryWorkItem = nil
         retryTask?.cancel()
         retryTask = nil
         guard let identifier = slot.peripheralID(settings) else {
-            phase = .awaitingPairing  // 还没配对过，这是正常状态，不算错误
-            return
-        }
-        guard let known = central.retrievePeripherals(withIdentifiers: [identifier]).first else {
             phase = .awaitingPairing
-            lastError = "系统里没有这台\(slot.displayName)的记录，请在设置里重新扫描配对"
             return
         }
-        connect(to: known)
+        let service = CBUUID(string: A2687Protocol.serviceUUID)
+        if let connected = central.retrieveConnectedPeripherals(withServices: [service])
+            .first(where: { $0.identifier == identifier }) {
+            connect(to: connected)
+            return
+        }
+        if let known = central.retrievePeripherals(withIdentifiers: [identifier]).first {
+            connect(to: known)
+            startRecoveryScan()
+            return
+        }
+        phase = .connecting(slot.displayName)
+        startRecoveryScan()
     }
 
     private func connect(to candidate: CBPeripheral) {
         guard desiredConnection, !isSystemSleeping, let central else { return }
-        stopPairingScan()
+        if peripheral?.identifier == candidate.identifier {
+            switch phase {
+            case .connected, .handshaking: return
+            case .connecting:
+                central.connect(candidate, options: [CBConnectPeripheralOptionNotifyOnDisconnectionKey: true])
+                return
+            default: break
+            }
+        }
+        if isPairingScan { stopPairingScan() }
         peripheral = candidate
         candidate.delegate = self
+        if connectingSince == nil { connectingSince = .now }
         phase = .connecting(candidate.name ?? candidate.identifier.uuidString)
         central.connect(candidate, options: [CBConnectPeripheralOptionNotifyOnDisconnectionKey: true])
+    }
+
+    private func startRecoveryScan() {
+        guard !isPairingScan, !isRecoveryScan, let central, central.state == .poweredOn else { return }
+        isRecoveryScan = true
+        central.scanForPeripherals(
+            withServices: [CBUUID(string: A2687Protocol.advertisedServiceUUID)],
+            options: [CBCentralManagerScanOptionAllowDuplicatesKey: false]
+        )
+        recoveryScanStopItem?.cancel()
+        let item = DispatchWorkItem { [weak self] in
+            Task { @MainActor [weak self] in
+                self?.stopRecoveryScan()
+            }
+        }
+        recoveryScanStopItem = item
+        DispatchQueue.main.asyncAfter(deadline: .now() + 20, execute: item)
+    }
+
+    private func stopRecoveryScan() {
+        recoveryScanStopItem?.cancel()
+        recoveryScanStopItem = nil
+        guard isRecoveryScan else { return }
+        isRecoveryScan = false
+        if !isPairingScan {
+            central?.stopScan()
+        }
     }
 
     private func scheduleRetry(after delay: Duration = .seconds(5)) {
         guard desiredConnection, !isSystemSleeping, !isIdleSleeping else { return }
         retryTask?.cancel()
-        retryTask = Task { [weak self] in
-            try? await Task.sleep(for: delay)
-            guard !Task.isCancelled, let self else { return }
-            if central == nil {
-                startCentralIfNeeded()
-            } else {
-                beginConnect()
+        retryTask = nil
+        retryWorkItem?.cancel()
+        let item = DispatchWorkItem { [weak self] in
+            Task { @MainActor [weak self] in
+                guard let self, self.desiredConnection, !self.isSystemSleeping, !self.isIdleSleeping else { return }
+                self.startConnectionPump()
+                if self.central == nil {
+                    self.startCentralIfNeeded()
+                } else {
+                    self.beginConnect()
+                }
             }
         }
+        retryWorkItem = item
+        DispatchQueue.main.asyncAfter(deadline: .now() + Self.timeInterval(delay), execute: item)
+    }
+
+    private static func timeInterval(_ duration: Duration) -> TimeInterval {
+        let comps = duration.components
+        return TimeInterval(comps.seconds) + TimeInterval(comps.attoseconds) / 1_000_000_000_000_000_000
     }
 
     private func cancelSessionTasks() {
@@ -456,6 +623,8 @@ final class BluetoothService: NSObject, ObservableObject {
         streamWatchdogTask = nil
         retryTask?.cancel()
         retryTask = nil
+        retryWorkItem?.cancel()
+        retryWorkItem = nil
         if let pending {
             pending.timeout.cancel()
             pending.continuation.resume(throwing: BLEError.disconnected)
@@ -589,6 +758,8 @@ final class BluetoothService: NSObject, ObservableObject {
     private func resetIdleSleep() {
         idleSleepTask?.cancel()
         idleSleepTask = nil
+        idleSleepWorkItem?.cancel()
+        idleSleepWorkItem = nil
         isIdleSleeping = false
         probingAfterNap = false
         idleSince = nil
@@ -632,11 +803,13 @@ final class BluetoothService: NSObject, ObservableObject {
     private func enterIdleSleep() {
         guard slot.supportsIdleSleep, desiredConnection else { return }
         idleSleepTask?.cancel()
+        idleSleepWorkItem?.cancel()
         idleProbeDeadline = nil
         idleSince = nil
         probingAfterNap = false
         isIdleSleeping = true
         lastError = nil
+        stopConnectionPump()
         destroyBluetoothSession()
         phase = .idleSleeping
         scheduleIdleProbe()
@@ -646,11 +819,15 @@ final class BluetoothService: NSObject, ObservableObject {
         let delay = nextNapDuration
         nextNapDuration = min(delay * 2, slot.idleNapCap)
         idleSleepTask?.cancel()
-        idleSleepTask = Task { [weak self] in
-            try? await Task.sleep(for: delay)
-            guard !Task.isCancelled, let self else { return }
-            beginIdleProbe()
+        idleSleepTask = nil
+        idleSleepWorkItem?.cancel()
+        let item = DispatchWorkItem { [weak self] in
+            Task { @MainActor [weak self] in
+                self?.beginIdleProbe()
+            }
         }
+        idleSleepWorkItem = item
+        DispatchQueue.main.asyncAfter(deadline: .now() + Self.timeInterval(delay), execute: item)
     }
 
     private func beginIdleProbe() {
@@ -663,14 +840,22 @@ final class BluetoothService: NSObject, ObservableObject {
         isIdleSleeping = false
         probingAfterNap = true
         lastError = nil
+        startConnectionPump()
         scheduleRetry(after: .seconds(1))
         idleSleepTask?.cancel()
-        idleSleepTask = Task { [weak self] in
-            try? await Task.sleep(for: self?.slot.idleProbeConnectTimeout ?? .seconds(25))
-            guard !Task.isCancelled, let self else { return }
-            guard desiredConnection, phase != .connected else { return }
-            enterIdleSleep()
+        idleSleepTask = nil
+        idleSleepWorkItem?.cancel()
+        let item = DispatchWorkItem { [weak self] in
+            Task { @MainActor [weak self] in
+                guard let self, self.desiredConnection, self.phase != .connected else { return }
+                self.enterIdleSleep()
+            }
         }
+        idleSleepWorkItem = item
+        DispatchQueue.main.asyncAfter(
+            deadline: .now() + Self.timeInterval(slot.idleProbeConnectTimeout),
+            execute: item
+        )
     }
 
     private func send(group: UInt8, command: UInt16, fields: [TLVField]) throws {
@@ -795,7 +980,14 @@ extension BluetoothService: @preconcurrency CBCentralManagerDelegate {
         advertisementData: [String: Any],
         rssi RSSI: NSNumber
     ) {
-        guard central === self.central, isPairingScan else { return }
+        guard central === self.central else { return }
+        if isRecoveryScan, !isPairingScan,
+           let identifier = slot.peripheralID(settings),
+           peripheral.identifier == identifier {
+            connect(to: peripheral)
+            return
+        }
+        guard isPairingScan else { return }
         let advertisedName = advertisementData[CBAdvertisementDataLocalNameKey] as? String
         let name = peripheral.name ?? advertisedName ?? ""
         let services = advertisementData[CBAdvertisementDataServiceUUIDsKey] as? [CBUUID] ?? []
@@ -822,6 +1014,8 @@ extension BluetoothService: @preconcurrency CBCentralManagerDelegate {
         guard central === self.central else { return }
         self.peripheral = peripheral
         peripheral.delegate = self
+        connectingSince = nil
+        stopRecoveryScan()
         peripheral.discoverServices([CBUUID(string: A2687Protocol.serviceUUID)])
     }
 

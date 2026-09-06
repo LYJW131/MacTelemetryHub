@@ -1981,12 +1981,14 @@ final class ServiceController: ObservableObject {
                 charger: .init(
                     enabled: settings.chargerModuleEnabled,
                     connected: chargerLink.isConnected,
-                    phase: chargerLink.phase.label
+                    phase: chargerLink.phase.label,
+                    lastError: chargerLink.lastError
                 ),
                 powerBank: .init(
                     enabled: settings.powerBankModuleEnabled,
                     connected: powerBankLink.isConnected,
-                    phase: powerBankLink.phase.label
+                    phase: powerBankLink.phase.label,
+                    lastError: powerBankLink.lastError
                 )
             ))
         case ("GET", "/sse/charger"):
@@ -2041,6 +2043,7 @@ private struct HealthPayload: Encodable {
         let enabled: Bool
         let connected: Bool
         let phase: String
+        let lastError: String?
     }
 
     let ok: Bool

@@ -815,7 +815,6 @@ struct DashboardView: View {
                 Button("重连\(link.slot.displayName)", systemImage: "arrow.clockwise") {
                     link.reconnect()
                 }
-                .disabled(link.phase == .handshaking)
                 .help("重新连接当前\(link.slot.displayName)")
             }
             .buttonStyle(.bordered)
