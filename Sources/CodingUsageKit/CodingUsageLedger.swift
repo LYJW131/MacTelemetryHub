@@ -154,10 +154,11 @@ public struct CodingUsageLedger: Sendable {
                 if row.totalTokens > 0 { activeDates.insert(row.date) }
                 combinedDays[row.date] = try Self.add(combinedDays[row.date, default: 0], row.totalTokens)
                 for (model, value) in row.models {
-                    models[model] = try Self.add(models[model, default: 0], value)
-                    if Self.visibleModel(model) {
-                        allModels[model] = try Self.add(allModels[model, default: 0], value)
-                        dayModels[row.date, default: [:]][model] = try Self.add(dayModels[row.date]?[model] ?? 0, value)
+                    let name = CodingUsageModelIdentity.canonical(model)
+                    models[name] = try Self.add(models[name, default: 0], value)
+                    if Self.visibleModel(name) {
+                        allModels[name] = try Self.add(allModels[name, default: 0], value)
+                        dayModels[row.date, default: [:]][name] = try Self.add(dayModels[row.date]?[name] ?? 0, value)
                     }
                 }
             }
@@ -169,7 +170,9 @@ public struct CodingUsageLedger: Sendable {
                 return left == right ? $0.identityHash < $1.identityHash : left > right
             }
             let lastActivity = ordered.first?.lastActivityAt
-            let currentModel = ordered.first?.currentModel.flatMap { Self.visibleModel($0) ? $0 : nil }
+            let currentModel = ordered.first?.currentModel
+                .map(CodingUsageModelIdentity.canonical)
+                .flatMap { Self.visibleModel($0) ? $0 : nil }
             let fallbackModel = source.days.keys.sorted().reversed().lazy.compactMap {
                 Self.ranked(source.days[$0]?.models ?? [:]).first?.model
             }.first
@@ -241,7 +244,13 @@ public struct CodingUsageLedger: Sendable {
         !value.isEmpty && value != "unknown" && value != "codex-auto-review"
     }
     private static func ranked(_ values: [String: Int64]) -> [CodingUsageModelPayload] {
-        values.filter { visibleModel($0.key) && $0.value > 0 }
+        var merged: [String: Int64] = [:]
+        for (model, value) in values where value > 0 {
+            let name = CodingUsageModelIdentity.canonical(model)
+            guard visibleModel(name), let next = try? add(merged[name, default: 0], value) else { continue }
+            merged[name] = next
+        }
+        return merged
             .map { CodingUsageModelPayload(model: $0.key, tokens: $0.value) }
             .sorted { $0.tokens == $1.tokens ? $0.model < $1.model : $0.tokens > $1.tokens }
     }

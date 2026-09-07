@@ -35,6 +35,8 @@ final class CodingUsagePricingTests: XCTestCase {
             XCTAssertEqual(try XCTUnwrap(estimate(alias)), try XCTUnwrap(estimate(canonical)), alias)
         }
         XCTAssertEqual(estimate("  ANTHROPIC/claude-4.5-sonnet-thinking\n"), estimate("claude-sonnet-4-5"))
+        XCTAssertEqual(estimate("model_placeholder_m318"), estimate("gemini-3.8-flash"))
+        XCTAssertEqual(estimate("gemini-3.8-flash-high"), estimate("gemini-3.8-flash"))
     }
 
     func testUnknownRoutingAndUnseenVariantsHaveNoPrice() {

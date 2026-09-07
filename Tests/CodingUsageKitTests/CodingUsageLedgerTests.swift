@@ -73,6 +73,32 @@ struct CodingUsageLedgerTests {
         #expect(try ledger.snapshot(at: now).usage.totals.totalTokens == 81)
     }
 
+    @Test func antigravityPlaceholdersPublishPublicNamesAndMerge() throws {
+        let url = try location(); defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
+        var ledger = try CodingUsageLedger(url: url)
+        let row = CodingUsageDayRecord(
+            date: "2026-09-05",
+            inputTokens: 100,
+            totalTokens: 100,
+            apiEquivalentCostUSD: 1,
+            models: ["model_placeholder_m318": 80, "gemini-3.8-flash-high": 20]
+        )
+        let session = CodingUsageSessionRecord(
+            identityHash: String(repeating: "b", count: 64),
+            lastActivityAt: now,
+            currentModel: "MODEL_PLACEHOLDER_M318"
+        )
+        try ledger.apply(report("antigravity", [row], sessions: [session]))
+        let snapshot = try ledger.snapshot(at: now)
+        let agent = snapshot.usage.agents.first { $0.id == "antigravity" }!
+        #expect(agent.models == ["gemini-3.8-flash-high"])
+        #expect(agent.currentModel == "gemini-3.8-flash-high")
+        #expect(agent.topModel == "gemini-3.8-flash-high")
+        #expect(snapshot.usage.topModels.map(\.model) == ["gemini-3.8-flash-high"])
+        #expect(snapshot.usage.topModels.first?.tokens == 100)
+        #expect(snapshot.year.models == ["gemini-3.8-flash-high"])
+    }
+
     @Test func sessionRefreshDoesNotMarkUsageFreshAndSurvivesIndependentWriters() throws {
         let url = try location(); defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
         var usageWriter = try CodingUsageLedger(url: url)

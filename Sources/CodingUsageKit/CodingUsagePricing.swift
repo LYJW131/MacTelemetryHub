@@ -91,7 +91,9 @@ public enum CodingUsagePricing {
     }
 
     private static func canonicalKey(_ value: String) -> String {
-        var key = value.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        var key = CodingUsageModelIdentity.canonical(value)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
         for prefix in ["anthropic/", "openai/", "google/", "x-ai/", "xai/", "deepseek/"] where key.hasPrefix(prefix) {
             key.removeFirst(prefix.count)
             break
@@ -181,6 +183,15 @@ public enum CodingUsagePricing {
         "grok-4-5-high": "grok-4-5",
         "grok-4-5-xhigh": "grok-4-5",
         "premium (codex 5-3)": "gpt-5-3-codex",
+        "gemini-3-6-flash-high": "gemini-3-6-flash",
+        "gemini-3-6-flash-medium": "gemini-3-6-flash",
+        "gemini-3-6-flash-low": "gemini-3-6-flash",
+        "gemini-3-7-flash-high": "gemini-3-7-flash",
+        "gemini-3-7-flash-medium": "gemini-3-7-flash",
+        "gemini-3-7-flash-low": "gemini-3-7-flash",
+        "gemini-3-8-flash-high": "gemini-3-8-flash",
+        "gemini-3-8-flash-medium": "gemini-3-8-flash",
+        "gemini-3-8-flash-low": "gemini-3-8-flash",
     ]
 
     private static let catalog: [String: Price] = [
