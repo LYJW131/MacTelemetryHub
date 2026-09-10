@@ -64,11 +64,15 @@ struct ReportDecisionTests {
     }
 
     /// 只有 `attached` 这类会跳变的字段进结构指纹，功率不进。
-    private func charger(attached: Bool = true, powerW: Double = 45) -> ChargingDevicesPayload {
+    private func charger(
+        kind: ChargingDeviceKind = .charger,
+        attached: Bool = true,
+        powerW: Double = 45
+    ) -> ChargingDevicesPayload {
         ChargingDevicesPayload(devices: [
             ChargingDevicePayload(
                 id: "SN-1",
-                kind: .charger,
+                kind: kind,
                 model: "A2687",
                 connected: true,
                 updatedAt: 1_789_099_506,
@@ -323,6 +327,36 @@ struct ReportDecisionTests {
         #expect(decision.shouldPost)
         #expect(decision.unsatisfiableManualModules.isEmpty)
         #expect(decision.manualModules == [.powerBank])
+    }
+
+    /**
+     * 只连着充电宝、充电头没连时同样要发得出去。
+     *
+     * 这才是这个 bug 的实际现场：载荷里一台 `.charger` 都没有。收尾时那句
+     * 「这封信的充电头封面带没带对象键」查不到充电头，得老实返回 false 而不是
+     * 把整条路带偏。
+     */
+    @Test func manualPowerBankWorksWhenOnlyThePowerBankIsConnected() {
+        var lastPosted = LastPostedState()
+        let decision = decide(inputs(
+            now: t0,
+            charger: charger(kind: .powerBank),
+            manualModules: [.powerBank]
+        ))
+        #expect(decision.chargerToSend)
+        #expect(decision.manualModules == [.powerBank])
+
+        let effects = lastPosted.commit(
+            decision: decision,
+            response: TelemetryIngestResponse.Result(
+                desktopIconAvailable: nil,
+                chargerCoverIconAvailable: false
+            ),
+            desktopPayloadHasObjectKey: false
+        )
+        #expect(effects.coverIconRejected)
+        #expect(!effects.sentCoverHadObjectKey)
+        #expect(lastPosted.chargingDevices != nil)
     }
 
     /**
