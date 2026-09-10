@@ -60,6 +60,49 @@ struct TelemetryEnvelope: Encodable, Sendable {
     let presence: String
 }
 
+extension TelemetryEnvelope {
+    /**
+     * 组装一封信。
+     *
+     * `activeModules` 由调用方算好传进来 —— 它要读一圈开关和蓝牙连接状态，
+     * 是这里唯一一处非纯的来源。把它挪成参数之后，组装本身只是把手上的载荷
+     * 摆进固定的格子，跟主 actor 再无关系。
+     */
+    static func make(
+        chargingDevices: ChargingDevicesPayload? = nil,
+        desktop: DesktopActivitySnapshot? = nil,
+        timezone: TimeZoneSnapshot? = nil,
+        appleMusic: AppleMusicSnapshot? = nil,
+        appleMusicCredentials: AppleMusicCredentialsPayload? = nil,
+        vibeCodingUsage: JSONValue? = nil,
+        vibeCodingNow: JSONValue? = nil,
+        vibeCodingYear: JSONValue? = nil,
+        includeDesktop: Bool,
+        includeAppleMusic: Bool,
+        activeModules: [String],
+        now: Date,
+        presence: String = "online"
+    ) -> TelemetryEnvelope {
+        TelemetryEnvelope(
+            heartbeatAt: Int64(now.timeIntervalSince1970 * 1_000),
+            activeModules: activeModules,
+            modules: TelemetryModulesPayload(
+                chargingDevices: chargingDevices,
+                desktop: desktop,
+                appleMusic: appleMusic,
+                appleMusicCredentials: appleMusicCredentials,
+                timezone: timezone,
+                vibeCodingUsage: vibeCodingUsage,
+                vibeCodingNow: vibeCodingNow,
+                vibeCodingYear: vibeCodingYear,
+                includeDesktop: includeDesktop,
+                includeAppleMusic: includeAppleMusic
+            ),
+            presence: presence
+        )
+    }
+}
+
 struct TelemetryIngestResponse: Decodable {
     struct Result: Decodable {
         let desktopIconAvailable: Bool?

@@ -47,6 +47,8 @@
 		B10000000000000000000038 /* AppSettings+R2.swift in Sources */ = {isa = PBXBuildFile; fileRef = F10000000000000000000037 /* AppSettings+R2.swift */; };
 		B10000000000000000000039 /* AppleMusicCredentialStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = F10000000000000000000038 /* AppleMusicCredentialStore.swift */; };
 		B1000000000000000000003A /* ServiceController+LocalAPI.swift in Sources */ = {isa = PBXBuildFile; fileRef = F10000000000000000000039 /* ServiceController+LocalAPI.swift */; };
+		B1000000000000000000003B /* ReportDecision.swift in Sources */ = {isa = PBXBuildFile; fileRef = F1000000000000000000003A /* ReportDecision.swift */; };
+		B1000000000000000000003C /* LastPostedState.swift in Sources */ = {isa = PBXBuildFile; fileRef = F1000000000000000000003B /* LastPostedState.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -92,6 +94,8 @@
 		F10000000000000000000037 /* AppSettings+R2.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "AppSettings+R2.swift"; sourceTree = "<group>"; };
 		F10000000000000000000038 /* AppleMusicCredentialStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppleMusicCredentialStore.swift; sourceTree = "<group>"; };
 		F10000000000000000000039 /* ServiceController+LocalAPI.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "ServiceController+LocalAPI.swift"; sourceTree = "<group>"; };
+		F1000000000000000000003A /* ReportDecision.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ReportDecision.swift; sourceTree = "<group>"; };
+		F1000000000000000000003B /* LastPostedState.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LastPostedState.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -184,6 +188,8 @@
 				F10000000000000000000034 /* IconUploadBudget.swift */,
 				F10000000000000000000035 /* LocalAPIPayloads.swift */,
 				F10000000000000000000036 /* DeveloperTokenJWT.swift */,
+				F1000000000000000000003A /* ReportDecision.swift */,
+				F1000000000000000000003B /* LastPostedState.swift */,
 			);
 			path = Sources/TelemetryCore;
 			sourceTree = SOURCE_ROOT;
@@ -293,6 +299,8 @@
 				B10000000000000000000038 /* AppSettings+R2.swift in Sources */,
 				B10000000000000000000039 /* AppleMusicCredentialStore.swift in Sources */,
 				B1000000000000000000003A /* ServiceController+LocalAPI.swift in Sources */,
+				B1000000000000000000003B /* ReportDecision.swift in Sources */,
+				B1000000000000000000003C /* LastPostedState.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

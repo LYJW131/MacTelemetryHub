@@ -53,16 +53,9 @@ final class ServiceController: ObservableObject {
     /// vibe coding 的采集循环，跟上报循环各转各的
     private var vibeCodingCollectionTask: Task<Void, Never>?
     private var vibeCodingSessionsTask: Task<Void, Never>?
-    /// 三类载荷独立判断是否需要上报。
-    private var lastPostedVibeCodingUsageAt: Date?
-    private var lastPostedVibeCodingNowAt: Date?
-    private var lastPostedVibeCodingYearAt: Date?
-    private var lastPostedChargingDevices: ChargingDevicesPayload?
-    /// 只跟结构性变化比，管的是「要不要即时发」，不管「要不要带 charger 模块」
-    private var lastPostedChargingStructural: ChargingDevicesStructuralSignature?
-    private var lastPostedDesktop: DesktopUploadSignature?
-    /// 隐藏虚拟应用已成功发出。单靠 Optional 无法区分“尚未发过”和“已发隐藏态”。
-    private var lastPostedDesktopWasHidden = false
+    /// 每个模块「已经发出去的是什么」。规则和推进方式都在 TelemetryCore，有单测；
+    /// 重开一轮上报会话就是 `lastPosted = .init()`。
+    private var lastPosted = LastPostedState()
     /// 这个上报会话里已经在 R2 确认存在的图标身份指纹。
     /// 桌面图标和充电头封面共用这一份记忆，所以名字里没有 desktop。
     /// 本机 /health 会读，所以不是 private。
@@ -83,10 +76,6 @@ final class ServiceController: ObservableObject {
     /// 本机 /health 会读，所以不是 private。
     var iconResolvers: [String: (id: UUID, task: Task<Void, Never>)] = [:]
     private var uploadedIconOrder: [String] = []
-    private var lastPostedTimeZone: TimeZoneUploadSignature?
-    private var lastPostedAppleMusic: AppleMusicUploadSignature?
-    private var lastPostedMusicAnchor: AppleMusicPositionAnchor?
-    private var lastHeartbeatAt: Date?
     private var started = false
     private var observesPower = false
     /**
@@ -114,36 +103,8 @@ final class ServiceController: ObservableObject {
     /// 用来照顾没有事件放行的活：充电器功率滚动这类按节流窗口发的变化、
     /// 心跳、vibe coding 三份采集的刷新间隔检查。
     private static let tickInterval = Duration.seconds(5)
-    /**
-     * 安静时段补心跳的间隔。
-     *
-     * 只在这一圈没有任何数据要发的时候才补 —— 有数据时那个包本身就证明活着。
-     * 纯心跳是 /api/ingest/mac 的主要流量（实测 12 小时 1.9K 次调用里约三分之二
-     * 是它），而它唯一影响的是「崩溃 / 断网 / 强制关机」的判定延迟：关盖、睡眠、
-     * 退出走 declaredOffline，收到那一条就瞬时翻转，不等这个间隔。
-     *
-     * ⚠️ 必须明显短于站点的存活窗口（`lib/freshness.ts` 的 HEARTBEAT_WINDOW_MS，
-     * 现在是 300 秒，Vercel 和 EdgeOne 两边都显式配着）。两者一样长的话每一轮
-     * 都踩在窗口边上，安静时段全站会断续显示离线。**先放宽窗口，再降心跳频率。**
-     *
-     * 和「发送间隔」（AppSettings 的 postInterval，本机 30 秒）是两档独立的节奏：
-     * 那个管有数据时多久发一次，这个管没数据时多久证明一次还活着。两个数字曾经
-     * 被填反过 —— 90 秒是这里的，不是那里的。
-     */
-    private static let heartbeatInterval: TimeInterval = 90
-    /**
-     * 充电设备结构变化后的追发。
-     *
-     * 插上负载的头几十秒功率还在剧烈变化 —— PD 协商完成、设备自己调整取电，
-     * 都要一会儿才稳。即时上报只发出去插拔那一瞬间的那一帧，那一帧往往还是
-     * 0W 或者一个中间值，然后要等满一个节流窗口（本机 30 秒）才更新，站点上
-     * 就会挂着一个明显不对的读数。
-     *
-     * 所以结构变化后按这个节奏追发几次。次数是有限的：功率滚动本来就该等节流
-     * 窗口，追发只是覆盖「刚接入」这段不稳定期，不是把上报变成 5 秒一次的轮询。
-     */
-    private static let chargingBurstInterval: TimeInterval = 5
-    private static let chargingBurstCount = 5
+    /// 心跳间隔、追发节奏、进度容差都跟着判断逻辑搬进了 `ReportDecision`：
+    /// 它们只被那段纯计算读，留在这里就得两处对照着看。
 
     /**
      * 前台应用的防抖窗口。
@@ -157,10 +118,6 @@ final class ServiceController: ObservableObject {
 
     /// 防止长期运行、打开大量一次性应用时让图标缓存无限增长。
     private static let uploadedIconLimit = 64
-
-    /// 进度偏离预测多少才算被拖过。留 2.5 秒，既不会把采样抖动当 seek，
-    /// 也接得住真的拖动。
-    private static let musicSeekToleranceMs = 2_500
 
     init() {
         let settings = AppSettings()
@@ -536,7 +493,7 @@ final class ServiceController: ObservableObject {
             }
             guard let payload = chargingDevicesPayload else { return }
             let signature = ChargingDevicesStructuralSignature(payload)
-            guard signature != lastPostedChargingStructural else { return }
+            guard signature != lastPosted.chargingStructural else { return }
             wakeReporter()
         }
         if previous == session {
@@ -711,24 +668,14 @@ final class ServiceController: ObservableObject {
         // 上一轮遗留的唤醒标记不能带进新循环，否则第一圈会白转一次
         pendingWake = false
         reporterLastError = nil
-        lastPostedVibeCodingUsageAt = nil
-        lastPostedVibeCodingNowAt = nil
-        lastPostedVibeCodingYearAt = nil
-        lastPostedChargingDevices = nil
-        lastPostedChargingStructural = nil
-        lastPostedDesktop = nil
-        lastPostedDesktopWasHidden = false
+        lastPosted = .init()
         uploadedIconHashes.removeAll(keepingCapacity: true)
         uploadedIconOrder.removeAll(keepingCapacity: true)
         iconUploadBudget.removeAll()
         iconVerifiedAt.removeAll(keepingCapacity: true)
         cancelDesktopIconResolvers()
-        lastPostedTimeZone = nil
-        lastPostedAppleMusic = nil
-        lastPostedMusicAnchor = nil
         // 每个上报会话都完整发一次，之后两个 token 才分别判变。
         appleMusicCredentialStore.resetPostedTokens()
-        lastHeartbeatAt = nil
         pendingManualReports.removeAll()
         lastManualReportError.removeAll()
         let url = settings.postEnabled ? URL(string: settings.postURL) : nil
@@ -740,8 +687,7 @@ final class ServiceController: ObservableObject {
             /// 上报失败后的退避截止时刻，只用来挡住即时上报的绕行
             var backoffUntil = Date.distantPast
             /// 充电设备追发还剩几次、下一次什么时候到点
-            var chargingBurstRemaining = 0
-            var chargingBurstAt = Date.distantPast
+            var chargingBurst = ChargingBurstState()
             while !Task.isCancelled {
                 let cycleStart = ContinuousClock.now
                 var manualModulesForAttempt: Set<TelemetryModule> = []
@@ -764,188 +710,66 @@ final class ServiceController: ObservableObject {
                     // 封面对象的后台解析由上报侧显式发起。读载荷的那条路是纯的，
                     // 1 Hz 的 SSE 推流不会再顺手启动 resolver、也不会动重试额度。
                     kickCoverIconResolution()
-                    let charger = chargingDevicesPayload
-                    let chargerStructural = charger.map(ChargingDevicesStructuralSignature.init)
-                    let capturedDesktop = settings.desktopModuleEnabled ? desktopActivity.snapshot : nil
-                    let desktopBlocked = isDesktopReportingBlocked(capturedDesktop)
-                    // 黑名单只切断远端载荷；monitor 的本机快照继续保留给界面和本地 API。
-                    let desktop = desktopBlocked ? nil : capturedDesktop
-                    let desktopSignature = desktop.map(DesktopUploadSignature.init)
-                    let timezone = settings.timezoneModuleEnabled ? timeZone.snapshot : nil
-                    let timezoneSignature = timezone.map(TimeZoneUploadSignature.init)
-                    let music = settings.appleMusicModuleEnabled ? appleMusic.snapshot : nil
-                    let musicSignature = music.map(AppleMusicUploadSignature.init)
+                    /**
+                     * 一次性把这一圈要看的东西全捕获下来。
+                     *
+                     * 从这里到 POST 之间没有挂起点，所以「判断依据」和「实际发出去
+                     * 的内容」必然是同一份 —— 从前这靠一长串同名局部变量维持，现在
+                     * 靠这个快照。判断本身（发什么、发不发、急不急）搬进了
+                     * `ReportDecision`：纯函数，规则可以被单测直接钉住。
+                     */
+                    let capturedDesktop = settings.desktopModuleEnabled
+                        ? desktopActivity.snapshot : nil
+                    // POST 飞行期间可能又刷了一次 token，notePosted 要的是这一份。
                     let credentials = appleMusicCredentialStore.credentials
-                    let developerTokenChanged = appleMusicCredentialStore.developerTokenChanged
-                    let musicUserTokenChanged = appleMusicCredentialStore.musicUserTokenChanged
-                    let chargerChanged = charger != nil && charger != lastPostedChargingDevices
-                    let desktopChanged = capturedDesktop != nil && (
-                        desktopBlocked
-                            ? !lastPostedDesktopWasHidden
-                            : desktopSignature != nil && (
-                                lastPostedDesktopWasHidden || desktopSignature != lastPostedDesktop
+                    let inputs = ReportInputs(
+                        now: Date(),
+                        suspended: suspended,
+                        appleMusicModuleEnabled: settings.appleMusicModuleEnabled,
+                        vibeCodingModuleEnabled: settings.vibeCodingModuleEnabled,
+                        charger: chargingDevicesPayload,
+                        capturedDesktop: capturedDesktop,
+                        desktopBlocked: isDesktopReportingBlocked(capturedDesktop),
+                        timezone: settings.timezoneModuleEnabled ? timeZone.snapshot : nil,
+                        music: settings.appleMusicModuleEnabled ? appleMusic.snapshot : nil,
+                        credentials: credentials.map {
+                            AppleMusicCredentialsSnapshot(
+                                musicUserToken: $0.musicUserToken,
+                                developerToken: $0.developerToken,
+                                expiresAt: $0.expiresAt
                             )
+                        },
+                        developerTokenChanged: appleMusicCredentialStore.developerTokenChanged,
+                        musicUserTokenChanged: appleMusicCredentialStore.musicUserTokenChanged,
+                        vibeCodingUsagePayload: vibeCodingUsageCollector.uploadPayload,
+                        vibeCodingNowPayload: codingSessions.uploadPayload,
+                        vibeCodingYearPayload: vibeCodingYearCollector.uploadPayload,
+                        vibeCodingUsageUpdatedAt: vibeCodingUsageCollector.payloadUpdatedAt,
+                        vibeCodingNowUpdatedAt: codingSessions.payloadUpdatedAt,
+                        vibeCodingYearUpdatedAt: vibeCodingYearCollector.payloadUpdatedAt,
+                        manualModules: pendingManualReports
                     )
-                    let timezoneChanged = timezoneSignature != nil && timezoneSignature != lastPostedTimeZone
-                    // 进度不参与变化判断，只在它偏离网页的预测值时才重新对锚点，
-                    // 否则播放中每一轮都会「有变化」，按需上报就退化成了定时轮询。
-                    // 单曲循环时 trackID 不变，靠进度跳回开头被这里认出来。
-                    let musicSeeked = music.map {
-                        guard let anchor = lastPostedMusicAnchor else { return true }
-                        let drift = $0.positionMs - anchor.predicted(at: $0.observedAt)
-                        return abs(drift) > Self.musicSeekToleranceMs
-                    } ?? false
-                    // snapshot 从有值变成 nil 时也要发送一次 null，避免网页保留旧歌曲。
-                    let musicChanged = settings.appleMusicModuleEnabled &&
-                        (musicSignature != lastPostedAppleMusic || musicSeeked)
-                    /// 两个模块各判各的变化。门闩看的是载荷**变化**的时刻而不是采集
-                    /// 成功的时刻 —— 会话状态 60 秒扫一次，绝大多数轮次什么都没变，拿
-                    /// lastSuccess 当门闩会把每一轮扫描都变成一次上报。
-                    let vibeCodingEnabled = settings.vibeCodingModuleEnabled
-                    func vibeCodingChanged(_ updatedAt: Date?, _ lastPosted: Date?) -> Bool {
-                        guard vibeCodingEnabled, let updatedAt else { return false }
-                        return lastPosted.map { updatedAt > $0 } ?? true
-                    }
-                    let usageChanged = vibeCodingChanged(
-                        vibeCodingUsageCollector.payloadUpdatedAt, lastPostedVibeCodingUsageAt
+                    let decision = ReportDecision(
+                        inputs: inputs,
+                        lastPosted: lastPosted,
+                        backoffUntil: backoffUntil,
+                        nextPostAt: nextPostAt,
+                        chargingBurst: chargingBurst
                     )
-                    let nowChanged = vibeCodingChanged(
-                        codingSessions.payloadUpdatedAt, lastPostedVibeCodingNowAt
-                    )
-                    let yearChanged = vibeCodingChanged(
-                        vibeCodingYearCollector.payloadUpdatedAt, lastPostedVibeCodingYearAt
-                    )
-                    let manualModules = pendingManualReports
-                    manualModulesForAttempt = manualModules
-                    let manualMode = !manualModules.isEmpty
-                    // 手动上报有意只发用户选中的那个模块。自动攒下的变化留给下一轮
-                    // 常规上报，不搭这封信的便车。
-                    let chargerToSend = manualMode
-                        ? manualModules.contains(.charger) && charger != nil
-                        : chargerChanged
-                    let desktopToSend = manualMode
-                        ? manualModules.contains(.desktop) && desktop != nil
-                        : desktopChanged
-                    let timezoneToSend = manualMode
-                        ? manualModules.contains(.timezone) && timezone != nil
-                        : timezoneChanged
-                    let musicToSend = manualMode
-                        ? manualModules.contains(.appleMusic) && music != nil
-                        : musicChanged
-                    // 手动上报按整个 vibe coding 走：信封只有一个，用量和此刻
-                    // 手上有什么就一起发什么。年度热力图间隔不同，单独一门。
-                    let manualVibeCoding = manualModules.contains(.vibeCoding)
-                    let usageToSend = manualMode
-                        ? manualVibeCoding && vibeCodingUsageCollector.uploadPayload != nil
-                        : usageChanged
-                    let nowToSend = manualMode
-                        ? manualVibeCoding && codingSessions.uploadPayload != nil
-                        : nowChanged
-                    let yearToSend = manualMode
-                        ? manualModules.contains(.vibeCodingYear)
-                            && vibeCodingYearCollector.uploadPayload != nil
-                        : yearChanged
-                    let credentialsToSend: AppleMusicCredentialsPayload?
-                    // 手动上报只发用户选中的模块；token 的自动变化留到下一轮。
-                    if !manualMode,
-                       let credentials,
-                       developerTokenChanged || musicUserTokenChanged {
-                        credentialsToSend = AppleMusicCredentialsPayload(
-                            musicUserToken: musicUserTokenChanged ? credentials.musicUserToken : nil,
-                            developerToken: developerTokenChanged ? credentials.developerToken : nil,
-                            expiresAt: developerTokenChanged
-                                ? Int(credentials.expiresAt.timeIntervalSince1970)
-                                : nil
-                        )
-                    } else {
-                        credentialsToSend = nil
-                    }
-                    let heartbeatDue = lastHeartbeatAt
-                        .map { Date().timeIntervalSince($0) >= Self.heartbeatInterval } ?? true
-                    let dataChanged = chargerToSend || desktopToSend || timezoneToSend ||
-                        musicToSend || usageToSend || nowToSend || yearToSend ||
-                        credentialsToSend != nil
-                    /**
-                     * 只在没有数据要发的时候才补心跳 —— 有数据时那个包本身就证明
-                     * 活着，再补一条是白发。
-                     *
-                     * 心跳和数据走同一个端点、同一个 v4 信封，区别只在 modules 空不空。
-                     * 于是「这台 Mac 还活着」在接收端只有一个写入点。
-                     */
-                    // sendHeartbeat 自己也会拦住睡眠期间的在线心跳；这里再判一次
-                    // 只是别让门闩白推进 —— 否则醒来后还得再等满一个间隔。
-                    if heartbeatDue, !dataChanged, !suspended {
+                    // 追发到点就扣，不管这一圈最后有没有真发出去（比如退避期内）。
+                    chargingBurst = decision.chargingBurst
+                    manualModulesForAttempt = decision.manualModules
+
+                    if decision.shouldSendHeartbeat {
                         sendHeartbeat("online")
-                        lastHeartbeatAt = Date()
+                        lastPosted.heartbeatAt = inputs.now
                     }
 
-                    // 播放/暂停、换歌、换前台应用是用户正盯着的事，不值得为它们等满节流窗口。
-                    // 这些变化本来也会上报，即时化只是把等待砍掉，不增加请求总数；
-                    // 同一个 envelope 会把此刻待发的充电器 / 用量一起捎走。
-                    // 进度跳变也算紧急。单曲循环时曲目和状态都没变，只有进度
-                    // 从结尾跳回开头 —— 不放行的话网页会把进度条钉在 100%，
-                    // 一直等到下一个节流窗口（实测 postInterval=30 时要等 30 秒）。
-                    // 拖动进度条同理。这不会变吵：seek 只在通知或兜底重读时才
-                    // 被发现，而通知只在换歌/播放状态变化时来。
-                    let musicUrgent = !manualMode && musicChanged && (
-                        musicSeeked ||
-                        music?.state != lastPostedAppleMusic?.state ||
-                        music?.trackID != lastPostedAppleMusic?.trackID ||
-                        musicSignature?.queueIndex != lastPostedAppleMusic?.queueIndex ||
-                        musicSignature?.queueTrackIDs != lastPostedAppleMusic?.queueTrackIDs
-                    )
-                    // 只认应用身份：图标变了（同一个 App 换了图标）也算 desktopChanged，
-                    // 但不值得为它绕过节流窗口。
-                    // Cmd-Tab 路过的中间应用一般不会把循环叫醒 —— 激活通知那侧压了
-                    // 400ms 的 desktopSettleDelay，只有最后停下的那个才放行。
-                    // 但那只防住「叫醒」这条路：tick 恰好落在切换途中时照样会采到中间
-                    // 那个应用。真要根治得在这里再比一次，眼下不值当。
-                    let desktopUrgent = !manualMode && desktopChanged && (
-                        desktopBlocked ||
-                        lastPostedDesktopWasHidden ||
-                        desktop?.bundleIdentifier != lastPostedDesktop?.bundleIdentifier ||
-                        desktop?.applicationName != lastPostedDesktop?.applicationName
-                    )
-                    let timezoneUrgent = !manualMode && timezoneChanged
-                    // 插拔和换设备也是用户正盯着的事，跟播放/前台应用同一档。
-                    // 只认结构性指纹：功率、电压、电流的滚动照旧等节流窗口，
-                    // 否则充电中每一轮都「有变化」，即时上报就退化成 5 秒一次的轮询。
-                    let chargerStructuralChanged =
-                        chargerStructural != nil && chargerStructural != lastPostedChargingStructural
-                    /**
-                     * 追发的排期。
-                     *
-                     * 结构一变就把计数重置满 —— 拔了又插算两次独立的接入，第二次
-                     * 同样需要完整的观察窗口，不该沿用上一次剩下的额度。
-                     *
-                     * 到点就扣，不管这一圈最后有没有真发出去（比如退避期内）。
-                     * 否则服务端一直失败时，这个计数会一直挂着，等退避结束后突然
-                     * 补发一串早就过时的追发。
-                     */
-                    if chargerStructuralChanged {
-                        chargingBurstRemaining = Self.chargingBurstCount
-                        chargingBurstAt = Date().addingTimeInterval(Self.chargingBurstInterval)
-                    }
-                    let chargingBurstDue = chargingBurstRemaining > 0 && Date() >= chargingBurstAt
-                    if chargingBurstDue {
-                        chargingBurstRemaining -= 1
-                        chargingBurstAt = Date().addingTimeInterval(Self.chargingBurstInterval)
-                    }
-                    let chargerUrgent = !manualMode && (chargerStructuralChanged || chargingBurstDue)
-                    // 退避期内一律不放行。否则服务端挂掉时，未推进的 lastPosted 会让
-                    // urgent 一直为真，即时上报就变成每圈一次的重试风暴。
-                    let urgent = (manualMode || musicUrgent || desktopUrgent || timezoneUrgent ||
-                        chargerUrgent || credentialsToSend != nil) && Date() >= backoffUntil
-                    // 宣告过离线就不再发数据包。跳过不丢东西：lastPosted 门闩没推进，
-                    // 醒来那一下这些变化仍然是 urgent，会立刻补发。
-                    let shouldPost = !suspended && Date() >= backoffUntil &&
-                        (manualMode || urgent || Date() >= nextPostAt)
-
-                    if let url, dataChanged, shouldPost {
+                    if let url, decision.dataChanged, decision.shouldPost {
                         let desktopPayload: DesktopActivitySnapshot?
-                        if desktopBlocked, let capturedDesktop {
+                        if inputs.desktopBlocked, let capturedDesktop = inputs.capturedDesktop {
                             desktopPayload = .hidden(observedAt: capturedDesktop.observedAt)
-                        } else if let desktop {
+                        } else if let desktop = inputs.desktop {
                             // 名称不等图标：对象已经确认好就顺手带上，否则先发无图状态，
                             // 后台 resolver 成功后再叫醒一轮补对象键。
                             let iconObjectKey = desktopIconObjectKeyIfReady(desktop)
@@ -955,24 +779,21 @@ final class ServiceController: ObservableObject {
                         }
                         // 封面不再由这边送：网页那边为了拿曲目链接本来就要查一次
                         // Apple Music 目录，那次查询的结果自带封面 URL。
-                        let musicPayload = music
-                        // 用量与会话累计来自同一持久账本。
-                        let vibeCodingUsagePayload = vibeCodingUsageCollector.uploadPayload
-                        // POST 等待期间可以继续采集；成功只确认这封信实际携带的版本。
-                        let sentUsageAt = vibeCodingUsageCollector.payloadUpdatedAt
-                        let sentNowAt = codingSessions.payloadUpdatedAt
-                        let sentYearAt = vibeCodingYearCollector.payloadUpdatedAt
-                        let envelope = makeTelemetryEnvelope(
-                            chargingDevices: chargerToSend ? charger : nil,
-                            desktop: desktopToSend ? desktopPayload : nil,
-                            timezone: timezoneToSend ? timezone : nil,
-                            appleMusic: musicToSend ? musicPayload : nil,
-                            appleMusicCredentials: credentialsToSend,
-                            vibeCodingUsage: usageToSend ? vibeCodingUsagePayload : nil,
-                            vibeCodingNow: nowToSend ? codingSessions.uploadPayload : nil,
-                            vibeCodingYear: yearToSend ? vibeCodingYearCollector.uploadPayload : nil,
-                            includeDesktop: desktopToSend,
-                            includeAppleMusic: musicToSend
+                        // 三份 vibe coding 载荷和它们的更新时刻都在 inputs 里 ——
+                        // POST 等待期间可以继续采集，成功只确认这封信实际携带的版本。
+                        let envelope = TelemetryEnvelope.make(
+                            chargingDevices: decision.chargerToSend ? inputs.charger : nil,
+                            desktop: decision.desktopToSend ? desktopPayload : nil,
+                            timezone: decision.timezoneToSend ? inputs.timezone : nil,
+                            appleMusic: decision.musicToSend ? inputs.music : nil,
+                            appleMusicCredentials: decision.credentialsToSend,
+                            vibeCodingUsage: decision.usageToSend ? inputs.vibeCodingUsagePayload : nil,
+                            vibeCodingNow: decision.nowToSend ? inputs.vibeCodingNowPayload : nil,
+                            vibeCodingYear: decision.yearToSend ? inputs.vibeCodingYearPayload : nil,
+                            includeDesktop: decision.desktopToSend,
+                            includeAppleMusic: decision.musicToSend,
+                            activeModules: activeModuleNames,
+                            now: inputs.now
                         )
                         var request = URLRequest(url: url)
                         request.httpMethod = "POST"
@@ -983,7 +804,7 @@ final class ServiceController: ObservableObject {
                             request.setValue("Bearer \(settings.telemetrySecret)", forHTTPHeaderField: "Authorization")
                         }
                         request.timeoutInterval = timeout
-                        attemptedAppleMusicCredentials = credentialsToSend != nil
+                        attemptedAppleMusicCredentials = decision.credentialsToSend != nil
                         let (responseData, response) = try await IsolatedHTTPClient.data(for: request)
                         try Task.checkCancellation()
                         if let response = response as? HTTPURLResponse, !(200..<300).contains(response.statusCode) {
@@ -994,71 +815,46 @@ final class ServiceController: ObservableObject {
                         }
                         let responsePayload = try JSONDecoder()
                             .decode(TelemetryIngestResponse.self, from: responseData)
-                        let desktopIconAvailable = responsePayload.data.desktopIconAvailable
-                        let chargerCoverIconAvailable = responsePayload.data.chargerCoverIconAvailable
-                        if desktopToSend, desktopIconAvailable == nil {
+                        if decision.desktopToSend, responsePayload.data.desktopIconAvailable == nil {
                             throw ReporterError.invalidTelemetryResponse
                         }
                         reporterLastSuccess = Date()
                         reporterLastError = nil
-                        lastHeartbeatAt = Date()
-                        if chargerToSend {
-                            lastPostedChargingDevices = charger
-                            if chargerCoverIconAvailable == false,
-                               let source = covers.coverUploadSource,
-                               let iconHash = source.iconHash {
-                                if charger?.devices.first(where: { $0.kind == .charger })?.cover?.iconObjectKey != nil {
-                                    forgetUploadedIcon(iconHash)
-                                }
-                                startCoverIconResolution(source)
-                                if uploadedIconHashes.contains(iconHash) {
-                                    lastPostedChargingDevices = nil
-                                    wakeReporter()
-                                }
+                        // 门闩推进是纯的；余下三件要读此刻的活状态（封面来源、已确认
+                        // 的图标记忆）或动后台 resolver，只能留在主 actor 上。
+                        let effects = lastPosted.commit(
+                            decision: decision,
+                            response: responsePayload.data,
+                            desktopPayloadHasObjectKey: desktopPayload?.iconObjectKey != nil
+                        )
+                        if effects.coverIconRejected,
+                           let source = covers.coverUploadSource,
+                           let iconHash = source.iconHash {
+                            if effects.sentCoverHadObjectKey { forgetUploadedIcon(iconHash) }
+                            startCoverIconResolution(source)
+                            if uploadedIconHashes.contains(iconHash) {
+                                lastPosted.chargingDevices = nil
+                                wakeReporter()
                             }
                         }
-                        // 结构指纹跟着每次成功发送推进，跟 chargerChanged 无关：
-                        // 结构变了完整指纹必然也变，反过来不成立。
-                        if let chargerStructural { lastPostedChargingStructural = chargerStructural }
-                        if desktopToSend {
-                            if desktopBlocked {
-                                // 进入黑名单应用时只发一次虚拟应用；真实身份和图标都不进载荷。
-                                lastPostedDesktop = nil
-                                lastPostedDesktopWasHidden = true
-                            } else if desktopIconAvailable == false,
-                               let desktop,
-                               let iconHash = desktop.iconHash {
-                                // false 只说明这次信封没有可用对象键。先把名称门闩推进，
-                                // 不在这里自唤醒；否则 R2 未配置 / PNG 编码失败会打成热循环。
-                                lastPostedDesktop = desktopSignature
-                                if desktopPayload?.iconObjectKey != nil {
-                                    // 兼容服务端今后恢复对象校验：带了键仍返回 false，说明
-                                    // 这份本地“已上传”记忆失效，后台重新 HEAD/PUT。
-                                    forgetUploadedIcon(iconHash)
-                                }
-                                startDesktopIconResolution(desktop)
-                                // resolver 可能在 POST 飞行期间已经完成；补上那次竞态唤醒。
-                                if uploadedIconHashes.contains(iconHash) {
-                                    lastPostedDesktop = nil
-                                    wakeReporter()
-                                }
-                                lastPostedDesktopWasHidden = false
-                            } else {
-                                lastPostedDesktop = desktopSignature
-                                lastPostedDesktopWasHidden = false
-                                // 服务端可能只是命中了自己的旧 iconHash 映射；只有这次
-                                // 信封真的带了对象键，才把本地状态记成已确认。
-                                if let desktop, desktopPayload?.iconObjectKey != nil {
-                                    rememberUploadedDesktopIcon(desktop)
-                                }
+                        if let rejected = effects.desktopIconRejected,
+                           let iconHash = rejected.iconHash {
+                            if desktopPayload?.iconObjectKey != nil {
+                                // 兼容服务端今后恢复对象校验：带了键仍返回 false，说明
+                                // 这份本地“已上传”记忆失效，后台重新 HEAD/PUT。
+                                forgetUploadedIcon(iconHash)
+                            }
+                            startDesktopIconResolution(rejected)
+                            // resolver 可能在 POST 飞行期间已经完成；补上那次竞态唤醒。
+                            if uploadedIconHashes.contains(iconHash) {
+                                lastPosted.desktop = nil
+                                wakeReporter()
                             }
                         }
-                        if timezoneToSend { lastPostedTimeZone = timezoneSignature }
-                        if musicToSend {
-                            lastPostedAppleMusic = musicSignature
-                            lastPostedMusicAnchor = music.map(AppleMusicPositionAnchor.init)
+                        if let confirmed = effects.desktopIconConfirmed {
+                            rememberUploadedDesktopIcon(confirmed)
                         }
-                        if let credentialsToSend {
+                        if let credentialsToSend = decision.credentialsToSend {
                             appleMusicCredentialStore.notePosted(
                                 credentials,
                                 developerToken: credentialsToSend.developerToken != nil,
@@ -1066,13 +862,6 @@ final class ServiceController: ObservableObject {
                             )
                             appleMusicCredentialsUploadAt = Date()
                             appleMusicCredentialsUploadError = nil
-                        }
-                        if usageToSend {
-                            lastPostedVibeCodingUsageAt = sentUsageAt
-                        }
-                        if nowToSend { lastPostedVibeCodingNowAt = sentNowAt }
-                        if yearToSend {
-                            lastPostedVibeCodingYearAt = sentYearAt
                         }
                         if !manualModulesForAttempt.isEmpty {
                             pendingManualReports.subtract(manualModulesForAttempt)
@@ -1174,9 +963,9 @@ final class ServiceController: ObservableObject {
 
                     // resolver 早于首包完成时，400ms 防抖会自然把键带上，不额外叫醒。
                     // 只有无图版本已经成功发过，才需要补发同一应用的对象键。
-                    if self.lastPostedDesktop == signature,
+                    if self.lastPosted.desktop == signature,
                        self.desktopActivity.snapshot.map(DesktopUploadSignature.init) == signature {
-                        self.lastPostedDesktop = nil
+                        self.lastPosted.desktop = nil
                         self.wakeReporter()
                     }
                     break
@@ -1302,7 +1091,7 @@ final class ServiceController: ObservableObject {
                     self.iconVerifiedAt[iconHash] = Date()
                     self.rememberUploadedCoverIcon(iconHash)
                     if self.lastPostedChargerCover(hash: iconHash, hasObjectKey: false) {
-                        self.lastPostedChargingDevices = nil
+                        self.lastPosted.chargingDevices = nil
                         self.wakeReporter()
                     }
                     break
@@ -1322,41 +1111,9 @@ final class ServiceController: ObservableObject {
     }
 
     private func lastPostedChargerCover(hash: String, hasObjectKey: Bool) -> Bool {
-        guard let cover = lastPostedChargingDevices?.devices.first(where: { $0.kind == .charger })?.cover
+        guard let cover = lastPosted.chargingDevices?.devices.first(where: { $0.kind == .charger })?.cover
         else { return false }
         return cover.iconHash == hash && (cover.iconObjectKey != nil) == hasObjectKey
-    }
-
-    private func makeTelemetryEnvelope(
-        chargingDevices: ChargingDevicesPayload?,
-        desktop: DesktopActivitySnapshot?,
-        timezone: TimeZoneSnapshot?,
-        appleMusic: AppleMusicSnapshot?,
-        appleMusicCredentials: AppleMusicCredentialsPayload?,
-        vibeCodingUsage: JSONValue?,
-        vibeCodingNow: JSONValue?,
-        vibeCodingYear: JSONValue? = nil,
-        includeDesktop: Bool,
-        includeAppleMusic: Bool,
-        presence: String = "online"
-    ) -> TelemetryEnvelope {
-        return TelemetryEnvelope(
-            heartbeatAt: Int64(Date().timeIntervalSince1970 * 1_000),
-            activeModules: activeModuleNames,
-            modules: TelemetryModulesPayload(
-                chargingDevices: chargingDevices,
-                desktop: desktop,
-                appleMusic: appleMusic,
-                appleMusicCredentials: appleMusicCredentials,
-                timezone: timezone,
-                vibeCodingUsage: vibeCodingUsage,
-                vibeCodingNow: vibeCodingNow,
-                vibeCodingYear: vibeCodingYear,
-                includeDesktop: includeDesktop,
-                includeAppleMusic: includeAppleMusic
-            ),
-            presence: presence
-        )
     }
 
     /**
@@ -1377,16 +1134,11 @@ final class ServiceController: ObservableObject {
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
         request.httpBody = try? JSONCoding.encoder().encode(
-            makeTelemetryEnvelope(
-                chargingDevices: nil,
-                desktop: nil,
-                timezone: nil,
-                appleMusic: nil,
-                appleMusicCredentials: nil,
-                vibeCodingUsage: nil,
-                vibeCodingNow: nil,
+            TelemetryEnvelope.make(
                 includeDesktop: false,
                 includeAppleMusic: false,
+                activeModules: activeModuleNames,
+                now: Date(),
                 presence: presence
             )
         )
