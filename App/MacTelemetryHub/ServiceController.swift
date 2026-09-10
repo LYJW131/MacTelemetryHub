@@ -41,12 +41,9 @@ final class ServiceController: ObservableObject {
     @Published private(set) var appleMusicCredentialsUploadAt: Date?
     @Published private(set) var appleMusicCredentialsUploadError: String?
     @Published private(set) var isUploadingAppleMusicCredentials = false
-    /// MusicKit 最近一次返回的缓存值。
-    private var appleMusicCredentials: AppleMusicCredentials?
-    private var lastPostedAppleMusicDeveloperToken: String?
-    private var lastPostedAppleMusicUserToken: String?
-    private var nextAppleMusicCredentialsRefreshAt = Date.distantPast
-    private var isRefreshingAppleMusicCredentials = false
+    /// 两个 token 本身、续期节奏、已上报记录都归它。上面三个 @Published 是 UI 状态，
+    /// 留在这里 —— 转发成计算属性的话 SwiftUI 的观察会静默失效。
+    let appleMusicCredentialStore: AppleMusicCredentialStore
     @Published private(set) var pendingManualReports: Set<TelemetryModule> = []
     @Published private(set) var lastManualReportError: [TelemetryModule: String] = [:]
     @Published private(set) var lastManualReportAt: [TelemetryModule: Date] = [:]
@@ -144,12 +141,6 @@ final class ServiceController: ObservableObject {
     private static let chargingBurstInterval: TimeInterval = 5
     private static let chargingBurstCount = 5
 
-    /// MusicKit 读取失败后的退避。
-    private static let appleMusicRetryDelay: TimeInterval = 60
-
-    /// token 检测仍在主循环内，但 MusicKit 的缓存没有必要每五秒读取一次。
-    private static let appleMusicCredentialsRefreshInterval: TimeInterval = 5 * 60
-
     /**
      * 前台应用的防抖窗口。
      *
@@ -176,6 +167,7 @@ final class ServiceController: ObservableObject {
         powerBankLink = powerBank
         chargingLinks = [charger, powerBank]
         covers = ChargerCoverController(settings: settings, chargerLink: charger)
+        appleMusicCredentialStore = AppleMusicCredentialStore(authorization: appleMusicAuthorization)
     }
 
     deinit {
@@ -375,8 +367,8 @@ final class ServiceController: ObservableObject {
     /**
      * 首次授权，由用户在设置页点出来 —— 只有这条路径会弹系统对话框。
      *
-     * 授权成功就立刻读取 MusicKit 当前缓存并叫醒上报循环。网络请求仍只有主循环
-     * 那一条路径，按钮不会另开端点或绕过统一的变化判断。
+     * 授权和取 token 都在 AppleMusicCredentialStore 里；这里只管按钮的三个
+     * UI 状态，以及授权成功后叫醒循环。网络请求仍只有主循环那一条路径。
      */
     func authorizeAppleMusic() async {
         guard !isUploadingAppleMusicCredentials else { return }
@@ -384,59 +376,27 @@ final class ServiceController: ObservableObject {
         appleMusicCredentialsUploadError = nil
         defer { isUploadingAppleMusicCredentials = false }
 
-        guard await appleMusicAuthorization.requestAuthorization() else {
-            appleMusicCredentialsUploadError = appleMusicAuthorization.lastError
-            return
+        switch await appleMusicCredentialStore.authorize() {
+        case let .failed(message):
+            appleMusicCredentialsUploadError = message
+        case let .ready(error):
+            appleMusicCredentialsUploadError = error
+            guard settings.postEnabled else {
+                appleMusicCredentialsUploadError = "Apple Music 已授权；开启远端上报后会自动发送 token。"
+                return
+            }
+            wakeReporter()
         }
-        await refreshAppleMusicCredentialsIfNeeded(force: true)
-        guard appleMusicCredentials != nil else {
-            appleMusicCredentialsUploadError = appleMusicAuthorization.lastError
-            return
-        }
-        guard settings.postEnabled else {
-            appleMusicCredentialsUploadError = "Apple Music 已授权；开启远端上报后会自动发送 token。"
-            return
-        }
-        wakeReporter()
     }
 
-    /**
-     * 在主上报循环里定期读取 MusicKit 的 token。
-     *
-     * 平时读的是 SDK 缓存，不产生网络请求；缓存那份过了半衰期由
-     * AppleMusicAuthorizationManager 带 ignoreCache 重签。下面的主循环分别比较
-     * 两个 token，只上报变了的字段。
-     */
-    private func refreshAppleMusicCredentialsIfNeeded(force: Bool = false) async {
-        guard !isRefreshingAppleMusicCredentials else { return }
-        // 后台绝不请求授权，没批准就什么都不做 —— 从循环里弹系统弹窗是不能接受的
-        guard appleMusicAuthorization.isCurrentlyAuthorized else { return }
-        guard force || Date() >= nextAppleMusicCredentialsRefreshAt else { return }
-        isRefreshingAppleMusicCredentials = true
-        defer { isRefreshingAppleMusicCredentials = false }
-        guard let minted = await appleMusicAuthorization.mintCredentials(
-            held: appleMusicCredentials?.lifetime
-        ) else {
-            appleMusicCredentialsUploadError = appleMusicAuthorization.lastError
-            nextAppleMusicCredentialsRefreshAt = Date().addingTimeInterval(Self.appleMusicRetryDelay)
-            return
+    /// 循环每圈问一次「该不该重读 token」。门闩、退避、不让旧的顶掉新的都在
+    /// store 里，这里只把结果落到 UI 的错误文案上。
+    private func refreshAppleMusicCredentialsIfNeeded() async {
+        switch await appleMusicCredentialStore.refreshIfNeeded() {
+        case .skipped: break
+        case let .failed(message): appleMusicCredentialsUploadError = message
+        case .refreshed: appleMusicCredentialsUploadError = nil
         }
-        // 到期更早的 developer token 不能顶掉手里的：SDK 缓存可能回退到重签前那份，
-        // 要不要重签已经按手里那份判过了（见 mintCredentials 的 held），这里只负责
-        // 不让旧的顶掉新的。user token 不绑定某一份 developer token，它的变化照常接受。
-        if let held = appleMusicCredentials, minted.expiresAt < held.expiresAt {
-            appleMusicCredentials = AppleMusicCredentials(
-                musicUserToken: minted.musicUserToken,
-                developerToken: held.developerToken,
-                lifetime: held.lifetime
-            )
-        } else {
-            appleMusicCredentials = minted
-        }
-        appleMusicCredentialsUploadError = nil
-        nextAppleMusicCredentialsRefreshAt = Date().addingTimeInterval(
-            Self.appleMusicCredentialsRefreshInterval
-        )
     }
 
     private func moduleIsEnabled(_ module: TelemetryModule) -> Bool {
@@ -762,8 +722,7 @@ final class ServiceController: ObservableObject {
         lastPostedAppleMusic = nil
         lastPostedMusicAnchor = nil
         // 每个上报会话都完整发一次，之后两个 token 才分别判变。
-        lastPostedAppleMusicDeveloperToken = nil
-        lastPostedAppleMusicUserToken = nil
+        appleMusicCredentialStore.resetPostedTokens()
         lastHeartbeatAt = nil
         pendingManualReports.removeAll()
         lastManualReportError.removeAll()
@@ -811,13 +770,9 @@ final class ServiceController: ObservableObject {
                     let timezoneSignature = timezone.map(TimeZoneUploadSignature.init)
                     let music = settings.appleMusicModuleEnabled ? appleMusic.snapshot : nil
                     let musicSignature = music.map(AppleMusicUploadSignature.init)
-                    let credentials = appleMusicCredentials
-                    let developerTokenChanged = credentials.map {
-                        $0.developerToken != lastPostedAppleMusicDeveloperToken
-                    } ?? false
-                    let musicUserTokenChanged = credentials.map {
-                        $0.musicUserToken != lastPostedAppleMusicUserToken
-                    } ?? false
+                    let credentials = appleMusicCredentialStore.credentials
+                    let developerTokenChanged = appleMusicCredentialStore.developerTokenChanged
+                    let musicUserTokenChanged = appleMusicCredentialStore.musicUserTokenChanged
                     let chargerChanged = charger != nil && charger != lastPostedChargingDevices
                     let desktopChanged = capturedDesktop != nil && (
                         desktopBlocked
@@ -1099,12 +1054,11 @@ final class ServiceController: ObservableObject {
                             lastPostedMusicAnchor = music.map(AppleMusicPositionAnchor.init)
                         }
                         if let credentialsToSend {
-                            if credentialsToSend.developerToken != nil {
-                                lastPostedAppleMusicDeveloperToken = credentials?.developerToken
-                            }
-                            if credentialsToSend.musicUserToken != nil {
-                                lastPostedAppleMusicUserToken = credentials?.musicUserToken
-                            }
+                            appleMusicCredentialStore.notePosted(
+                                credentials,
+                                developerToken: credentialsToSend.developerToken != nil,
+                                musicUserToken: credentialsToSend.musicUserToken != nil
+                            )
                             appleMusicCredentialsUploadAt = Date()
                             appleMusicCredentialsUploadError = nil
                         }
@@ -1506,7 +1460,8 @@ final class ServiceController: ObservableObject {
                 status: appleMusicAuthorization.statusDescription,
                 authorized: appleMusicAuthorization.isAuthorized,
                 hasUserToken: appleMusicAuthorization.hasUserToken,
-                developerTokenExpiresAt: appleMusicCredentials.map { Int($0.expiresAt.timeIntervalSince1970) },
+                developerTokenExpiresAt: appleMusicCredentialStore.credentials
+                    .map { Int($0.expiresAt.timeIntervalSince1970) },
                 lastUploadAt: appleMusicCredentialsUploadAt.map { Int($0.timeIntervalSince1970 * 1000) },
                 lastError: appleMusicCredentialsUploadError ?? appleMusicAuthorization.lastError
             ))
