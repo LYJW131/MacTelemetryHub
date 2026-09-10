@@ -23,7 +23,8 @@ final class ServiceController: ObservableObject {
     let vibeCodingUsageCollector = VibeCodingUsageMonitor()
     let codingSessions = CodingSessionMonitor()
     let vibeCodingYearCollector = VibeCodingYearMonitor()
-    private let chargingSSE = ChargingSSEBroker()
+    /// 本机推流的订阅者。ServiceController+LocalAPI 要用，所以不是 private。
+    let chargingSSE = ChargingSSEBroker()
     lazy private(set) var httpServer = LocalHTTPServer { [weak self] request in
         guard let self else {
             return .response(.text("Unavailable\n", status: 503, reason: "Service Unavailable"))
@@ -64,9 +65,11 @@ final class ServiceController: ObservableObject {
     private var lastPostedDesktopWasHidden = false
     /// 这个上报会话里已经在 R2 确认存在的图标身份指纹。
     /// 桌面图标和充电头封面共用这一份记忆，所以名字里没有 desktop。
-    private var uploadedIconHashes: Set<String> = []
+    /// 本机 /health 会读，所以不是 private。
+    var uploadedIconHashes: Set<String> = []
     /// 图标直传的重试额度与退避，按身份哈希记。规则本身在 TelemetryCore，有单测。
-    private var iconUploadBudget = IconUploadBudget()
+    /// 本机 /health 会读，所以不是 private。
+    var iconUploadBudget = IconUploadBudget()
     /** 图标直传的失败只进过 reporterLastError；写进统一日志才能事后查 */
     private static let iconLogger = Logger(
         subsystem: Bundle.main.bundleIdentifier ?? "MacTelemetryHub",
@@ -77,7 +80,8 @@ final class ServiceController: ObservableObject {
     private var iconVerifiedAt: [String: Date] = [:]
     private static let iconVerificationInterval: TimeInterval = 5 * 60
     /// 同一枚图标在飞的那一次后台检查 / 直传。
-    private var iconResolvers: [String: (id: UUID, task: Task<Void, Never>)] = [:]
+    /// 本机 /health 会读，所以不是 private。
+    var iconResolvers: [String: (id: UUID, task: Task<Void, Never>)] = [:]
     private var uploadedIconOrder: [String] = []
     private var lastPostedTimeZone: TimeZoneUploadSignature?
     private var lastPostedAppleMusic: AppleMusicUploadSignature?
@@ -469,7 +473,8 @@ final class ServiceController: ObservableObject {
         startCoverIconResolution(source)
     }
 
-    private func streamEvent(for link: BluetoothService) -> ChargingStreamEvent {
+    /// SSE 订阅时的首帧由 ServiceController+LocalAPI 发，所以不是 private。
+    func streamEvent(for link: BluetoothService) -> ChargingStreamEvent {
         ChargingStreamEvent(
             phase: link.phase.label,
             connected: link.isConnected,
@@ -1442,136 +1447,4 @@ final class ServiceController: ObservableObject {
         }
         return names
     }
-
-    private func route(_ request: HTTPRequest) async -> HTTPHandlerResult {
-        if request.method == "OPTIONS" { return json(EmptyObject()) }
-        switch (request.method, request.path) {
-        case ("GET", "/"):
-            return json([
-                "health": "/health",
-                "charger": "/sse/charger",
-                "powerBank": "/sse/powerbank",
-                "appleMusicAuthorization": "/apple-music/authorization",
-            ])
-        case ("GET", "/apple-music/authorization"):
-            // 只报状态，两个 token 的值绝不出本机。给排查「后端手里那份为什么过期」用：
-            // 这里的到期时刻就是上次上报出去的那份 developer token 的到期时刻
-            return json(AppleMusicAuthorizationPayload(
-                status: appleMusicAuthorization.statusDescription,
-                authorized: appleMusicAuthorization.isAuthorized,
-                hasUserToken: appleMusicAuthorization.hasUserToken,
-                developerTokenExpiresAt: appleMusicCredentialStore.credentials
-                    .map { Int($0.expiresAt.timeIntervalSince1970) },
-                lastUploadAt: appleMusicCredentialsUploadAt.map { Int($0.timeIntervalSince1970 * 1000) },
-                lastError: appleMusicCredentialsUploadError ?? appleMusicAuthorization.lastError
-            ))
-        case ("GET", "/health"):
-            let desktop = desktopActivity.snapshot
-            return json(HealthPayload(
-                ok: true,
-                reporter: .init(
-                    postEnabled: settings.postEnabled,
-                    lastSuccessAt: reporterLastSuccess.map { Int($0.timeIntervalSince1970 * 1000) },
-                    lastError: reporterLastError,
-                    r2Configured: settings.r2UploadConfiguration != nil
-                ),
-                desktopIcon: desktop.map { snapshot in
-                    .init(
-                        applicationName: snapshot.applicationName,
-                        iconHash: snapshot.iconHash,
-                        iconEncoded: snapshot.iconData != nil,
-                        objectKeyConfirmed: snapshot.iconHash.map { uploadedIconHashes.contains($0) } ?? false,
-                        uploadAttempts: snapshot.iconHash.map { iconUploadBudget.attemptCount($0) } ?? 0,
-                        resolving: snapshot.iconHash.map { iconResolvers[$0] != nil } ?? false
-                    )
-                },
-                charger: .init(
-                    enabled: settings.chargerModuleEnabled,
-                    connected: chargerLink.isConnected,
-                    phase: chargerLink.phase.label,
-                    lastError: chargerLink.lastError
-                ),
-                powerBank: .init(
-                    enabled: settings.powerBankModuleEnabled,
-                    connected: powerBankLink.isConnected,
-                    phase: powerBankLink.phase.label,
-                    lastError: powerBankLink.lastError
-                )
-            ))
-        case ("GET", "/sse/charger"):
-            return chargingStream(.charger)
-        case ("GET", "/sse/powerbank"):
-            return chargingStream(.powerBank)
-        default:
-            return json(["detail": "not found"], status: 404, reason: "Not Found")
-        }
-    }
-
-    /**
-     * 订阅一条充电设备的推流。
-     *
-     * 先把当前快照发出去，之后每一帧蓝牙遥测（约 1 Hz）再跟一帧。没有本地定时器，
-     * 设备不推这边就不发。连上瞬间那一次也走这条路，因为断开之后没有帧再来。
-     */
-    private func chargingStream(_ slot: ChargingDeviceSlot) -> HTTPHandlerResult {
-        .stream { [weak self] stream in
-            guard let self, stream.isOpen else {
-                stream.close()
-                return
-            }
-            chargingSSE.attach(stream, slot: slot)
-            chargingSSE.send(streamEvent(for: link(for: slot)), to: stream)
-        }
-    }
-
-    private func json<T: Encodable>(
-        _ value: T,
-        status: Int = 200,
-        reason: String = "OK"
-    ) -> HTTPHandlerResult {
-        do {
-            return .response(.json(try JSONCoding.encoder().encode(value), status: status, reason: reason))
-        } catch {
-            return .response(.text(
-                "{\"detail\":\"encoding failed\"}",
-                contentType: "application/json",
-                status: 500,
-                reason: "Internal Server Error"
-            ))
-        }
-    }
 }
-
-@MainActor
-private final class ChargingSSEBroker {
-    private var streams: [ChargingDeviceSlot: [ObjectIdentifier: HTTPStream]] = [:]
-
-    func attach(_ stream: HTTPStream, slot: ChargingDeviceSlot) {
-        let id = ObjectIdentifier(stream)
-        streams[slot, default: [:]][id] = stream
-        let previous = stream.onClose
-        stream.onClose = { [weak self] in
-            previous?()
-            self?.streams[slot]?[id] = nil
-        }
-    }
-
-    func send(_ event: ChargingStreamEvent, to stream: HTTPStream) {
-        guard let data = try? JSONCoding.encoder().encode(event) else { return }
-        stream.send(json: data)
-    }
-
-    func publish(_ event: ChargingStreamEvent, slot: ChargingDeviceSlot) {
-        guard let data = try? JSONCoding.encoder().encode(event) else { return }
-        for stream in (streams[slot] ?? [:]).values where stream.isOpen {
-            stream.send(json: data)
-        }
-    }
-
-    func closeAll() {
-        let open = streams.values.flatMap(\.values)
-        streams.removeAll()
-        for stream in open { stream.close() }
-    }
-}
-

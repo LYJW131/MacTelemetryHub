@@ -46,6 +46,7 @@
 		B10000000000000000000037 /* DeveloperTokenJWT.swift in Sources */ = {isa = PBXBuildFile; fileRef = F10000000000000000000036 /* DeveloperTokenJWT.swift */; };
 		B10000000000000000000038 /* AppSettings+R2.swift in Sources */ = {isa = PBXBuildFile; fileRef = F10000000000000000000037 /* AppSettings+R2.swift */; };
 		B10000000000000000000039 /* AppleMusicCredentialStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = F10000000000000000000038 /* AppleMusicCredentialStore.swift */; };
+		B1000000000000000000003A /* ServiceController+LocalAPI.swift in Sources */ = {isa = PBXBuildFile; fileRef = F10000000000000000000039 /* ServiceController+LocalAPI.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -90,6 +91,7 @@
 		F10000000000000000000036 /* DeveloperTokenJWT.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DeveloperTokenJWT.swift; sourceTree = "<group>"; };
 		F10000000000000000000037 /* AppSettings+R2.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "AppSettings+R2.swift"; sourceTree = "<group>"; };
 		F10000000000000000000038 /* AppleMusicCredentialStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppleMusicCredentialStore.swift; sourceTree = "<group>"; };
+		F10000000000000000000039 /* ServiceController+LocalAPI.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "ServiceController+LocalAPI.swift"; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -148,6 +150,7 @@
 				F10000000000000000000029 /* MusicPlayingQueue.swift */,
 				F10000000000000000000037 /* AppSettings+R2.swift */,
 				F10000000000000000000038 /* AppleMusicCredentialStore.swift */,
+				F10000000000000000000039 /* ServiceController+LocalAPI.swift */,
 			);
 			path = App/MacTelemetryHub;
 			sourceTree = SOURCE_ROOT;
@@ -289,6 +292,7 @@
 				B10000000000000000000037 /* DeveloperTokenJWT.swift in Sources */,
 				B10000000000000000000038 /* AppSettings+R2.swift in Sources */,
 				B10000000000000000000039 /* AppleMusicCredentialStore.swift in Sources */,
+				B1000000000000000000003A /* ServiceController+LocalAPI.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
