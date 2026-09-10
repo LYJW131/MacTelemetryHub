@@ -903,19 +903,21 @@ final class ServiceController: ObservableObject {
         guard force || Date() >= nextAppleMusicCredentialsRefreshAt else { return }
         isRefreshingAppleMusicCredentials = true
         defer { isRefreshingAppleMusicCredentials = false }
-        guard let minted = await appleMusicAuthorization.mintCredentials() else {
+        guard let minted = await appleMusicAuthorization.mintCredentials(
+            held: appleMusicCredentials?.lifetime
+        ) else {
             appleMusicCredentialsUploadError = appleMusicAuthorization.lastError
             nextAppleMusicCredentialsRefreshAt = Date().addingTimeInterval(Self.appleMusicRetryDelay)
             return
         }
-        // 到期更早的 developer token 不能顶掉手里的：万一 SDK 重签后缓存没跟着换，
-        // 下一轮不带 ignoreCache 又会读回旧的，两份来回交替就会每五分钟上报一次。
-        // user token 不绑定某一份 developer token，它的变化照常接受。
+        // 到期更早的 developer token 不能顶掉手里的：SDK 缓存可能回退到重签前那份，
+        // 要不要重签已经按手里那份判过了（见 mintCredentials 的 held），这里只负责
+        // 不让旧的顶掉新的。user token 不绑定某一份 developer token，它的变化照常接受。
         if let held = appleMusicCredentials, minted.expiresAt < held.expiresAt {
             appleMusicCredentials = AppleMusicCredentials(
                 musicUserToken: minted.musicUserToken,
                 developerToken: held.developerToken,
-                expiresAt: held.expiresAt
+                lifetime: held.lifetime
             )
         } else {
             appleMusicCredentials = minted
