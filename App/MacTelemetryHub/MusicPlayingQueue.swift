@@ -1,31 +1,5 @@
 import Foundation
 
-struct AppleMusicQueueTrack: Codable, Equatable, Sendable {
-    let title: String
-    let artist: String?
-    let album: String?
-    let trackID: String?
-}
-
-/**
- * Music.app 的 Playing Next。
- *
- * 公开脚本接口只有 `current track` / `current playlist`。后者是点播放时的源列表
- * （从资料库点一首就是整份「音乐」），不是面板上那条队列。真正的 Playing Next
- * 落在资料库旁的 `Queue.dat` 里，没有文档，随 Music.app 改版可能变。所以整份
- * 对象带 `beta: true`，站点不该当稳定契约。
- *
- * 文件里只有歌名和 persistent ID。艺人、专辑用一次 Apple Event 把资料库
- * `{persistent ID, artist, album}` 拉齐，按 ID 拼回去，不逐首问。
- */
-struct AppleMusicQueueSnapshot: Codable, Equatable, Sendable {
-    let beta: Bool
-    let source: String?
-    /// 当前曲在 `tracks` 里的位置。对不上 persistent ID 时为 nil。
-    let index: Int?
-    let tracks: [AppleMusicQueueTrack]
-}
-
 enum MusicPlayingQueue {
     private static let cache = Cache()
 

@@ -12,12 +12,6 @@ struct AppleMusicCredentials: Sendable {
     var expiresAt: Date { lifetime.expiresAt }
 }
 
-/** developer token 自带的两个时刻。`iat` Apple 一般都签，但规范里它是可选的 */
-struct DeveloperTokenLifetime: Sendable, Equatable {
-    let issuedAt: Date?
-    let expiresAt: Date
-}
-
 /**
  * MusicKit 授权与取 token。
  *
@@ -39,6 +33,19 @@ final class AppleMusicAuthorizationManager: ObservableObject {
     init() {
         authorizationStatus = MusicAuthorization.currentStatus
     }
+
+    /**
+     * 系统此刻的授权状态。
+     *
+     * 后台续期那条路径要的是这一个：`authorizationStatus` 是上次读到的缓存值，
+     * 用户在系统设置里撤销授权后它不会自己变。有了它，调用方不必为了问一句
+     * 「批准了吗」而 `import MusicKit`。
+     */
+    var isCurrentlyAuthorized: Bool { MusicAuthorization.currentStatus == .authorized }
+
+    /// 上次读到的授权状态是不是 authorized。本机状态接口展示用，跟
+    /// `statusDescription` 同源，两者必须一致。
+    var isAuthorized: Bool { authorizationStatus == .authorized }
 
     var statusDescription: String {
         switch authorizationStatus {
@@ -145,41 +152,14 @@ final class AppleMusicAuthorizationManager: ObservableObject {
         category: "apple-music"
     )
 
-    /**
-     * 过了「签发时刻 → 到期时刻」的中点就该换一份新的。
-     *
-     * 和站点 src/lib/musickit.ts、Worker workers/api/src/musickit-token.ts 里的
-     * pastHalfLife 是同一条规则，改一处记得对齐。token 里没有 `iat` 时退化成
-     * 「到期前一天」：总比永远不续强。
-     */
+    /// 这两条规则是纯的，实现在 TelemetryCore 的 `DeveloperTokenJWT`（有单测）。
+    /// 这里只留一层转发，免得调用点分成两种写法。
     static func shouldRenew(_ lifetime: DeveloperTokenLifetime, now: Date) -> Bool {
-        if let issuedAt = lifetime.issuedAt, issuedAt < lifetime.expiresAt {
-            return now >= issuedAt.addingTimeInterval(lifetime.expiresAt.timeIntervalSince(issuedAt) / 2)
-        }
-        return now >= lifetime.expiresAt.addingTimeInterval(-24 * 60 * 60)
+        DeveloperTokenJWT.shouldRenew(lifetime, now: now)
     }
 
-    /**
-     * 读 JWT 的 `iat` 和 `exp`。只解不验签 —— 签名是 Apple 那边的事，这边只需要
-     * 知道什么时候该续，读错了最坏也就是早续一次。
-     */
     static func lifetime(ofJWT token: String) -> DeveloperTokenLifetime? {
-        let parts = token.split(separator: ".")
-        guard parts.count >= 2 else { return nil }
-        // JWT 用的是 base64url，且省掉了尾部填充
-        var encoded = String(parts[1])
-            .replacingOccurrences(of: "-", with: "+")
-            .replacingOccurrences(of: "_", with: "/")
-        while encoded.count % 4 != 0 { encoded += "=" }
-        guard let data = Data(base64Encoded: encoded),
-              let claims = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-              let exp = claims["exp"] as? Double
-        else { return nil }
-        let iat = claims["iat"] as? Double
-        return DeveloperTokenLifetime(
-            issuedAt: iat.map { Date(timeIntervalSince1970: $0) },
-            expiresAt: Date(timeIntervalSince1970: exp)
-        )
+        DeveloperTokenJWT.lifetime(ofJWT: token)
     }
 }
 

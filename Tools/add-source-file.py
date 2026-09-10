@@ -20,8 +20,19 @@ PBXPROJ = ROOT / "MacTelemetryHub.xcodeproj" / "project.pbxproj"
 
 GROUP_FOR_PREFIX = {
     "Sources/ChargerTelemetryKit": "A10000000000000000000011",
+    "Sources/TelemetryCore": "A10000000000000000000013",
     "App/MacTelemetryHub": "A10000000000000000000010",
 }
+
+
+def quoted(value: str) -> str:
+    """Old-style plist string, quoted when it needs to be.
+
+    A file name like ``AppSettings+R2.swift`` is not a valid bare token: Xcode
+    itself quotes anything outside ``[A-Za-z0-9_$/:.-]``, and an unquoted ``+``
+    makes the whole project unreadable ("damaged and cannot be opened").
+    """
+    return value if re.fullmatch(r"[A-Za-z0-9_$/:.\-]+", value) else f'"{value}"'
 
 
 def next_id(text: str, prefix: str) -> str:
@@ -59,7 +70,7 @@ def add(relative: str) -> None:
     text = text.replace(
         "/* End PBXFileReference section */",
         f"\t\t{file_id} /* {name} */ = {{isa = PBXFileReference; "
-        f"lastKnownFileType = sourcecode.swift; path = {name}; "
+        f"lastKnownFileType = sourcecode.swift; path = {quoted(name)}; "
         f"sourceTree = \"<group>\"; }};\n/* End PBXFileReference section */",
     )
     # Group children: insert before the closing paren of that group's list.

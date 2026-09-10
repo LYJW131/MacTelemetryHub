@@ -1,452 +1,6 @@
 import AppKit
-import CryptoKit
 import Foundation
-import MusicKit
 import os
-
-private struct R2UploadConfiguration: Sendable {
-    let endpoint: URL
-    let bucket: String
-    let accessKeyID: String
-    let secretAccessKey: String
-}
-
-/**
- * 上报请求不能共用 `URLSession.shared` 的长连接池。
- *
- * 本机代理会让一条已经失活的 HTTP/2/HTTP/3 连接继续留在池里；下一次 POST
- * 复用它以后，请求体已经写出，却要等到 CFNetwork 的 stall recovery 才失败。
- * 一次性 session 让每次请求都重新建连，请求结束后随即丢掉对应连接池。
- */
-private enum IsolatedHTTPClient {
-    static func session(for request: URLRequest) -> URLSession {
-        let configuration = URLSessionConfiguration.ephemeral
-        configuration.requestCachePolicy = .reloadIgnoringLocalCacheData
-        configuration.urlCache = nil
-        configuration.timeoutIntervalForRequest = request.timeoutInterval
-        configuration.timeoutIntervalForResource = request.timeoutInterval
-        return URLSession(configuration: configuration)
-    }
-
-    static func data(for request: URLRequest) async throws -> (Data, URLResponse) {
-        let session = session(for: request)
-        defer { session.finishTasksAndInvalidate() }
-        return try await session.data(for: request)
-    }
-}
-
-private enum R2IconUploader {
-    enum UploadError: LocalizedError {
-        case invalidConfiguration
-        case hashMismatch
-        case httpStatus(Int, String)
-
-        var errorDescription: String? {
-            switch self {
-            case .invalidConfiguration: "R2 直传配置无效。"
-            case .hashMismatch: "图标内容哈希不一致。"
-            case let .httpStatus(status, detail):
-                detail.isEmpty ? "R2 上传失败（HTTP \(status)）。" : "R2 上传失败（HTTP \(status)：\(detail)）。"
-            }
-        }
-    }
-
-    @MainActor
-    static func configuration(settings: AppSettings) -> R2UploadConfiguration? {
-        let endpointText = settings.r2Endpoint.trimmingCharacters(in: .whitespacesAndNewlines)
-        let bucket = settings.r2Bucket.trimmingCharacters(in: .whitespacesAndNewlines)
-        let accessKeyID = settings.r2AccessKeyID.trimmingCharacters(in: .whitespacesAndNewlines)
-        let secretAccessKey = settings.r2SecretAccessKey.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !endpointText.isEmpty, !bucket.isEmpty, !accessKeyID.isEmpty,
-              !secretAccessKey.isEmpty,
-              let endpoint = URL(string: endpointText),
-              endpoint.scheme?.lowercased() == "https", endpoint.host != nil else {
-            return nil
-        }
-        return R2UploadConfiguration(
-            endpoint: endpoint,
-            bucket: bucket,
-            accessKeyID: accessKeyID,
-            secretAccessKey: secretAccessKey
-        )
-    }
-
-    /**
-     * 检查内容寻址对象是否仍在桶里。
-     *
-     * 这一步只在后台图标 resolver 里跑，不再挡住前台应用名称上报。每个图标
-     * 最多五分钟检查一次，用来接住桶被清空或对象被手动删除后的自愈。
-     */
-    static func exists(
-        objectKey: String,
-        configuration: R2UploadConfiguration,
-        timeout: TimeInterval
-    ) async throws -> Bool {
-        let url = try objectURL(
-            endpoint: configuration.endpoint,
-            bucket: configuration.bucket,
-            objectKey: objectKey
-        )
-        var request = URLRequest(url: url)
-        request.httpMethod = "HEAD"
-        request.timeoutInterval = timeout
-        sign(&request, payloadHash: emptyPayloadHash, contentType: nil,
-             method: "HEAD", url: url, configuration: configuration)
-        let (_, response) = try await IsolatedHTTPClient.data(for: request)
-        guard let http = response as? HTTPURLResponse else {
-            throw UploadError.httpStatus(0, "R2 返回了无效响应")
-        }
-        if http.statusCode == 404 { return false }
-        guard (200..<300).contains(http.statusCode) else {
-            throw UploadError.httpStatus(http.statusCode, "检查图标对象失败")
-        }
-        return true
-    }
-
-    static func upload(
-        data: Data,
-        contentHash: String,
-        objectKey: String,
-        configuration: R2UploadConfiguration,
-        timeout: TimeInterval
-    ) async throws {
-        let actualHash = sha256Hex(data)
-        guard actualHash == contentHash else { throw UploadError.hashMismatch }
-
-        let objectURL = try objectURL(
-            endpoint: configuration.endpoint,
-            bucket: configuration.bucket,
-            objectKey: objectKey
-        )
-        var request = URLRequest(url: objectURL)
-        request.httpMethod = "PUT"
-        request.httpBody = data
-        request.timeoutInterval = timeout
-        // 内容寻址 = 不可变，让浏览器和 Cloudflare 边缘放心缓存一年
-        request.setValue("public, max-age=31536000, immutable", forHTTPHeaderField: "Cache-Control")
-        sign(&request, payloadHash: actualHash, contentType: contentType(for: objectKey),
-             method: "PUT", url: objectURL, configuration: configuration)
-
-        let (responseData, response) = try await IsolatedHTTPClient.data(for: request)
-        guard let http = response as? HTTPURLResponse else {
-            throw UploadError.httpStatus(0, "R2 返回了无效响应")
-        }
-        guard (200..<300).contains(http.statusCode) else {
-            let detail = String(data: responseData.prefix(512), encoding: .utf8) ?? ""
-            throw UploadError.httpStatus(http.statusCode, detail)
-        }
-    }
-
-    /// 编码产物的内容地址。身份哈希标识「哪个应用的图标」，这个标识「哪份字节」。
-    /// 桌面图标是 PNG；充电头封面是 Anker 源 JPEG 原样上传，扩展名跟字节走。
-    static func objectKey(for data: Data, ext: String = "png") -> String {
-        "\(sha256Hex(data)).\(ext)"
-    }
-
-    static func contentHash(of data: Data) -> String { sha256Hex(data) }
-
-    /// 空请求体的 payload 哈希，SigV4 里 HEAD 用它
-    private static let emptyPayloadHash =
-        "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
-
-    /// 对象键的扩展名决定 Content-Type；键本身是内容地址，扩展名就是事实
-    private static func contentType(for objectKey: String) -> String {
-        if objectKey.hasSuffix(".png") { return "image/png" }
-        if objectKey.hasSuffix(".jpg") || objectKey.hasSuffix(".jpeg") { return "image/jpeg" }
-        return "image/webp"
-    }
-
-    /**
-     * SigV4 的 `x-amz-date`：`yyyyMMdd'T'HHmmss'Z'`，UTC。
-     *
-     * 从前每签一次就新建一个 DateFormatter。格式是常量，没必要每次重建；而
-     * DateFormatter 不是 Sendable，静态缓存过不了严格并发检查，所以换成
-     * `Date.ISO8601FormatStyle`（值类型、Sendable），输出逐字符相同。
-     */
-    private static let amzDateStyle = Date.ISO8601FormatStyle(
-        dateSeparator: .omitted,
-        dateTimeSeparator: .standard,
-        timeSeparator: .omitted,
-        timeZoneSeparator: .omitted,
-        includingFractionalSeconds: false,
-        timeZone: .gmt
-    )
-
-    /**
-     * SigV4 签名。HEAD 和 PUT 共用一份，免得两处各写一遍再慢慢分家。
-     *
-     * `Cache-Control` 有意不进签名头列表：SigV4 只要求签 host 和 x-amz-*，
-     * 多发的头不参与签名，R2 也认（实测 200）。
-     */
-    private static func sign(
-        _ request: inout URLRequest,
-        payloadHash: String,
-        contentType: String?,
-        method: String,
-        url: URL,
-        configuration: R2UploadConfiguration
-    ) {
-        let amzDate = timestamp(Date())
-        let shortDate = String(amzDate.prefix(8))
-        let scope = "\(shortDate)/auto/s3/aws4_request"
-        let canonicalPath = URLComponents(url: url, resolvingAgainstBaseURL: false)?.percentEncodedPath
-            ?? url.path
-
-        var headers: [(String, String)] = [("host", hostHeader(for: url))]
-        if let contentType { headers.append(("content-type", contentType)) }
-        headers.append(("x-amz-content-sha256", payloadHash))
-        headers.append(("x-amz-date", amzDate))
-        // 规范请求要求签名头按字典序排列
-        headers.sort { $0.0 < $1.0 }
-
-        let signedHeaders = headers.map(\.0).joined(separator: ";")
-        let canonicalHeaders = headers.map { "\($0.0):\($0.1)" }.joined(separator: "\n") + "\n"
-        let canonicalRequest = [
-            method,
-            canonicalPath,
-            "",
-            canonicalHeaders,
-            signedHeaders,
-            payloadHash,
-        ].joined(separator: "\n")
-        let stringToSign = [
-            "AWS4-HMAC-SHA256",
-            amzDate,
-            scope,
-            sha256Hex(Data(canonicalRequest.utf8)),
-        ].joined(separator: "\n")
-        let signingKey = hmac(
-            hmac(
-                hmac(
-                    hmac(Data("AWS4\(configuration.secretAccessKey)".utf8), shortDate),
-                    "auto"
-                ),
-                "s3"
-            ),
-            "aws4_request"
-        )
-        let signature = hex(hmac(signingKey, stringToSign))
-
-        if let contentType { request.setValue(contentType, forHTTPHeaderField: "Content-Type") }
-        request.setValue(payloadHash, forHTTPHeaderField: "x-amz-content-sha256")
-        request.setValue(amzDate, forHTTPHeaderField: "x-amz-date")
-        request.setValue(
-            "AWS4-HMAC-SHA256 Credential=\(configuration.accessKeyID)/\(scope), SignedHeaders=\(signedHeaders), Signature=\(signature)",
-            forHTTPHeaderField: "Authorization"
-        )
-    }
-
-    private static func objectURL(endpoint: URL, bucket: String, objectKey: String) throws -> URL {
-        guard var components = URLComponents(url: endpoint, resolvingAgainstBaseURL: false) else {
-            throw UploadError.invalidConfiguration
-        }
-        let basePath = components.percentEncodedPath.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
-        let bucketPath = bucket.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? bucket
-        let keyPath = objectKey.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? objectKey
-        let path = [basePath, bucketPath, keyPath].filter { !$0.isEmpty }.joined(separator: "/")
-        components.percentEncodedPath = "/\(path)"
-        guard let url = components.url else { throw UploadError.invalidConfiguration }
-        return url
-    }
-
-    private static func hostHeader(for url: URL) -> String {
-        var host = url.host ?? ""
-        if let port = url.port { host += ":\(port)" }
-        return host
-    }
-
-    private static func timestamp(_ now: Date) -> String {
-        now.formatted(amzDateStyle)
-    }
-
-    private static func sha256Hex(_ data: Data) -> String {
-        hex(Data(SHA256.hash(data: data)))
-    }
-
-    private static func hmac(_ key: Data, _ message: String) -> Data {
-        Data(HMAC<SHA256>.authenticationCode(
-            for: Data(message.utf8),
-            using: SymmetricKey(data: key)
-        ))
-    }
-
-    private static func hex(_ data: Data) -> String {
-        data.map { String(format: "%02x", $0) }.joined()
-    }
-}
-
-enum TelemetryModule: String, CaseIterable, Hashable, Sendable {
-    case desktop
-    case appleMusic
-    case charger
-    case powerBank
-    case timezone
-    case vibeCoding
-    case vibeCodingYear
-
-    var displayName: String {
-        switch self {
-        case .desktop: "前台应用"
-        case .appleMusic: "Apple Music"
-        case .charger: "充电头"
-        case .powerBank: "充电宝"
-        case .timezone: "Mac 时区"
-        case .vibeCoding: "Vibe Coding"
-        case .vibeCodingYear: "年度用量"
-        }
-    }
-}
-
-/**
- * 「结构变了没有」的指纹 —— 决定要不要立刻叫醒上报循环。
- *
- * 采集是 1 Hz 推流，但绝大多数帧只是功率在滚动，那种变化等节流窗口就行。真正
- * 该立刻发的是插拔、连断、设备换了。所以这里只收会「跳变」的字段，功率电压电流
- * 一概不进 —— 否则每帧都判定为变化，循环就从 5 秒一转变成 1 秒一转。
- */
-/**
- * 电量**不进**这份指纹。
- *
- * 曾经按整数百分比收过，理由是「跳一格该立刻发」。它会跳得比想象中厉害：90W
- * 输出时电压下垂、电量计重算，实测四秒内从 34.32% 掉到 33.32%，而按电池容量算
- * 一个百分点要三十秒。于是整数每跳一格就算一次结构变化，即时上报退化成五秒一
- * 次的轮询 —— 加上追发之后更糟，每一格都把追发计数重置满，循环再也停不下来。
- *
- * 电量是滚动读数，它该走节流窗口，和功率电压一样。
- */
-private struct ChargingDevicesStructuralSignature: Equatable {
-    private struct Port: Equatable {
-        let name: String
-        let active: Bool
-        let direction: String?
-        let attached: Bool?
-        let cable: String?
-        let deviceModel: String?
-        let vendor: String?
-
-        init(_ port: DevicePortPayload) {
-            name = port.name
-            active = port.active
-            direction = port.direction
-            attached = port.attached
-            cable = port.cable
-            deviceModel = port.attachedDevice?.model
-            vendor = port.attachedDevice?.vendor
-        }
-    }
-
-    private struct Device: Equatable {
-        let id: String
-        let kind: ChargingDeviceKind
-        let connected: Bool
-        let thermalLimited: Bool?
-        /// 底座现在作为 B 口混在 ports 里，上下底座自然被端口那一项覆盖。
-        let ports: [Port]
-        let coverName: String?
-        let coverIconHash: String?
-
-        init(_ device: ChargingDevicePayload) {
-            id = device.id
-            kind = device.kind
-            connected = device.connected
-            thermalLimited = device.battery?.thermalLimited
-            ports = device.ports.map(Port.init)
-            coverName = device.cover?.name
-            coverIconHash = device.cover?.iconHash
-        }
-    }
-
-    private let devices: [Device]
-
-    init(_ payload: ChargingDevicesPayload) {
-        devices = payload.devices.map(Device.init)
-    }
-}
-
-private struct DesktopUploadSignature: Equatable {
-    let applicationName: String
-    let bundleIdentifier: String?
-    let iconHash: String?
-
-    init(_ snapshot: DesktopActivitySnapshot) {
-        applicationName = snapshot.applicationName
-        bundleIdentifier = snapshot.bundleIdentifier
-        iconHash = snapshot.iconHash
-    }
-}
-
-private struct TelemetryIngestResponse: Decodable {
-    struct Result: Decodable {
-        let desktopIconAvailable: Bool?
-        let chargerCoverIconAvailable: Bool?
-    }
-
-    let data: Result
-}
-
-private struct TimeZoneUploadSignature: Equatable {
-    let identifier: String
-    let abbreviation: String?
-    let secondsFromGMT: Int
-
-    init(_ snapshot: TimeZoneSnapshot) {
-        identifier = snapshot.identifier
-        abbreviation = snapshot.abbreviation
-        secondsFromGMT = snapshot.secondsFromGMT
-    }
-}
-
-/// 播放进度刻意不进签名：播放时它每次采集都在变，会让「有变化才发」退化成定时轮询。
-/// 网页拿 positionMs + observedAt 自己插值，进度条不需要上报器喂。
-/// 拖动进度条这类跳变由 `AppleMusicPositionAnchor` 单独识别。
-private struct AppleMusicUploadSignature: Equatable {
-    let state: String
-    let title: String?
-    let artist: String?
-    let album: String?
-    let trackID: String?
-    let durationMs: Int
-    /// 切换循环模式要让网页知道，所以它进签名
-    let repeatOne: Bool
-    let queueSource: String?
-    let queueIndex: Int?
-    let queueTrackIDs: [String]
-
-    init(_ snapshot: AppleMusicSnapshot) {
-        state = snapshot.state
-        title = snapshot.title
-        artist = snapshot.artist
-        album = snapshot.album
-        trackID = snapshot.trackID
-        durationMs = snapshot.durationMs
-        repeatOne = snapshot.repeatOne
-        queueSource = snapshot.queue?.source
-        queueIndex = snapshot.queue?.index
-        queueTrackIDs = snapshot.queue?.tracks.map {
-            "\($0.trackID ?? "")\t\($0.title)\t\($0.artist ?? "")\t\($0.album ?? "")"
-        } ?? []
-    }
-}
-
-/// 上一次发出去的播放锚点。网页就是照这个往前推的，
-/// 所以「要不要重新发」等价于「网页现在推出来的值还准不准」。
-private struct AppleMusicPositionAnchor {
-    let state: String
-    let positionMs: Int
-    let observedAt: Int64
-
-    init(_ snapshot: AppleMusicSnapshot) {
-        state = snapshot.state
-        positionMs = snapshot.positionMs
-        observedAt = snapshot.observedAt
-    }
-
-    /// 网页在 `observedAt` 这一刻会显示的进度
-    func predicted(at observedAt: Int64) -> Int {
-        guard state == "playing" else { return positionMs }
-        return positionMs + Int(max(0, observedAt - self.observedAt))
-    }
-}
 
 @MainActor
 final class ServiceController: ObservableObject {
@@ -514,19 +68,8 @@ final class ServiceController: ObservableObject {
     /// 这个上报会话里已经在 R2 确认存在的图标身份指纹。
     /// 桌面图标和充电头封面共用这一份记忆，所以名字里没有 desktop。
     private var uploadedIconHashes: Set<String> = []
-    /// 图标直传连续失败次数，按身份哈希记。到上限就不再试，避免打成热循环
-    private var iconUploadAttempts: [String: Int] = [:]
-    private static let maxIconUploadAttempts = 3
-    /**
-     * 三次都失败后隔多久允许再试。
-     *
-     * 从前用尽三次就到进程重启为止：三次之间又没有间隔，启动初期一次瞬时的
-     * TLS 错误几毫秒内就把额度烧光，那个应用的图标从此在网页上消失，直到重启。
-     * 实测 Chrome 就是这样丢的。现在失败之间退避，用尽后过了冷却再从头来。
-     */
-    private static let iconUploadRetryCooldown: TimeInterval = 10 * 60
-    /** 用尽三次的时刻，按 iconHash 记；过了冷却就清掉重来 */
-    private var iconUploadGaveUpAt: [String: Date] = [:]
+    /// 图标直传的重试额度与退避，按身份哈希记。规则本身在 TelemetryCore，有单测。
+    private var iconUploadBudget = IconUploadBudget()
     /** 图标直传的失败只进过 reporterLastError；写进统一日志才能事后查 */
     private static let iconLogger = Logger(
         subsystem: Bundle.main.bundleIdentifier ?? "MacTelemetryHub",
@@ -867,7 +410,7 @@ final class ServiceController: ObservableObject {
     private func refreshAppleMusicCredentialsIfNeeded(force: Bool = false) async {
         guard !isRefreshingAppleMusicCredentials else { return }
         // 后台绝不请求授权，没批准就什么都不做 —— 从循环里弹系统弹窗是不能接受的
-        guard MusicAuthorization.currentStatus == .authorized else { return }
+        guard appleMusicAuthorization.isCurrentlyAuthorized else { return }
         guard force || Date() >= nextAppleMusicCredentialsRefreshAt else { return }
         isRefreshingAppleMusicCredentials = true
         defer { isRefreshingAppleMusicCredentials = false }
@@ -1212,8 +755,7 @@ final class ServiceController: ObservableObject {
         lastPostedDesktopWasHidden = false
         uploadedIconHashes.removeAll(keepingCapacity: true)
         uploadedIconOrder.removeAll(keepingCapacity: true)
-        iconUploadAttempts.removeAll(keepingCapacity: true)
-        iconUploadGaveUpAt.removeAll(keepingCapacity: true)
+        iconUploadBudget.removeAll()
         iconVerifiedAt.removeAll(keepingCapacity: true)
         cancelDesktopIconResolvers()
         lastPostedTimeZone = nil
@@ -1487,7 +1029,7 @@ final class ServiceController: ObservableObject {
                         if let response = response as? HTTPURLResponse, !(200..<300).contains(response.statusCode) {
                             throw ReporterError.httpStatus(
                                 response.statusCode,
-                                detail: Self.ingestErrorDetail(responseData)
+                                detail: ReporterError.ingestErrorDetail(responseData)
                             )
                         }
                         let responsePayload = try JSONDecoder()
@@ -1629,7 +1171,7 @@ final class ServiceController: ObservableObject {
         guard settings.postEnabled,
               let iconHash = desktop.iconHash,
               let iconData = desktop.iconData,
-              let r2Configuration = R2IconUploader.configuration(settings: settings),
+              let r2Configuration = settings.r2UploadConfiguration,
               iconUploadBudgetAvailable(iconHash),
               iconResolvers[iconHash] == nil else {
             return
@@ -1667,7 +1209,7 @@ final class ServiceController: ObservableObject {
                         )
                     }
                     guard !Task.isCancelled else { break }
-                    self.iconUploadAttempts[iconHash] = 0
+                    self.iconUploadBudget.noteSuccess(iconHash)
                     self.iconVerifiedAt[iconHash] = Date()
                     self.rememberUploadedDesktopIcon(desktop)
 
@@ -1700,43 +1242,24 @@ final class ServiceController: ObservableObject {
         iconResolvers.removeAll(keepingCapacity: true)
     }
 
-    /**
-     * 这个图标还有没有重试额度。
-     *
-     * 额度用尽后不是永久放弃：过了冷却期就清零重来。放弃的时刻记在
-     * iconUploadGaveUpAt，没有记录说明从没用尽过。
-     */
+    /// 这个图标还有没有重试额度。冷却到点的清零发生在额度里，所以要传 now。
     private func iconUploadBudgetAvailable(_ iconHash: String) -> Bool {
-        if iconUploadAttempts[iconHash, default: 0] < Self.maxIconUploadAttempts { return true }
-        guard let gaveUpAt = iconUploadGaveUpAt[iconHash],
-              Date().timeIntervalSince(gaveUpAt) >= Self.iconUploadRetryCooldown else {
-            return false
-        }
-        iconUploadAttempts[iconHash] = 0
-        iconUploadGaveUpAt.removeValue(forKey: iconHash)
-        return true
+        iconUploadBudget.isAvailable(iconHash, now: Date())
     }
 
-    /**
-     * 记一次直传失败，返回下一次尝试前该等多久。
-     *
-     * 退避 2s、4s、8s：瞬时的网络抖动（启动初期的 TLS 失败、切网）几秒内就过去，
-     * 连着立刻重试等于把三次都撞在同一个故障上。
-     */
+    /// 记一次直传失败并写日志，返回下一次尝试前该等多久。退避规则在额度里。
     private func noteIconUploadFailure(
         _ iconHash: String,
         objectKey: String,
         kind: String,
         error: Error
     ) -> Duration {
-        let attempts = iconUploadAttempts[iconHash, default: 0] + 1
-        iconUploadAttempts[iconHash] = attempts
-        if attempts >= Self.maxIconUploadAttempts { iconUploadGaveUpAt[iconHash] = Date() }
+        let (attempts, delay) = iconUploadBudget.noteFailure(iconHash, now: Date())
         reporterLastError = "\(kind)上传失败：\(error.localizedDescription)"
         Self.iconLogger.error(
             "\(kind, privacy: .public) \(objectKey, privacy: .public) 上传失败（第 \(attempts) 次）：\(error.localizedDescription, privacy: .public)"
         )
-        return .seconds(2 << (attempts - 1))
+        return delay
     }
 
     private func rememberUploadedDesktopIcon(_ snapshot: DesktopActivitySnapshot) {
@@ -1780,7 +1303,7 @@ final class ServiceController: ObservableObject {
         guard settings.postEnabled,
               let iconHash = source.iconHash,
               let iconData = source.iconData,
-              let r2Configuration = R2IconUploader.configuration(settings: settings),
+              let r2Configuration = settings.r2UploadConfiguration,
               iconUploadBudgetAvailable(iconHash),
               iconResolvers[iconHash] == nil else {
             return
@@ -1816,7 +1339,7 @@ final class ServiceController: ObservableObject {
                         )
                     }
                     guard !Task.isCancelled else { break }
-                    self.iconUploadAttempts[iconHash] = 0
+                    self.iconUploadBudget.noteSuccess(iconHash)
                     self.iconVerifiedAt[iconHash] = Date()
                     self.rememberUploadedCoverIcon(iconHash)
                     if self.lastPostedChargerCover(hash: iconHash, hasObjectKey: false) {
@@ -1935,19 +1458,6 @@ final class ServiceController: ObservableObject {
         _ = done.wait(timeout: .now() + 3)
     }
 
-    /// 站点 4xx 的 JSON 是 `{ ok: false, error: "…" }`。只显示状态码的话，
-    /// 年度热力图校验失败会看起来像信封改坏了。
-    private static func ingestErrorDetail(_ data: Data) -> String? {
-        if let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-           let error = (object["error"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines),
-           !error.isEmpty {
-            return error
-        }
-        let text = String(data: data, encoding: .utf8)?
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-        return text?.isEmpty == false ? text : nil
-    }
-
     /**
      * 信封里的 `activeModules`：站点拿它决定这一轮心跳该给哪些模块续期。
      *
@@ -1994,7 +1504,7 @@ final class ServiceController: ObservableObject {
             // 这里的到期时刻就是上次上报出去的那份 developer token 的到期时刻
             return json(AppleMusicAuthorizationPayload(
                 status: appleMusicAuthorization.statusDescription,
-                authorized: appleMusicAuthorization.authorizationStatus == .authorized,
+                authorized: appleMusicAuthorization.isAuthorized,
                 hasUserToken: appleMusicAuthorization.hasUserToken,
                 developerTokenExpiresAt: appleMusicCredentials.map { Int($0.expiresAt.timeIntervalSince1970) },
                 lastUploadAt: appleMusicCredentialsUploadAt.map { Int($0.timeIntervalSince1970 * 1000) },
@@ -2008,7 +1518,7 @@ final class ServiceController: ObservableObject {
                     postEnabled: settings.postEnabled,
                     lastSuccessAt: reporterLastSuccess.map { Int($0.timeIntervalSince1970 * 1000) },
                     lastError: reporterLastError,
-                    r2Configured: R2IconUploader.configuration(settings: settings) != nil
+                    r2Configured: settings.r2UploadConfiguration != nil
                 ),
                 desktopIcon: desktop.map { snapshot in
                     .init(
@@ -2016,7 +1526,7 @@ final class ServiceController: ObservableObject {
                         iconHash: snapshot.iconHash,
                         iconEncoded: snapshot.iconData != nil,
                         objectKeyConfirmed: snapshot.iconHash.map { uploadedIconHashes.contains($0) } ?? false,
-                        uploadAttempts: snapshot.iconHash.map { iconUploadAttempts[$0, default: 0] } ?? 0,
+                        uploadAttempts: snapshot.iconHash.map { iconUploadBudget.attemptCount($0) } ?? 0,
                         resolving: snapshot.iconHash.map { iconResolvers[$0] != nil } ?? false
                     )
                 },
@@ -2077,64 +1587,6 @@ final class ServiceController: ObservableObject {
     }
 }
 
-private struct EmptyObject: Encodable {}
-
-private struct HealthPayload: Encodable {
-    struct Device: Encodable {
-        let enabled: Bool
-        let connected: Bool
-        let phase: String
-        let lastError: String?
-    }
-
-    /** 远端上报循环的状态。排查「网页上少了什么」先看这里，不用开设置窗口 */
-    struct Reporter: Encodable {
-        let postEnabled: Bool
-        /** 上次成功 POST 的时刻，Unix 毫秒 */
-        let lastSuccessAt: Int?
-        let lastError: String?
-        /** R2 直传的四项配置是否齐全；缺一项图标 resolver 会静默不跑 */
-        let r2Configured: Bool
-    }
-
-    /** 当前前台应用的图标交付状态。哈希是内容地址，不是秘密 */
-    struct DesktopIcon: Encodable {
-        let applicationName: String
-        let iconHash: String?
-        /** PNG 编码是否成功；失败时 resolver 没东西可传 */
-        let iconEncoded: Bool
-        /** 本地是否已确认对象在 R2 里，确认后下一次信封才会带对象键 */
-        let objectKeyConfirmed: Bool
-        let uploadAttempts: Int
-        let resolving: Bool
-    }
-
-    let ok: Bool
-    let reporter: Reporter
-    let desktopIcon: DesktopIcon?
-    let charger: Device
-    let powerBank: Device
-}
-
-/** 本地状态接口的 Apple Music 授权一栏。只有状态和时刻，没有 token 值 */
-private struct AppleMusicAuthorizationPayload: Encodable {
-    let status: String
-    let authorized: Bool
-    let hasUserToken: Bool
-    /** 手里那份 developer token 的到期时刻，Unix 秒；还没取到时为空 */
-    let developerTokenExpiresAt: Int?
-    /** 上次成功把 token 送到后端的时刻，Unix 毫秒 */
-    let lastUploadAt: Int?
-    let lastError: String?
-}
-
-private struct ChargingStreamEvent: Encodable {
-    let phase: String
-    let connected: Bool
-    let lastError: String?
-    let device: ChargingDevicePayload?
-}
-
 @MainActor
 private final class ChargingSSEBroker {
     private var streams: [ChargingDeviceSlot: [ObjectIdentifier: HTTPStream]] = [:]
@@ -2168,16 +1620,3 @@ private final class ChargingSSEBroker {
     }
 }
 
-private enum ReporterError: LocalizedError {
-    case httpStatus(Int, detail: String?)
-    case invalidTelemetryResponse
-    var errorDescription: String? {
-        switch self {
-        case let .httpStatus(code, detail):
-            if let detail, !detail.isEmpty { return "POST 端点返回 HTTP \(code)：\(detail)" }
-            return "POST 端点返回 HTTP \(code)"
-        case .invalidTelemetryResponse:
-            return "遥测端点响应缺少图标确认状态。"
-        }
-    }
-}

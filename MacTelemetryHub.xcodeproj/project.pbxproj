@@ -34,6 +34,17 @@
 		B10000000000000000000031 /* CodingUsageMonitors.swift in Sources */ = {isa = PBXBuildFile; fileRef = F10000000000000000000031 /* CodingUsageMonitors.swift */; };
 		B10000000000000000000032 /* ccusage in Helpers */ = {isa = PBXBuildFile; fileRef = F10000000000000000000032 /* ccusage */; settings = {ATTRIBUTES = (CodeSignOnCopy, ); }; };
 		B10000000000000000000033 /* ccusage license in Resources */ = {isa = PBXBuildFile; fileRef = F10000000000000000000033 /* ccusage license */; };
+		B1000000000000000000002A /* JSONValue.swift in Sources */ = {isa = PBXBuildFile; fileRef = F1000000000000000000002A /* JSONValue.swift */; };
+		B1000000000000000000002B /* TelemetryModule.swift in Sources */ = {isa = PBXBuildFile; fileRef = F1000000000000000000002B /* TelemetryModule.swift */; };
+		B1000000000000000000002C /* Snapshots.swift in Sources */ = {isa = PBXBuildFile; fileRef = F1000000000000000000002C /* Snapshots.swift */; };
+		B1000000000000000000002D /* TelemetryEnvelope.swift in Sources */ = {isa = PBXBuildFile; fileRef = F1000000000000000000002D /* TelemetryEnvelope.swift */; };
+		B1000000000000000000002E /* UploadSignatures.swift in Sources */ = {isa = PBXBuildFile; fileRef = F1000000000000000000002E /* UploadSignatures.swift */; };
+		B1000000000000000000002F /* IsolatedHTTPClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = F1000000000000000000002F /* IsolatedHTTPClient.swift */; };
+		B10000000000000000000034 /* R2IconUploader.swift in Sources */ = {isa = PBXBuildFile; fileRef = F10000000000000000000030 /* R2IconUploader.swift */; };
+		B10000000000000000000035 /* IconUploadBudget.swift in Sources */ = {isa = PBXBuildFile; fileRef = F10000000000000000000034 /* IconUploadBudget.swift */; };
+		B10000000000000000000036 /* LocalAPIPayloads.swift in Sources */ = {isa = PBXBuildFile; fileRef = F10000000000000000000035 /* LocalAPIPayloads.swift */; };
+		B10000000000000000000037 /* DeveloperTokenJWT.swift in Sources */ = {isa = PBXBuildFile; fileRef = F10000000000000000000036 /* DeveloperTokenJWT.swift */; };
+		B10000000000000000000038 /* AppSettings+R2.swift in Sources */ = {isa = PBXBuildFile; fileRef = F10000000000000000000037 /* AppSettings+R2.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -66,6 +77,17 @@
 		F10000000000000000000031 /* CodingUsageMonitors.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CodingUsageMonitors.swift; sourceTree = "<group>"; };
 		F10000000000000000000032 /* ccusage */ = {isa = PBXFileReference; lastKnownFileType = "compiled.mach-o.executable"; path = .build/ccusage/ccusage; sourceTree = SOURCE_ROOT; };
 		F10000000000000000000033 /* ccusage license */ = {isa = PBXFileReference; lastKnownFileType = text; path = "Resources/ccusage-LICENSE.txt"; sourceTree = "<group>"; };
+		F1000000000000000000002A /* JSONValue.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = JSONValue.swift; sourceTree = "<group>"; };
+		F1000000000000000000002B /* TelemetryModule.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TelemetryModule.swift; sourceTree = "<group>"; };
+		F1000000000000000000002C /* Snapshots.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Snapshots.swift; sourceTree = "<group>"; };
+		F1000000000000000000002D /* TelemetryEnvelope.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TelemetryEnvelope.swift; sourceTree = "<group>"; };
+		F1000000000000000000002E /* UploadSignatures.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = UploadSignatures.swift; sourceTree = "<group>"; };
+		F1000000000000000000002F /* IsolatedHTTPClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = IsolatedHTTPClient.swift; sourceTree = "<group>"; };
+		F10000000000000000000030 /* R2IconUploader.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = R2IconUploader.swift; sourceTree = "<group>"; };
+		F10000000000000000000034 /* IconUploadBudget.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = IconUploadBudget.swift; sourceTree = "<group>"; };
+		F10000000000000000000035 /* LocalAPIPayloads.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LocalAPIPayloads.swift; sourceTree = "<group>"; };
+		F10000000000000000000036 /* DeveloperTokenJWT.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DeveloperTokenJWT.swift; sourceTree = "<group>"; };
+		F10000000000000000000037 /* AppSettings+R2.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "AppSettings+R2.swift"; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -95,6 +117,7 @@
 			children = (
 				A10000000000000000000010 /* MacTelemetryHub */,
 				A10000000000000000000011 /* ChargerTelemetryKit */,
+				A10000000000000000000013 /* TelemetryCore */,
 				A10000000000000000000012 /* Products */,
 				F10000000000000000000032 /* ccusage */,
 			);
@@ -121,6 +144,7 @@
 				F10000000000000000000027 /* AnkerCloudClient.swift */,
 				F10000000000000000000028 /* ChargerCoverController.swift */,
 				F10000000000000000000029 /* MusicPlayingQueue.swift */,
+				F10000000000000000000037 /* AppSettings+R2.swift */,
 			);
 			path = App/MacTelemetryHub;
 			sourceTree = SOURCE_ROOT;
@@ -139,6 +163,23 @@
 				F10000000000000000000026 /* AnkerPassportCrypto.swift */,
 			);
 			path = Sources/ChargerTelemetryKit;
+			sourceTree = SOURCE_ROOT;
+		};
+		A10000000000000000000013 /* TelemetryCore */ = {
+			isa = PBXGroup;
+			children = (
+				F1000000000000000000002A /* JSONValue.swift */,
+				F1000000000000000000002B /* TelemetryModule.swift */,
+				F1000000000000000000002C /* Snapshots.swift */,
+				F1000000000000000000002D /* TelemetryEnvelope.swift */,
+				F1000000000000000000002E /* UploadSignatures.swift */,
+				F1000000000000000000002F /* IsolatedHTTPClient.swift */,
+				F10000000000000000000030 /* R2IconUploader.swift */,
+				F10000000000000000000034 /* IconUploadBudget.swift */,
+				F10000000000000000000035 /* LocalAPIPayloads.swift */,
+				F10000000000000000000036 /* DeveloperTokenJWT.swift */,
+			);
+			path = Sources/TelemetryCore;
 			sourceTree = SOURCE_ROOT;
 		};
 		A10000000000000000000012 /* Products */ = {
@@ -233,6 +274,17 @@
 				B10000000000000000000027 /* AnkerCloudClient.swift in Sources */,
 				B10000000000000000000028 /* ChargerCoverController.swift in Sources */,
 				B10000000000000000000029 /* MusicPlayingQueue.swift in Sources */,
+				B1000000000000000000002A /* JSONValue.swift in Sources */,
+				B1000000000000000000002B /* TelemetryModule.swift in Sources */,
+				B1000000000000000000002C /* Snapshots.swift in Sources */,
+				B1000000000000000000002D /* TelemetryEnvelope.swift in Sources */,
+				B1000000000000000000002E /* UploadSignatures.swift in Sources */,
+				B1000000000000000000002F /* IsolatedHTTPClient.swift in Sources */,
+				B10000000000000000000034 /* R2IconUploader.swift in Sources */,
+				B10000000000000000000035 /* IconUploadBudget.swift in Sources */,
+				B10000000000000000000036 /* LocalAPIPayloads.swift in Sources */,
+				B10000000000000000000037 /* DeveloperTokenJWT.swift in Sources */,
+				B10000000000000000000038 /* AppSettings+R2.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
