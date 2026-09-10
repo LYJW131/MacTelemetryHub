@@ -405,7 +405,15 @@ The default bind is `127.0.0.1:8787` (loopback only). Set the bind address to
 `0.0.0.0`, `::`, or a specific interface IP to listen more widely. If the port
 is temporarily occupied, the app retries every three seconds.
 
-- `GET /health` — process liveness, plus each charging link's enabled / connected / phase
+- `GET /health` — process liveness, plus each charging link's enabled / connected / phase.
+  `reporter` carries the remote loop's `postEnabled`, `lastSuccessAt`, `lastError` and
+  whether R2 direct upload is fully configured; `desktopIcon` shows the frontmost app's
+  icon delivery state (`iconHash`, `iconEncoded`, `objectKeyConfirmed`, `uploadAttempts`,
+  `resolving`). Read this first when an app icon is missing on the site. Icon uploads
+  back off 2s/4s/8s between failures and, after three failures, retry again ten minutes
+  later instead of giving up until restart; failures also go to the unified log under
+  category `desktop-icon`.
+- `GET /apple-music/authorization` — Apple Music authorization state, see above.
 - `GET /sse/charger` and `GET /sse/powerbank` — Server-Sent Events. The first
   event is the current snapshot; later events follow the device's BLE push
   (about 1 Hz). There is no local poll timer. Each event is a JSON object with

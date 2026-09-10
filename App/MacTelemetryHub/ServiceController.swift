@@ -2,6 +2,7 @@ import AppKit
 import CryptoKit
 import Foundation
 import MusicKit
+import os
 
 private struct R2UploadConfiguration: Sendable {
     let endpoint: URL
@@ -570,6 +571,21 @@ final class ServiceController: ObservableObject {
     /// 图标直传连续失败次数，按身份哈希记。到上限就不再试，避免打成热循环
     private var iconUploadAttempts: [String: Int] = [:]
     private static let maxIconUploadAttempts = 3
+    /**
+     * 三次都失败后隔多久允许再试。
+     *
+     * 从前用尽三次就到进程重启为止：三次之间又没有间隔，启动初期一次瞬时的
+     * TLS 错误几毫秒内就把额度烧光，那个应用的图标从此在网页上消失，直到重启。
+     * 实测 Chrome 就是这样丢的。现在失败之间退避，用尽后过了冷却再从头来。
+     */
+    private static let iconUploadRetryCooldown: TimeInterval = 10 * 60
+    /** 用尽三次的时刻，按 iconHash 记；过了冷却就清掉重来 */
+    private var iconUploadGaveUpAt: [String: Date] = [:]
+    /** 图标直传的失败只进过 reporterLastError；写进统一日志才能事后查 */
+    private static let iconLogger = Logger(
+        subsystem: Bundle.main.bundleIdentifier ?? "MacTelemetryHub",
+        category: "desktop-icon"
+    )
     /// 最近一次在 R2 确认存在的时间；过期后后台 HEAD 一次，接住手动清桶。
     private var desktopIconVerifiedAt: [String: Date] = [:]
     private static let desktopIconVerificationInterval: TimeInterval = 5 * 60
@@ -1226,6 +1242,7 @@ final class ServiceController: ObservableObject {
         uploadedDesktopIconHashes.removeAll(keepingCapacity: true)
         uploadedDesktopIconOrder.removeAll(keepingCapacity: true)
         iconUploadAttempts.removeAll(keepingCapacity: true)
+        iconUploadGaveUpAt.removeAll(keepingCapacity: true)
         desktopIconVerifiedAt.removeAll(keepingCapacity: true)
         cancelDesktopIconResolvers()
         lastPostedTimeZone = nil
@@ -1644,7 +1661,7 @@ final class ServiceController: ObservableObject {
               let iconHash = desktop.iconHash,
               let iconData = desktop.iconData,
               let r2Configuration = R2IconUploader.configuration(settings: settings),
-              iconUploadAttempts[iconHash, default: 0] < Self.maxIconUploadAttempts,
+              iconUploadBudgetAvailable(iconHash),
               iconResolvers[iconHash] == nil else {
             return
         }
@@ -1663,7 +1680,7 @@ final class ServiceController: ObservableObject {
             guard let self else { return }
 
             while !Task.isCancelled,
-                  self.iconUploadAttempts[iconHash, default: 0] < Self.maxIconUploadAttempts {
+                  self.iconUploadBudgetAvailable(iconHash) {
                 do {
                     let exists = try await R2IconUploader.exists(
                         objectKey: objectKey,
@@ -1697,8 +1714,8 @@ final class ServiceController: ObservableObject {
                     break
                 } catch {
                     if Task.isCancelled { break }
-                    self.iconUploadAttempts[iconHash, default: 0] += 1
-                    self.reporterLastError = "图标上传失败：\(error.localizedDescription)"
+                    let delay = self.noteIconUploadFailure(iconHash, objectKey: objectKey, kind: "图标", error: error)
+                    try? await Task.sleep(for: delay)
                 }
             }
 
@@ -1712,6 +1729,45 @@ final class ServiceController: ObservableObject {
     private func cancelDesktopIconResolvers() {
         for resolver in iconResolvers.values { resolver.task.cancel() }
         iconResolvers.removeAll(keepingCapacity: true)
+    }
+
+    /**
+     * 这个图标还有没有重试额度。
+     *
+     * 额度用尽后不是永久放弃：过了冷却期就清零重来。放弃的时刻记在
+     * iconUploadGaveUpAt，没有记录说明从没用尽过。
+     */
+    private func iconUploadBudgetAvailable(_ iconHash: String) -> Bool {
+        if iconUploadAttempts[iconHash, default: 0] < Self.maxIconUploadAttempts { return true }
+        guard let gaveUpAt = iconUploadGaveUpAt[iconHash],
+              Date().timeIntervalSince(gaveUpAt) >= Self.iconUploadRetryCooldown else {
+            return false
+        }
+        iconUploadAttempts[iconHash] = 0
+        iconUploadGaveUpAt.removeValue(forKey: iconHash)
+        return true
+    }
+
+    /**
+     * 记一次直传失败，返回下一次尝试前该等多久。
+     *
+     * 退避 2s、4s、8s：瞬时的网络抖动（启动初期的 TLS 失败、切网）几秒内就过去，
+     * 连着立刻重试等于把三次都撞在同一个故障上。
+     */
+    private func noteIconUploadFailure(
+        _ iconHash: String,
+        objectKey: String,
+        kind: String,
+        error: Error
+    ) -> Duration {
+        let attempts = iconUploadAttempts[iconHash, default: 0] + 1
+        iconUploadAttempts[iconHash] = attempts
+        if attempts >= Self.maxIconUploadAttempts { iconUploadGaveUpAt[iconHash] = Date() }
+        reporterLastError = "\(kind)上传失败：\(error.localizedDescription)"
+        Self.iconLogger.error(
+            "\(kind, privacy: .public) \(objectKey, privacy: .public) 上传失败（第 \(attempts) 次）：\(error.localizedDescription, privacy: .public)"
+        )
+        return .seconds(2 << (attempts - 1))
     }
 
     private func rememberUploadedDesktopIcon(_ snapshot: DesktopActivitySnapshot) {
@@ -1747,7 +1803,7 @@ final class ServiceController: ObservableObject {
               let iconHash = source.iconHash,
               let iconData = source.iconData,
               let r2Configuration = R2IconUploader.configuration(settings: settings),
-              iconUploadAttempts[iconHash, default: 0] < Self.maxIconUploadAttempts,
+              iconUploadBudgetAvailable(iconHash),
               iconResolvers[iconHash] == nil else {
             return
         }
@@ -1764,7 +1820,7 @@ final class ServiceController: ObservableObject {
         let task = Task<Void, Never> { @MainActor [weak self] in
             guard let self else { return }
             while !Task.isCancelled,
-                  self.iconUploadAttempts[iconHash, default: 0] < Self.maxIconUploadAttempts {
+                  self.iconUploadBudgetAvailable(iconHash) {
                 do {
                     let exists = try await R2IconUploader.exists(
                         objectKey: objectKey,
@@ -1794,8 +1850,8 @@ final class ServiceController: ObservableObject {
                     break
                 } catch {
                     if Task.isCancelled { break }
-                    self.iconUploadAttempts[iconHash, default: 0] += 1
-                    self.reporterLastError = "封面上传失败：\(error.localizedDescription)"
+                    let delay = self.noteIconUploadFailure(iconHash, objectKey: objectKey, kind: "封面", error: error)
+                    try? await Task.sleep(for: delay)
                 }
             }
             if self.iconResolvers[iconHash]?.id == resolverID {
@@ -2002,8 +2058,25 @@ final class ServiceController: ObservableObject {
                 lastError: appleMusicCredentialsUploadError ?? appleMusicAuthorization.lastError
             ))
         case ("GET", "/health"):
+            let desktop = desktopActivity.snapshot
             return json(HealthPayload(
                 ok: true,
+                reporter: .init(
+                    postEnabled: settings.postEnabled,
+                    lastSuccessAt: reporterLastSuccess.map { Int($0.timeIntervalSince1970 * 1000) },
+                    lastError: reporterLastError,
+                    r2Configured: R2IconUploader.configuration(settings: settings) != nil
+                ),
+                desktopIcon: desktop.map { snapshot in
+                    .init(
+                        applicationName: snapshot.applicationName,
+                        iconHash: snapshot.iconHash,
+                        iconEncoded: snapshot.iconData != nil,
+                        objectKeyConfirmed: snapshot.iconHash.map { uploadedDesktopIconHashes.contains($0) } ?? false,
+                        uploadAttempts: snapshot.iconHash.map { iconUploadAttempts[$0, default: 0] } ?? 0,
+                        resolving: snapshot.iconHash.map { iconResolvers[$0] != nil } ?? false
+                    )
+                },
                 charger: .init(
                     enabled: settings.chargerModuleEnabled,
                     connected: chargerLink.isConnected,
@@ -2072,7 +2145,31 @@ private struct HealthPayload: Encodable {
         let lastError: String?
     }
 
+    /** 远端上报循环的状态。排查「网页上少了什么」先看这里，不用开设置窗口 */
+    struct Reporter: Encodable {
+        let postEnabled: Bool
+        /** 上次成功 POST 的时刻，Unix 毫秒 */
+        let lastSuccessAt: Int?
+        let lastError: String?
+        /** R2 直传的四项配置是否齐全；缺一项图标 resolver 会静默不跑 */
+        let r2Configured: Bool
+    }
+
+    /** 当前前台应用的图标交付状态。哈希是内容地址，不是秘密 */
+    struct DesktopIcon: Encodable {
+        let applicationName: String
+        let iconHash: String?
+        /** PNG 编码是否成功；失败时 resolver 没东西可传 */
+        let iconEncoded: Bool
+        /** 本地是否已确认对象在 R2 里，确认后下一次信封才会带对象键 */
+        let objectKeyConfirmed: Bool
+        let uploadAttempts: Int
+        let resolving: Bool
+    }
+
     let ok: Bool
+    let reporter: Reporter
+    let desktopIcon: DesktopIcon?
     let charger: Device
     let powerBank: Device
 }
