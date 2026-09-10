@@ -759,6 +759,15 @@ final class ServiceController: ObservableObject {
                     // 追发到点就扣，不管这一圈最后有没有真发出去（比如退避期内）。
                     chargingBurst = decision.chargingBurst
                     manualModulesForAttempt = decision.manualModules
+                    // 按下按钮之后数据才消失的（切进黑名单、蓝牙断了）当场摘掉。
+                    // 摘不掉的话 pending 只会在真发出去时才清，于是 manualMode
+                    // 一直为真、自动上报全被挡住，按钮永远停在「正在上报…」。
+                    if !decision.unsatisfiableManualModules.isEmpty {
+                        pendingManualReports.subtract(decision.unsatisfiableManualModules)
+                        for module in decision.unsatisfiableManualModules {
+                            lastManualReportError[module] = "该模块此刻没有可上报的数据"
+                        }
+                    }
 
                     if decision.shouldSendHeartbeat {
                         sendHeartbeat("online")

@@ -305,6 +305,63 @@ struct ReportDecisionTests {
         #expect(decision.shouldPost)
     }
 
+    /**
+     * 点「立刻上报充电宝」要真的发出去。
+     *
+     * 充电头和充电宝共用 `chargingDevices` 那一格，从前手写的 switch 只认
+     * `.charger`：点充电宝什么都不发，而 pending 只在发出去之后才清，于是永远
+     * 清不掉 —— manualMode 一直为真，所有自动上报被挡住，按钮停在「正在上报…」
+     * 直到重新保存设置。
+     */
+    @Test func manualPowerBankSendsTheSharedChargingPayload() {
+        let decision = decide(inputs(
+            now: t0,
+            charger: charger(),
+            manualModules: [.powerBank]
+        ))
+        #expect(decision.chargerToSend)
+        #expect(decision.shouldPost)
+        #expect(decision.unsatisfiableManualModules.isEmpty)
+        #expect(decision.manualModules == [.powerBank])
+    }
+
+    /**
+     * 载荷在按下按钮之后才消失的，当场报「没有可上报的数据」而不是挂着。
+     *
+     * 按钮那侧的 canRequestImmediateReport 已经查过一遍，所以能走到这里的都是
+     * 那之后才变的：蓝牙断了、前台应用切进黑名单、采集器把载荷清了。
+     */
+    @Test func manualRequestWithoutAPayloadIsReportedUnsatisfiable() {
+        // 充电设备全断了
+        var decision = decide(inputs(now: t0, manualModules: [.powerBank]))
+        #expect(decision.unsatisfiableManualModules == [.powerBank])
+        #expect(!decision.chargerToSend)
+        #expect(!decision.manualMode)
+
+        // 前台应用在这一圈之前切进了黑名单：desktop 那一格是空的
+        decision = decide(inputs(
+            now: t0,
+            capturedDesktop: desktop(name: "1Password"),
+            desktopBlocked: true,
+            manualModules: [.desktop]
+        ))
+        #expect(decision.unsatisfiableManualModules == [.desktop])
+        #expect(!decision.manualMode)
+    }
+
+    /// 一个能发一个不能发时，能发的照发，不能发的当场摘掉。
+    @Test func unsatisfiableManualModulesDoNotBlockTheSatisfiableOnes() {
+        let decision = decide(inputs(
+            now: t0,
+            charger: charger(),
+            manualModules: [.charger, .timezone]
+        ))
+        #expect(decision.chargerToSend)
+        #expect(!decision.timezoneToSend)
+        #expect(decision.manualModules == [.charger])
+        #expect(decision.unsatisfiableManualModules == [.timezone])
+    }
+
     /// 没有数据要发的时候才补心跳 —— 有数据时那个包本身就证明活着。
     @Test func heartbeatOnlyFillsQuietRounds() {
         #expect(decide(inputs(now: t0)).shouldSendHeartbeat)

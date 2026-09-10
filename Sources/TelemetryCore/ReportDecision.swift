@@ -5,6 +5,38 @@ import ChargerTelemetryKit
 #endif
 
 /**
+ * 一个模块的手动上报最终落到信封里的哪一格载荷。
+ *
+ * 模块和载荷不是一一对应的：充电头和充电宝共用 `chargingDevices` 那一格。
+ * 从前手写的 switch 只认 `.charger`，于是点「立刻上报充电宝」什么都不会发，
+ * 而 pending 只在发出去之后才清 —— 结果是永远清不掉，manualMode 一直为真，
+ * 所有自动上报被挡住，按钮停在「正在上报…」直到重新保存设置。
+ *
+ * 加设备、加模块时改这里，不要再展开一遍 switch。
+ */
+enum ReportPayloadKind: Hashable, Sendable {
+    case chargingDevices
+    case desktop
+    case timezone
+    case appleMusic
+    case vibeCoding
+    case vibeCodingYear
+}
+
+extension TelemetryModule {
+    var payloadKind: ReportPayloadKind {
+        switch self {
+        case .desktop: .desktop
+        case .appleMusic: .appleMusic
+        case .charger, .powerBank: .chargingDevices
+        case .timezone: .timezone
+        case .vibeCoding: .vibeCoding
+        case .vibeCodingYear: .vibeCodingYear
+        }
+    }
+}
+
+/**
  * 上报循环这一圈的输入快照。
  *
  * 全部在主 actor 上一次性捕获：从捕获到发出去中间没有挂起点，所以这一圈里
@@ -139,6 +171,15 @@ struct ReportDecision: Sendable {
 
     /// 这一圈实际按手动上报处理的模块。成功或失败后从 pending 里摘掉的就是它们。
     var manualModules: Set<TelemetryModule> = []
+    /**
+     * 用户点了、但此刻这一格载荷是空的，怎么发都发不出去。
+     *
+     * 调用方必须当场把它们从 pending 里摘掉并写一句错误 —— 留着的话
+     * manualMode 会一直为真，自动上报全被挡住。按下按钮时 canRequestImmediateReport
+     * 已经查过有没有数据，所以进到这里的都是那之后才消失的：前台应用切进了
+     * 黑名单、蓝牙断了、采集器把载荷清了。
+     */
+    var unsatisfiableManualModules: Set<TelemetryModule> = []
     var manualMode: Bool { !manualModules.isEmpty }
 
     var dataChanged = false
@@ -213,35 +254,42 @@ struct ReportDecision: Sendable {
             inputs.vibeCodingYearUpdatedAt, lastPosted.vibeCodingYearAt
         )
 
-        let manualModules = inputs.manualModules
+        /// 这一格此刻有没有东西可发。手动上报的可满足性只看这个。
+        func hasPayload(_ kind: ReportPayloadKind) -> Bool {
+            switch kind {
+            case .chargingDevices: charger != nil
+            case .desktop: desktop != nil
+            case .timezone: timezone != nil
+            case .appleMusic: music != nil
+            // 两份任一有值就能发：用量还没采到时，「此刻在不在用」也值得单独发
+            case .vibeCoding:
+                inputs.vibeCodingUsagePayload != nil || inputs.vibeCodingNowPayload != nil
+            case .vibeCodingYear: inputs.vibeCodingYearPayload != nil
+            }
+        }
+        // 发不出去的当场摘掉，剩下的才算这一圈的手动上报。全都发不出去时
+        // manualMode 直接为假，这一圈照常走自动判断，不白白空转一个 tick。
+        unsatisfiableManualModules = inputs.manualModules.filter { !hasPayload($0.payloadKind) }
+        let manualModules = inputs.manualModules.subtracting(unsatisfiableManualModules)
         self.manualModules = manualModules
         let manualMode = !manualModules.isEmpty
+        let manualKinds = Set(manualModules.map(\.payloadKind))
         // 手动上报有意只发用户选中的那个模块。自动攒下的变化留给下一轮
         // 常规上报，不搭这封信的便车。
-        chargerToSend = manualMode
-            ? manualModules.contains(.charger) && charger != nil
-            : chargerChanged
-        desktopToSend = manualMode
-            ? manualModules.contains(.desktop) && desktop != nil
-            : desktopChanged
-        timezoneToSend = manualMode
-            ? manualModules.contains(.timezone) && timezone != nil
-            : timezoneChanged
-        musicToSend = manualMode
-            ? manualModules.contains(.appleMusic) && music != nil
-            : musicChanged
+        chargerToSend = manualMode ? manualKinds.contains(.chargingDevices) : chargerChanged
+        desktopToSend = manualMode ? manualKinds.contains(.desktop) : desktopChanged
+        timezoneToSend = manualMode ? manualKinds.contains(.timezone) : timezoneChanged
+        musicToSend = manualMode ? manualKinds.contains(.appleMusic) : musicChanged
         // 手动上报按整个 vibe coding 走：信封只有一个，用量和此刻
         // 手上有什么就一起发什么。年度热力图间隔不同，单独一门。
-        let manualVibeCoding = manualModules.contains(.vibeCoding)
+        let manualVibeCoding = manualKinds.contains(.vibeCoding)
         usageToSend = manualMode
             ? manualVibeCoding && inputs.vibeCodingUsagePayload != nil
             : usageChanged
         nowToSend = manualMode
             ? manualVibeCoding && inputs.vibeCodingNowPayload != nil
             : nowChanged
-        yearToSend = manualMode
-            ? manualModules.contains(.vibeCodingYear) && inputs.vibeCodingYearPayload != nil
-            : yearChanged
+        yearToSend = manualMode ? manualKinds.contains(.vibeCodingYear) : yearChanged
         // 手动上报只发用户选中的模块；token 的自动变化留到下一轮。
         if !manualMode,
            let credentials = inputs.credentials,
