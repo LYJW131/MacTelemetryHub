@@ -349,9 +349,21 @@ There is no separate credentials endpoint — the button only wakes the reporter
 loop, and the two tokens are compared independently, so a rotation uploads just
 the field that changed. The backend should treat both token fields as secrets,
 avoid logging them, and return a 2xx response only after accepting the payload.
-The local
-`GET /apple-music/authorization` endpoint exposes status only and never returns
-token values.
+
+The reporter loop re-reads MusicKit's cached tokens every five minutes. MusicKit
+does not rotate a cached developer token on its own (an expired one is handed
+back unchanged), so the app decodes the token's `iat`/`exp` and, once past the
+half-life (the same rule as the site's and the API Worker's `pastHalfLife`),
+requests a fresh one with `ignoreCache`; the backend receives the new
+`developerToken` + `expiresAt` on the next envelope. A token that would expire
+earlier than the one already held never replaces it.
+
+The local `GET /apple-music/authorization` endpoint exposes status only and never
+returns token values: authorization status, whether a user token is held, the
+held developer token's `developerTokenExpiresAt` (Unix seconds), `lastUploadAt`
+(Unix milliseconds) and `lastError`. Mint failures and forced renewals are also
+written to the unified log under the `apple-music` category
+(`log show --predicate 'category == "apple-music"'`).
 
 The ingest URL is only validated as http-or-https with a host; nothing in the app
 forces TLS. Since that one envelope carries both tokens and the Bearer secret,

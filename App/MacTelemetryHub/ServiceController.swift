@@ -890,10 +890,11 @@ final class ServiceController: ObservableObject {
     }
 
     /**
-     * 在主上报循环里定期读取 MusicKit 的缓存值。
+     * 在主上报循环里定期读取 MusicKit 的 token。
      *
-     * 不使用 ignoreCache：缓存不变就不会产生任何网络请求；SDK 轮换 developer token
-     * 或 user token 后，下面的主循环会分别发现变化，只上报对应字段。
+     * 平时读的是 SDK 缓存，不产生网络请求；缓存那份过了半衰期由
+     * AppleMusicAuthorizationManager 带 ignoreCache 重签。下面的主循环分别比较
+     * 两个 token，只上报变了的字段。
      */
     private func refreshAppleMusicCredentialsIfNeeded(force: Bool = false) async {
         guard !isRefreshingAppleMusicCredentials else { return }
@@ -902,12 +903,23 @@ final class ServiceController: ObservableObject {
         guard force || Date() >= nextAppleMusicCredentialsRefreshAt else { return }
         isRefreshingAppleMusicCredentials = true
         defer { isRefreshingAppleMusicCredentials = false }
-        guard let credentials = await appleMusicAuthorization.mintCredentials() else {
+        guard let minted = await appleMusicAuthorization.mintCredentials() else {
             appleMusicCredentialsUploadError = appleMusicAuthorization.lastError
             nextAppleMusicCredentialsRefreshAt = Date().addingTimeInterval(Self.appleMusicRetryDelay)
             return
         }
-        appleMusicCredentials = credentials
+        // 到期更早的 developer token 不能顶掉手里的：万一 SDK 重签后缓存没跟着换，
+        // 下一轮不带 ignoreCache 又会读回旧的，两份来回交替就会每五分钟上报一次。
+        // user token 不绑定某一份 developer token，它的变化照常接受。
+        if let held = appleMusicCredentials, minted.expiresAt < held.expiresAt {
+            appleMusicCredentials = AppleMusicCredentials(
+                musicUserToken: minted.musicUserToken,
+                developerToken: held.developerToken,
+                expiresAt: held.expiresAt
+            )
+        } else {
+            appleMusicCredentials = minted
+        }
         appleMusicCredentialsUploadError = nil
         nextAppleMusicCredentialsRefreshAt = Date().addingTimeInterval(
             Self.appleMusicCredentialsRefreshInterval
@@ -1974,7 +1986,19 @@ final class ServiceController: ObservableObject {
                 "health": "/health",
                 "charger": "/sse/charger",
                 "powerBank": "/sse/powerbank",
+                "appleMusicAuthorization": "/apple-music/authorization",
             ])
+        case ("GET", "/apple-music/authorization"):
+            // 只报状态，两个 token 的值绝不出本机。给排查「后端手里那份为什么过期」用：
+            // 这里的到期时刻就是上次上报出去的那份 developer token 的到期时刻
+            return json(AppleMusicAuthorizationPayload(
+                status: appleMusicAuthorization.statusDescription,
+                authorized: appleMusicAuthorization.authorizationStatus == .authorized,
+                hasUserToken: appleMusicAuthorization.hasUserToken,
+                developerTokenExpiresAt: appleMusicCredentials.map { Int($0.expiresAt.timeIntervalSince1970) },
+                lastUploadAt: appleMusicCredentialsUploadAt.map { Int($0.timeIntervalSince1970 * 1000) },
+                lastError: appleMusicCredentialsUploadError ?? appleMusicAuthorization.lastError
+            ))
         case ("GET", "/health"):
             return json(HealthPayload(
                 ok: true,
@@ -2049,6 +2073,18 @@ private struct HealthPayload: Encodable {
     let ok: Bool
     let charger: Device
     let powerBank: Device
+}
+
+/** 本地状态接口的 Apple Music 授权一栏。只有状态和时刻，没有 token 值 */
+private struct AppleMusicAuthorizationPayload: Encodable {
+    let status: String
+    let authorized: Bool
+    let hasUserToken: Bool
+    /** 手里那份 developer token 的到期时刻，Unix 秒；还没取到时为空 */
+    let developerTokenExpiresAt: Int?
+    /** 上次成功把 token 送到后端的时刻，Unix 毫秒 */
+    let lastUploadAt: Int?
+    let lastError: String?
 }
 
 private struct ChargingStreamEvent: Encodable {

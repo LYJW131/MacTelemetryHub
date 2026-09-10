@@ -1,11 +1,18 @@
 import Foundation
 import MusicKit
+import os
 
 struct AppleMusicCredentials: Sendable {
     let musicUserToken: String
     let developerToken: String
     /// developer token 的到期时刻，从它自己的 JWT `exp` 解出。
     /// 后端拿到的是一份会过期的凭据，续期时机全靠这个数，所以它跟 token 一起走。
+    let expiresAt: Date
+}
+
+/** developer token 自带的两个时刻。`iat` Apple 一般都签，但规范里它是可选的 */
+struct DeveloperTokenLifetime: Sendable, Equatable {
+    let issuedAt: Date?
     let expiresAt: Date
 }
 
@@ -63,8 +70,11 @@ final class AppleMusicAuthorizationManager: ObservableObject {
     /**
      * 现签一对 token。
      *
-     * 使用 MusicKit 默认缓存。上报循环会定期再取并分别比较两个 token；缓存值没变
-     * 就静默，SDK 真正轮换其中一个时才把那个字段带进下一次遥测信封。
+     * 先读 MusicKit 的缓存：缓存值没变就静默，不产生网络请求。但缓存不会自己
+     * 轮换 —— 实测 developer token 过期两天后，不带 ignoreCache 拿到的还是那份
+     * 过期的，后端因此一直拿 401。所以这里按 token 自己的 `iat`/`exp` 判：过了
+     * 半衰期（或已经过期）就带 `.ignoreCache` 重签一份，规则和站点、Worker 那侧
+     * 的 pastHalfLife 一致。user token 总是对着最终那份 developer token 去取。
      *
      * 不弹窗：授权没批准就直接返回 nil，交给调用方决定要不要提示。
      */
@@ -79,33 +89,73 @@ final class AppleMusicAuthorizationManager: ObservableObject {
             // MusicDataRequest.tokenProvider 是 SDK 里的可变全局量，Swift 6 的严格
             // 并发检查不让碰。新建一个默认 provider 行为一样，且不动那个全局量。
             let provider = DefaultMusicTokenProvider()
-            let developerToken = try await provider.developerToken(options: [])
-            let musicUserToken = try await provider.userToken(for: developerToken, options: [])
-            guard !musicUserToken.isEmpty, !developerToken.isEmpty else {
-                throw AppleMusicAuthorizationError.emptyToken
-            }
-            guard let expiresAt = Self.expiry(ofJWT: developerToken) else {
+            var developerToken = try await provider.developerToken(options: [])
+            guard !developerToken.isEmpty else { throw AppleMusicAuthorizationError.emptyToken }
+            guard var lifetime = Self.lifetime(ofJWT: developerToken) else {
                 throw AppleMusicAuthorizationError.unreadableExpiry
             }
+
+            let now = Date()
+            if Self.shouldRenew(lifetime, now: now) {
+                Self.logger.notice(
+                    "developer token 到期 \(lifetime.expiresAt.ISO8601Format(), privacy: .public)，已过半衰期，忽略缓存重签"
+                )
+                developerToken = try await provider.developerToken(options: .ignoreCache)
+                guard !developerToken.isEmpty else { throw AppleMusicAuthorizationError.emptyToken }
+                guard let renewed = Self.lifetime(ofJWT: developerToken) else {
+                    throw AppleMusicAuthorizationError.unreadableExpiry
+                }
+                if renewed.expiresAt <= lifetime.expiresAt {
+                    // 重签也没拿到更新的：不是缓存问题，多半是 Apple 那边没签出来。
+                    // 记下来，但仍把手里这份交出去 —— 调用方会比较到期时刻，不会拿它顶掉更好的
+                    Self.logger.error(
+                        "忽略缓存重签后 developer token 到期仍是 \(renewed.expiresAt.ISO8601Format(), privacy: .public)"
+                    )
+                }
+                lifetime = renewed
+            }
+
+            let musicUserToken = try await provider.userToken(for: developerToken, options: [])
+            guard !musicUserToken.isEmpty else { throw AppleMusicAuthorizationError.emptyToken }
 
             hasUserToken = true
             lastError = nil
             return AppleMusicCredentials(
                 musicUserToken: musicUserToken,
                 developerToken: developerToken,
-                expiresAt: expiresAt
+                expiresAt: lifetime.expiresAt
             )
         } catch {
             lastError = error.localizedDescription
+            Self.logger.error("取 Apple Music token 失败：\(error.localizedDescription, privacy: .public)")
             return nil
         }
     }
 
+    private static let logger = Logger(
+        subsystem: Bundle.main.bundleIdentifier ?? "MacTelemetryHub",
+        category: "apple-music"
+    )
+
     /**
-     * 读 JWT 的 `exp`。只解不验签 —— 签名是 Apple 那边的事，这边只需要知道
-     * 什么时候该续，读错了最坏也就是早续一次。
+     * 过了「签发时刻 → 到期时刻」的中点就该换一份新的。
+     *
+     * 和站点 src/lib/musickit.ts、Worker workers/api/src/musickit-token.ts 里的
+     * pastHalfLife 是同一条规则，改一处记得对齐。token 里没有 `iat` 时退化成
+     * 「到期前一天」：总比永远不续强。
      */
-    static func expiry(ofJWT token: String) -> Date? {
+    static func shouldRenew(_ lifetime: DeveloperTokenLifetime, now: Date) -> Bool {
+        if let issuedAt = lifetime.issuedAt, issuedAt < lifetime.expiresAt {
+            return now >= issuedAt.addingTimeInterval(lifetime.expiresAt.timeIntervalSince(issuedAt) / 2)
+        }
+        return now >= lifetime.expiresAt.addingTimeInterval(-24 * 60 * 60)
+    }
+
+    /**
+     * 读 JWT 的 `iat` 和 `exp`。只解不验签 —— 签名是 Apple 那边的事，这边只需要
+     * 知道什么时候该续，读错了最坏也就是早续一次。
+     */
+    static func lifetime(ofJWT token: String) -> DeveloperTokenLifetime? {
         let parts = token.split(separator: ".")
         guard parts.count >= 2 else { return nil }
         // JWT 用的是 base64url，且省掉了尾部填充
@@ -117,7 +167,11 @@ final class AppleMusicAuthorizationManager: ObservableObject {
               let claims = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
               let exp = claims["exp"] as? Double
         else { return nil }
-        return Date(timeIntervalSince1970: exp)
+        let iat = claims["iat"] as? Double
+        return DeveloperTokenLifetime(
+            issuedAt: iat.map { Date(timeIntervalSince1970: $0) },
+            expiresAt: Date(timeIntervalSince1970: exp)
+        )
     }
 }
 
