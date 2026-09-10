@@ -171,11 +171,14 @@ final class EngineTests: XCTestCase, @unchecked Sendable {
                 executableURL: executable, environment: ["ENGINE_TEST_MARKER": marker.path], includeCursor: false
             )
         }
-        for _ in 0..<100 {
+        // 上限放宽到 10 秒：只是等 fixture 进程真正跑起来，通常几十毫秒就到；
+        // 机器同时在跑 xcodebuild 时 spawn 会拖到 1 秒以上，之前 1 秒的上限就偶发红。
+        // 标记一出现就跳出，正常情况下不会多等。
+        for _ in 0..<1_000 {
             if FileManager.default.fileExists(atPath: marker.path) { break }
             try await Task.sleep(for: .milliseconds(10))
         }
-        XCTAssertTrue(FileManager.default.fileExists(atPath: marker.path))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: marker.path), "fixture CLI 10 秒内没有启动")
         task.cancel()
         do { _ = try await task.value; XCTFail("Expected cancellation") }
         catch { XCTAssertTrue(error is CancellationError) }
