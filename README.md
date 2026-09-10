@@ -45,7 +45,7 @@ envelope and may contain only the modules that have fresh data:
       "applicationName": "Safari",
       "bundleIdentifier": "com.apple.Safari",
       "iconHash": "<sha256>",
-      "iconObjectKey": "<sha256>.webp"
+      "iconObjectKey": "<sha256>.png"
     },
     "appleMusic": {},
     "timezone": {},
@@ -67,13 +67,14 @@ a charger with nothing plugged in has no new readings to send, and that is
 exactly what heartbeat renewal is for.
 
 Version 4 is the only accepted contract; desktop icons are addressed by SHA-256.
-The Mac renders each icon at 96 px, encodes it once as WebP, signs an S3-compatible
-PUT, uploads `<sha256>.webp` directly to R2, and sends only `iconObjectKey`.
+The Mac renders each icon at 96 px, encodes it once as PNG, signs an S3-compatible
+PUT, uploads `<sha256>.png` directly to R2, and sends only `iconObjectKey`
+(charger covers go the same way as `<sha256>.jpg`).
 The R2 access key and secret are stored in macOS Keychain. There is no base64 fallback;
 the server never receives image bytes.
 
 An envelope with no `modules` (or an empty one) is a pure heartbeat: it refreshes
-liveness without touching any module's timestamp. One is sent every 30 s while
+liveness without touching any module's timestamp. One is sent every 90 s while
 nothing changes, and never alongside a data post — that post already proves the
 reporter is alive. `presence: "offline"` covers graceful exits (quit, sleep) and is
 sent synchronously so it beats the disconnect; crashes, network loss, and forced
