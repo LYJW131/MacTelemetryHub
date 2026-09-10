@@ -157,6 +157,22 @@ private enum R2IconUploader {
     }
 
     /**
+     * SigV4 的 `x-amz-date`：`yyyyMMdd'T'HHmmss'Z'`，UTC。
+     *
+     * 从前每签一次就新建一个 DateFormatter。格式是常量，没必要每次重建；而
+     * DateFormatter 不是 Sendable，静态缓存过不了严格并发检查，所以换成
+     * `Date.ISO8601FormatStyle`（值类型、Sendable），输出逐字符相同。
+     */
+    private static let amzDateStyle = Date.ISO8601FormatStyle(
+        dateSeparator: .omitted,
+        dateTimeSeparator: .standard,
+        timeSeparator: .omitted,
+        timeZoneSeparator: .omitted,
+        includingFractionalSeconds: false,
+        timeZone: .gmt
+    )
+
+    /**
      * SigV4 签名。HEAD 和 PUT 共用一份，免得两处各写一遍再慢慢分家。
      *
      * `Cache-Control` 有意不进签名头列表：SigV4 只要求签 host 和 x-amz-*，
@@ -170,7 +186,7 @@ private enum R2IconUploader {
         url: URL,
         configuration: R2UploadConfiguration
     ) {
-        let amzDate = timestamp()
+        let amzDate = timestamp(Date())
         let shortDate = String(amzDate.prefix(8))
         let scope = "\(shortDate)/auto/s3/aws4_request"
         let canonicalPath = URLComponents(url: url, resolvingAgainstBaseURL: false)?.percentEncodedPath
@@ -239,12 +255,8 @@ private enum R2IconUploader {
         return host
     }
 
-    private static func timestamp() -> String {
-        let formatter = DateFormatter()
-        formatter.locale = Locale(identifier: "en_US_POSIX")
-        formatter.timeZone = TimeZone(secondsFromGMT: 0)
-        formatter.dateFormat = "yyyyMMdd'T'HHmmss'Z'"
-        return formatter.string(from: Date())
+    private static func timestamp(_ now: Date) -> String {
+        now.formatted(amzDateStyle)
     }
 
     private static func sha256Hex(_ data: Data) -> String {
@@ -285,32 +297,6 @@ enum TelemetryModule: String, CaseIterable, Hashable, Sendable {
     }
 }
 
-private struct ChargerUploadSignature: Equatable {
-    let connected: Bool
-    let totalOutputPowerW: Double?
-    let device: StatusDevicePayload
-    let ports: [String: StatusPortPayload]
-
-    init(_ payload: StatusPayload) {
-        connected = payload.connected
-        totalOutputPowerW = payload.totalOutputPowerW
-        device = payload.device
-        ports = payload.ports
-    }
-}
-
-/**
- * 只包含「插拔 / 换设备」这类结构性变化的指纹，用来决定要不要即时上报。
- *
- * `mode` 是充电头自己给的端口开关位（0xA5/0xA6/0xA7 结构体的第一个字节），
- * 不是从功率推出来的 —— 实测插着线不取电的口是 `Output` + 0.00W，功率阈值
- * 那套会把它误判成关。所以它是最直接的插拔信号，比设备身份还灵：插一个
- * 表里没有的设备，身份查不出名字，但开关位一定会翻。
- *
- * 读 `PortState` 而不是上报载荷，是因为载荷里的 `model` / `vendor` 是查表查出来
- * 的显示名，表里没有的设备就是 nil、跟空口分不出来。`vendorID` / `productID`
- * 是原始值，没这个问题。
- */
 /**
  * 「结构变了没有」的指纹 —— 决定要不要立刻叫醒上报循环。
  *
@@ -374,50 +360,6 @@ private struct ChargingDevicesStructuralSignature: Equatable {
 
     init(_ payload: ChargingDevicesPayload) {
         devices = payload.devices.map(Device.init)
-    }
-}
-
-
-/**
- * 只包含「插拔 / 换设备」这类结构性变化的指纹，用来决定要不要即时上报。
- *
- * `mode` 是充电头自己给的端口开关位（0xA5/0xA6/0xA7 结构体的第一个字节），
- * 不是从功率推出来的 —— 实测插着线不取电的口是 `Output` + 0.00W，功率阈值
- * 那套会把它误判成关。所以它是最直接的插拔信号，比设备身份还灵：插一个
- * 表里没有的设备，身份查不出名字，但开关位一定会翻。
- *
- * 读 `PortState` 而不是上报载荷，是因为载荷里的 `model` / `vendor` 是查表查出来
- * 的显示名，表里没有的设备就是 nil、跟空口分不出来。`vendorID` / `productID`
- * 是原始值，没这个问题。
- */
-private struct ChargerStructuralSignature: Equatable {
-    private struct Port: Equatable {
-        /// 充电头给的端口开关位，插拔最直接的信号
-        let mode: String
-        let vendorID: UInt16?
-        let productID: UInt16?
-        let brandCode: UInt8?
-        let modelCode: UInt16?
-        let cableCode: String?
-
-        init(_ port: PortState) {
-            mode = port.mode
-            vendorID = port.vendorID
-            productID = port.productID
-            brandCode = port.brandCode
-            modelCode = port.modelCode
-            cableCode = port.cableCode
-        }
-    }
-
-    private let connected: Bool
-    private let device: DeviceInfo
-    private let ports: [String: Port]
-
-    init(connected: Bool, state: ChargerState) {
-        self.connected = connected
-        device = state.device
-        ports = state.ports.mapValues(Port.init)
     }
 }
 
@@ -511,9 +453,12 @@ final class ServiceController: ObservableObject {
     let settings: AppSettings
     /// 每台设备一条独立链路：各自的 CBCentralManager、各自的配对 UUID。
     /// 连接节奏两边一样：定向连接、同一套重连和推流 watchdog。
+    ///
+    /// 两条链路各自存一份，`chargingLinks` 由它们拼出来 —— 从前反过来，
+    /// 于是「哪条是充电头」靠 `chargingLinks[0]` 这样一个不检查的下标表达。
+    let chargerLink: BluetoothService
+    let powerBankLink: BluetoothService
     let chargingLinks: [BluetoothService]
-    var chargerLink: BluetoothService { chargingLinks[0] }
-    var powerBankLink: BluetoothService { chargingLinks[1] }
     let covers: ChargerCoverController
     let desktopActivity = DesktopActivityMonitor()
     let timeZone = TimeZoneMonitor()
@@ -567,7 +512,8 @@ final class ServiceController: ObservableObject {
     /// 隐藏虚拟应用已成功发出。单靠 Optional 无法区分“尚未发过”和“已发隐藏态”。
     private var lastPostedDesktopWasHidden = false
     /// 这个上报会话里已经在 R2 确认存在的图标身份指纹。
-    private var uploadedDesktopIconHashes: Set<String> = []
+    /// 桌面图标和充电头封面共用这一份记忆，所以名字里没有 desktop。
+    private var uploadedIconHashes: Set<String> = []
     /// 图标直传连续失败次数，按身份哈希记。到上限就不再试，避免打成热循环
     private var iconUploadAttempts: [String: Int] = [:]
     private static let maxIconUploadAttempts = 3
@@ -587,11 +533,12 @@ final class ServiceController: ObservableObject {
         category: "desktop-icon"
     )
     /// 最近一次在 R2 确认存在的时间；过期后后台 HEAD 一次，接住手动清桶。
-    private var desktopIconVerifiedAt: [String: Date] = [:]
-    private static let desktopIconVerificationInterval: TimeInterval = 5 * 60
+    /// 和 uploadedIconHashes 一样，桌面图标和封面共用一份。
+    private var iconVerifiedAt: [String: Date] = [:]
+    private static let iconVerificationInterval: TimeInterval = 5 * 60
     /// 同一枚图标在飞的那一次后台检查 / 直传。
     private var iconResolvers: [String: (id: UUID, task: Task<Void, Never>)] = [:]
-    private var uploadedDesktopIconOrder: [String] = []
+    private var uploadedIconOrder: [String] = []
     private var lastPostedTimeZone: TimeZoneUploadSignature?
     private var lastPostedAppleMusic: AppleMusicUploadSignature?
     private var lastPostedMusicAnchor: AppleMusicPositionAnchor?
@@ -671,7 +618,7 @@ final class ServiceController: ObservableObject {
     private static let desktopSettleDelay = Duration.milliseconds(400)
 
     /// 防止长期运行、打开大量一次性应用时让图标缓存无限增长。
-    private static let uploadedDesktopIconLimit = 64
+    private static let uploadedIconLimit = 64
 
     /// 进度偏离预测多少才算被拖过。留 2.5 秒，既不会把采样抖动当 seek，
     /// 也接得住真的拖动。
@@ -680,11 +627,12 @@ final class ServiceController: ObservableObject {
     init() {
         let settings = AppSettings()
         self.settings = settings
-        chargingLinks = [
-            BluetoothService(settings: settings, slot: .charger),
-            BluetoothService(settings: settings, slot: .powerBank),
-        ]
-        covers = ChargerCoverController(settings: settings, chargerLink: chargingLinks[0])
+        let charger = BluetoothService(settings: settings, slot: .charger)
+        let powerBank = BluetoothService(settings: settings, slot: .powerBank)
+        chargerLink = charger
+        powerBankLink = powerBank
+        chargingLinks = [charger, powerBank]
+        covers = ChargerCoverController(settings: settings, chargerLink: charger)
     }
 
     deinit {
@@ -795,8 +743,8 @@ final class ServiceController: ObservableObject {
         restartReporter()
     }
 
-    /// Queues one module for an immediate, module-scoped envelope.
-    /// The normal reporter remains the only code path that performs the network request.
+    /// 把一个模块排进「立刻发一封只带它的信封」的队列。
+    /// 真正发请求的仍然只有那条常规上报循环，这里不另开网络路径。
     @discardableResult
     func requestImmediateReport(_ module: TelemetryModule) -> Bool {
         guard canRequestImmediateReport(module) else { return false }
@@ -854,10 +802,14 @@ final class ServiceController: ObservableObject {
         return true
     }
 
+    /// 这份快照的应用是否命中前台上报黑名单。空快照按未命中处理。
+    /// 判断散在四处过，全部收到这里 —— 黑名单的语义只该有一个落点。
+    private func isDesktopReportingBlocked(_ snapshot: DesktopActivitySnapshot?) -> Bool {
+        settings.isDesktopReportingBlocked(bundleIdentifier: snapshot?.bundleIdentifier)
+    }
+
     var currentDesktopReportingIsBlocked: Bool {
-        settings.isDesktopReportingBlocked(
-            bundleIdentifier: desktopActivity.snapshot?.bundleIdentifier
-        )
+        isDesktopReportingBlocked(desktopActivity.snapshot)
     }
 
     func isManualReportInFlight(_ module: TelemetryModule) -> Bool {
@@ -958,9 +910,7 @@ final class ServiceController: ObservableObject {
     private func moduleHasData(_ module: TelemetryModule) -> Bool {
         switch module {
         case .desktop:
-            desktopActivity.snapshot.map {
-                !settings.isDesktopReportingBlocked(bundleIdentifier: $0.bundleIdentifier)
-            } ?? false
+            desktopActivity.snapshot.map { !isDesktopReportingBlocked($0) } ?? false
         case .appleMusic: appleMusic.snapshot != nil
         case .charger: chargerLink.hasTelemetry
         case .powerBank: powerBankLink.hasTelemetry
@@ -974,8 +924,22 @@ final class ServiceController: ObservableObject {
         }
     }
 
-    /// 所有已启用、且真的收到过遥测的充电设备。一台都没有就返回 nil，
-    /// 上报信封里那个键整个不出现。
+    /// slot 到链路的唯一映射。加第三台设备时这里跟着 enum 一起加一个 case。
+    func link(for slot: ChargingDeviceSlot) -> BluetoothService {
+        switch slot {
+        case .charger: chargerLink
+        case .powerBank: powerBankLink
+        }
+    }
+
+    /**
+     * 所有已启用、且真的收到过遥测的充电设备。一台都没有就返回 nil，
+     * 上报信封里那个键整个不出现。
+     *
+     * 这条路是纯读取：不启动 R2 resolver、不动重试额度。SSE 推流每秒都要走它，
+     * 从前顺手启动的后台解析于是被 1 Hz 驱动着跑。发起解析改由上报侧的
+     * `kickCoverIconResolution()` 显式负责。
+     */
     var chargingDevicesPayload: ChargingDevicesPayload? {
         let devices = chargingLinks.compactMap { link -> ChargingDevicePayload? in
             guard link.slot.isEnabled(settings) else { return nil }
@@ -987,11 +951,19 @@ final class ServiceController: ObservableObject {
     private func devicePayload(for link: BluetoothService) -> ChargingDevicePayload? {
         guard var device = link.devicePayload else { return nil }
         if link.slot == .charger {
-            let source = covers.coverUploadSource
-            let key = coverIconObjectKeyIfReady(source)
+            let key = confirmedCoverIconObjectKey(covers.coverUploadSource)
             device = device.withCover(covers.coverPayload(objectKey: key))
         }
         return device
+    }
+
+    /// 组装待上报载荷之前叫一次：封面还没确认就在后台 HEAD / PUT。
+    /// 条件跟从前埋在 `devicePayload(for:)` 里的那次完全一致。
+    private func kickCoverIconResolution() {
+        guard ChargingDeviceSlot.charger.isEnabled(settings),
+              chargerLink.devicePayload != nil,
+              let source = covers.coverUploadSource else { return }
+        startCoverIconResolution(source)
     }
 
     private func streamEvent(for link: BluetoothService) -> ChargingStreamEvent {
@@ -1079,7 +1051,6 @@ final class ServiceController: ObservableObject {
         }
     }
 
-    /// 等到下一个周期，或者被事件提前叫醒 —— 谁先来算谁
     /**
      * 等到下一个周期，或者被事件提前叫醒 —— 谁先来算谁。
      *
@@ -1128,7 +1099,7 @@ final class ServiceController: ObservableObject {
                 desktopSettleTask?.cancel()
                 if settings.postEnabled,
                    let snapshot = desktopActivity.snapshot,
-                   !settings.isDesktopReportingBlocked(bundleIdentifier: snapshot.bundleIdentifier) {
+                   !isDesktopReportingBlocked(snapshot) {
                     startDesktopIconResolution(snapshot)
                 }
                 desktopSettleTask = Task { [weak self] in
@@ -1239,11 +1210,11 @@ final class ServiceController: ObservableObject {
         lastPostedChargingStructural = nil
         lastPostedDesktop = nil
         lastPostedDesktopWasHidden = false
-        uploadedDesktopIconHashes.removeAll(keepingCapacity: true)
-        uploadedDesktopIconOrder.removeAll(keepingCapacity: true)
+        uploadedIconHashes.removeAll(keepingCapacity: true)
+        uploadedIconOrder.removeAll(keepingCapacity: true)
         iconUploadAttempts.removeAll(keepingCapacity: true)
         iconUploadGaveUpAt.removeAll(keepingCapacity: true)
-        desktopIconVerifiedAt.removeAll(keepingCapacity: true)
+        iconVerifiedAt.removeAll(keepingCapacity: true)
         cancelDesktopIconResolvers()
         lastPostedTimeZone = nil
         lastPostedAppleMusic = nil
@@ -1284,13 +1255,13 @@ final class ServiceController: ObservableObject {
 
                     // 变化判断全是本地计算，每圈都做；nextPostAt 只管「什么时候允许发」。
                     // 两台设备一起算：任意一台插拔都该立刻发，功率滚动都该等窗口。
+                    // 封面对象的后台解析由上报侧显式发起。读载荷的那条路是纯的，
+                    // 1 Hz 的 SSE 推流不会再顺手启动 resolver、也不会动重试额度。
+                    kickCoverIconResolution()
                     let charger = chargingDevicesPayload
-                    let chargerSignature = charger
                     let chargerStructural = charger.map(ChargingDevicesStructuralSignature.init)
                     let capturedDesktop = settings.desktopModuleEnabled ? desktopActivity.snapshot : nil
-                    let desktopBlocked = capturedDesktop.map {
-                        settings.isDesktopReportingBlocked(bundleIdentifier: $0.bundleIdentifier)
-                    } ?? false
+                    let desktopBlocked = isDesktopReportingBlocked(capturedDesktop)
                     // 黑名单只切断远端载荷；monitor 的本机快照继续保留给界面和本地 API。
                     let desktop = desktopBlocked ? nil : capturedDesktop
                     let desktopSignature = desktop.map(DesktopUploadSignature.init)
@@ -1305,7 +1276,7 @@ final class ServiceController: ObservableObject {
                     let musicUserTokenChanged = credentials.map {
                         $0.musicUserToken != lastPostedAppleMusicUserToken
                     } ?? false
-                    let chargerChanged = chargerSignature != nil && chargerSignature != lastPostedChargingDevices
+                    let chargerChanged = charger != nil && charger != lastPostedChargingDevices
                     let desktopChanged = capturedDesktop != nil && (
                         desktopBlocked
                             ? !lastPostedDesktopWasHidden
@@ -1345,9 +1316,8 @@ final class ServiceController: ObservableObject {
                     let manualModules = pendingManualReports
                     manualModulesForAttempt = manualModules
                     let manualMode = !manualModules.isEmpty
-                    // A manual request is intentionally module-scoped. Automatic changes are
-                    // left pending for the next regular reporter pass instead of hitching a
-                    // ride on the user's selected module.
+                    // 手动上报有意只发用户选中的那个模块。自动攒下的变化留给下一轮
+                    // 常规上报，不搭这封信的便车。
                     let chargerToSend = manualMode
                         ? manualModules.contains(.charger) && charger != nil
                         : chargerChanged
@@ -1406,7 +1376,6 @@ final class ServiceController: ObservableObject {
                         sendHeartbeat("online")
                         lastHeartbeatAt = Date()
                     }
-                    let anythingChanged = dataChanged
 
                     // 播放/暂停、换歌、换前台应用是用户正盯着的事，不值得为它们等满节流窗口。
                     // 这些变化本来也会上报，即时化只是把等待砍掉，不增加请求总数；
@@ -1470,7 +1439,7 @@ final class ServiceController: ObservableObject {
                     let shouldPost = !suspended && Date() >= backoffUntil &&
                         (manualMode || urgent || Date() >= nextPostAt)
 
-                    if let url, anythingChanged, shouldPost {
+                    if let url, dataChanged, shouldPost {
                         let desktopPayload: DesktopActivitySnapshot?
                         if desktopBlocked, let capturedDesktop {
                             desktopPayload = .hidden(observedAt: capturedDesktop.observedAt)
@@ -1532,15 +1501,15 @@ final class ServiceController: ObservableObject {
                         reporterLastError = nil
                         lastHeartbeatAt = Date()
                         if chargerToSend {
-                            lastPostedChargingDevices = chargerSignature
+                            lastPostedChargingDevices = charger
                             if chargerCoverIconAvailable == false,
                                let source = covers.coverUploadSource,
                                let iconHash = source.iconHash {
                                 if charger?.devices.first(where: { $0.kind == .charger })?.cover?.iconObjectKey != nil {
-                                    forgetUploadedDesktopIcon(iconHash)
+                                    forgetUploadedIcon(iconHash)
                                 }
                                 startCoverIconResolution(source)
-                                if uploadedDesktopIconHashes.contains(iconHash) {
+                                if uploadedIconHashes.contains(iconHash) {
                                     lastPostedChargingDevices = nil
                                     wakeReporter()
                                 }
@@ -1563,11 +1532,11 @@ final class ServiceController: ObservableObject {
                                 if desktopPayload?.iconObjectKey != nil {
                                     // 兼容服务端今后恢复对象校验：带了键仍返回 false，说明
                                     // 这份本地“已上传”记忆失效，后台重新 HEAD/PUT。
-                                    forgetUploadedDesktopIcon(iconHash)
+                                    forgetUploadedIcon(iconHash)
                                 }
                                 startDesktopIconResolution(desktop)
                                 // resolver 可能在 POST 飞行期间已经完成；补上那次竞态唤醒。
-                                if uploadedDesktopIconHashes.contains(iconHash) {
+                                if uploadedIconHashes.contains(iconHash) {
                                     lastPostedDesktop = nil
                                     wakeReporter()
                                 }
@@ -1651,7 +1620,7 @@ final class ServiceController: ObservableObject {
     private func desktopIconObjectKeyIfReady(_ desktop: DesktopActivitySnapshot) -> String? {
         guard let iconHash = desktop.iconHash, let iconData = desktop.iconData else { return nil }
         startDesktopIconResolution(desktop)
-        return uploadedDesktopIconHashes.contains(iconHash)
+        return uploadedIconHashes.contains(iconHash)
             ? R2IconUploader.objectKey(for: iconData)
             : nil
     }
@@ -1666,9 +1635,9 @@ final class ServiceController: ObservableObject {
             return
         }
 
-        if uploadedDesktopIconHashes.contains(iconHash),
-           let verifiedAt = desktopIconVerifiedAt[iconHash],
-           Date().timeIntervalSince(verifiedAt) < Self.desktopIconVerificationInterval {
+        if uploadedIconHashes.contains(iconHash),
+           let verifiedAt = iconVerifiedAt[iconHash],
+           Date().timeIntervalSince(verifiedAt) < Self.iconVerificationInterval {
             return
         }
 
@@ -1688,7 +1657,7 @@ final class ServiceController: ObservableObject {
                         timeout: timeout
                     )
                     if !exists {
-                        self.forgetUploadedDesktopIcon(iconHash)
+                        self.forgetUploadedIcon(iconHash)
                         try await R2IconUploader.upload(
                             data: iconData,
                             contentHash: R2IconUploader.contentHash(of: iconData),
@@ -1699,7 +1668,7 @@ final class ServiceController: ObservableObject {
                     }
                     guard !Task.isCancelled else { break }
                     self.iconUploadAttempts[iconHash] = 0
-                    self.desktopIconVerifiedAt[iconHash] = Date()
+                    self.iconVerifiedAt[iconHash] = Date()
                     self.rememberUploadedDesktopIcon(desktop)
 
                     // resolver 早于首包完成时，400ms 防抖会自然把键带上，不额外叫醒。
@@ -1772,28 +1741,37 @@ final class ServiceController: ObservableObject {
 
     private func rememberUploadedDesktopIcon(_ snapshot: DesktopActivitySnapshot) {
         guard let iconHash = snapshot.iconHash else { return }
-        uploadedDesktopIconHashes.insert(iconHash)
-        uploadedDesktopIconOrder.removeAll { $0 == iconHash }
-        uploadedDesktopIconOrder.append(iconHash)
-        if uploadedDesktopIconOrder.count > Self.uploadedDesktopIconLimit {
-            let evicted = uploadedDesktopIconOrder.removeFirst()
-            uploadedDesktopIconHashes.remove(evicted)
-            desktopIconVerifiedAt.removeValue(forKey: evicted)
+        rememberUploadedIcon(iconHash)
+    }
+
+    private func rememberUploadedCoverIcon(_ iconHash: String) {
+        rememberUploadedIcon(iconHash)
+    }
+
+    /// 桌面图标和充电头封面共用同一份「已确认在 R2」的记忆和同一条 LRU 淘汰。
+    private func rememberUploadedIcon(_ iconHash: String) {
+        uploadedIconHashes.insert(iconHash)
+        uploadedIconOrder.removeAll { $0 == iconHash }
+        uploadedIconOrder.append(iconHash)
+        if uploadedIconOrder.count > Self.uploadedIconLimit {
+            let evicted = uploadedIconOrder.removeFirst()
+            uploadedIconHashes.remove(evicted)
+            iconVerifiedAt.removeValue(forKey: evicted)
         }
     }
 
-    private func forgetUploadedDesktopIcon(_ iconHash: String) {
-        uploadedDesktopIconHashes.remove(iconHash)
-        uploadedDesktopIconOrder.removeAll { $0 == iconHash }
-        desktopIconVerifiedAt.removeValue(forKey: iconHash)
+    private func forgetUploadedIcon(_ iconHash: String) {
+        uploadedIconHashes.remove(iconHash)
+        uploadedIconOrder.removeAll { $0 == iconHash }
+        iconVerifiedAt.removeValue(forKey: iconHash)
     }
 
-    private func coverIconObjectKeyIfReady(_ source: CoverUploadSource?) -> String? {
+    /// 已经确认在 R2 的封面对象键；没确认好就是 nil。纯读取，不发起解析。
+    private func confirmedCoverIconObjectKey(_ source: CoverUploadSource?) -> String? {
         guard let source, let iconHash = source.iconHash, let iconData = source.iconData else {
             return nil
         }
-        startCoverIconResolution(source)
-        return uploadedDesktopIconHashes.contains(iconHash)
+        return uploadedIconHashes.contains(iconHash)
             ? R2IconUploader.objectKey(for: iconData, ext: "jpg")
             : nil
     }
@@ -1808,9 +1786,9 @@ final class ServiceController: ObservableObject {
             return
         }
 
-        if uploadedDesktopIconHashes.contains(iconHash),
-           let verifiedAt = desktopIconVerifiedAt[iconHash],
-           Date().timeIntervalSince(verifiedAt) < Self.desktopIconVerificationInterval {
+        if uploadedIconHashes.contains(iconHash),
+           let verifiedAt = iconVerifiedAt[iconHash],
+           Date().timeIntervalSince(verifiedAt) < Self.iconVerificationInterval {
             return
         }
 
@@ -1828,7 +1806,7 @@ final class ServiceController: ObservableObject {
                         timeout: timeout
                     )
                     if !exists {
-                        self.forgetUploadedDesktopIcon(iconHash)
+                        self.forgetUploadedIcon(iconHash)
                         try await R2IconUploader.upload(
                             data: iconData,
                             contentHash: R2IconUploader.contentHash(of: iconData),
@@ -1839,7 +1817,7 @@ final class ServiceController: ObservableObject {
                     }
                     guard !Task.isCancelled else { break }
                     self.iconUploadAttempts[iconHash] = 0
-                    self.desktopIconVerifiedAt[iconHash] = Date()
+                    self.iconVerifiedAt[iconHash] = Date()
                     self.rememberUploadedCoverIcon(iconHash)
                     if self.lastPostedChargerCover(hash: iconHash, hasObjectKey: false) {
                         self.lastPostedChargingDevices = nil
@@ -1861,45 +1839,10 @@ final class ServiceController: ObservableObject {
         iconResolvers[iconHash] = (resolverID, task)
     }
 
-    private func rememberUploadedCoverIcon(_ iconHash: String) {
-        uploadedDesktopIconHashes.insert(iconHash)
-        uploadedDesktopIconOrder.removeAll { $0 == iconHash }
-        uploadedDesktopIconOrder.append(iconHash)
-        if uploadedDesktopIconOrder.count > Self.uploadedDesktopIconLimit {
-            let evicted = uploadedDesktopIconOrder.removeFirst()
-            uploadedDesktopIconHashes.remove(evicted)
-            desktopIconVerifiedAt.removeValue(forKey: evicted)
-        }
-    }
-
     private func lastPostedChargerCover(hash: String, hasObjectKey: Bool) -> Bool {
         guard let cover = lastPostedChargingDevices?.devices.first(where: { $0.kind == .charger })?.cover
         else { return false }
         return cover.iconHash == hash && (cover.iconObjectKey != nil) == hasObjectKey
-    }
-
-    var telemetryEnvelope: TelemetryEnvelope {
-        let credentialsPayload = appleMusicCredentials.map {
-            AppleMusicCredentialsPayload(
-                musicUserToken: $0.musicUserToken,
-                developerToken: $0.developerToken,
-                expiresAt: Int($0.expiresAt.timeIntervalSince1970)
-            )
-        }
-        return makeTelemetryEnvelope(
-            chargingDevices: chargingDevicesPayload,
-            desktop: settings.desktopModuleEnabled ? desktopActivity.snapshot : nil,
-            timezone: settings.timezoneModuleEnabled ? timeZone.snapshot : nil,
-            appleMusic: settings.appleMusicModuleEnabled ? appleMusic.snapshot : nil,
-            appleMusicCredentials: credentialsPayload,
-            vibeCodingUsage: settings.vibeCodingModuleEnabled
-                ? vibeCodingUsageCollector.uploadPayload
-                : nil,
-            vibeCodingNow: settings.vibeCodingModuleEnabled ? codingSessions.uploadPayload : nil,
-            vibeCodingYear: settings.vibeCodingModuleEnabled ? vibeCodingYearCollector.uploadPayload : nil,
-            includeDesktop: settings.desktopModuleEnabled,
-            includeAppleMusic: settings.appleMusicModuleEnabled
-        )
     }
 
     private func makeTelemetryEnvelope(
@@ -2072,7 +2015,7 @@ final class ServiceController: ObservableObject {
                         applicationName: snapshot.applicationName,
                         iconHash: snapshot.iconHash,
                         iconEncoded: snapshot.iconData != nil,
-                        objectKeyConfirmed: snapshot.iconHash.map { uploadedDesktopIconHashes.contains($0) } ?? false,
+                        objectKeyConfirmed: snapshot.iconHash.map { uploadedIconHashes.contains($0) } ?? false,
                         uploadAttempts: snapshot.iconHash.map { iconUploadAttempts[$0, default: 0] } ?? 0,
                         resolving: snapshot.iconHash.map { iconResolvers[$0] != nil } ?? false
                     )
@@ -2107,13 +2050,12 @@ final class ServiceController: ObservableObject {
      */
     private func chargingStream(_ slot: ChargingDeviceSlot) -> HTTPHandlerResult {
         .stream { [weak self] stream in
-            guard let self, stream.isOpen,
-                  let link = chargingLinks.first(where: { $0.slot == slot }) else {
+            guard let self, stream.isOpen else {
                 stream.close()
                 return
             }
             chargingSSE.attach(stream, slot: slot)
-            chargingSSE.send(streamEvent(for: link), to: stream)
+            chargingSSE.send(streamEvent(for: link(for: slot)), to: stream)
         }
     }
 
