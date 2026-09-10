@@ -7,9 +7,9 @@ import Foundation
  * 从前挤在 ServiceController 末尾，读起来像是上报循环的一部分。
  *
  * Swift 的 private 是文件级的，所以这里用到的几个成员在主文件里由 private 提到
- * internal：route、chargingSSE、streamEvent(for:)、uploadedIconHashes、
- * iconUploadBudget、iconResolvers，以及 ChargingSSEBroker 本身。
- * chargingStream 和 json 只在本文件里用，仍然是 private。
+ * internal：route、chargingSSE、streamEvent(for:)、icons，以及 ChargingSSEBroker
+ * 本身。图标的三份交付状态从前是三个裸字段，现在走 IconUploadCoordinator 的
+ * 三个只读方法。chargingStream 和 json 只在本文件里用，仍然是 private。
  */
 extension ServiceController {
     func route(_ request: HTTPRequest) async -> HTTPHandlerResult {
@@ -49,9 +49,9 @@ extension ServiceController {
                         applicationName: snapshot.applicationName,
                         iconHash: snapshot.iconHash,
                         iconEncoded: snapshot.iconData != nil,
-                        objectKeyConfirmed: snapshot.iconHash.map { uploadedIconHashes.contains($0) } ?? false,
-                        uploadAttempts: snapshot.iconHash.map { iconUploadBudget.attemptCount($0) } ?? 0,
-                        resolving: snapshot.iconHash.map { iconResolvers[$0] != nil } ?? false
+                        objectKeyConfirmed: snapshot.iconHash.map { icons.isConfirmed($0) } ?? false,
+                        uploadAttempts: snapshot.iconHash.map { icons.uploadAttempts($0) } ?? 0,
+                        resolving: snapshot.iconHash.map { icons.isResolving($0) } ?? false
                     )
                 },
                 charger: .init(

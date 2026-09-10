@@ -49,6 +49,7 @@
 		B1000000000000000000003A /* ServiceController+LocalAPI.swift in Sources */ = {isa = PBXBuildFile; fileRef = F10000000000000000000039 /* ServiceController+LocalAPI.swift */; };
 		B1000000000000000000003B /* ReportDecision.swift in Sources */ = {isa = PBXBuildFile; fileRef = F1000000000000000000003A /* ReportDecision.swift */; };
 		B1000000000000000000003C /* LastPostedState.swift in Sources */ = {isa = PBXBuildFile; fileRef = F1000000000000000000003B /* LastPostedState.swift */; };
+		B1000000000000000000003D /* IconUploadCoordinator.swift in Sources */ = {isa = PBXBuildFile; fileRef = F1000000000000000000003C /* IconUploadCoordinator.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -96,6 +97,7 @@
 		F10000000000000000000039 /* ServiceController+LocalAPI.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "ServiceController+LocalAPI.swift"; sourceTree = "<group>"; };
 		F1000000000000000000003A /* ReportDecision.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ReportDecision.swift; sourceTree = "<group>"; };
 		F1000000000000000000003B /* LastPostedState.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LastPostedState.swift; sourceTree = "<group>"; };
+		F1000000000000000000003C /* IconUploadCoordinator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = IconUploadCoordinator.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -155,6 +157,7 @@
 				F10000000000000000000037 /* AppSettings+R2.swift */,
 				F10000000000000000000038 /* AppleMusicCredentialStore.swift */,
 				F10000000000000000000039 /* ServiceController+LocalAPI.swift */,
+				F1000000000000000000003C /* IconUploadCoordinator.swift */,
 			);
 			path = App/MacTelemetryHub;
 			sourceTree = SOURCE_ROOT;
@@ -301,6 +304,7 @@
 				B1000000000000000000003A /* ServiceController+LocalAPI.swift in Sources */,
 				B1000000000000000000003B /* ReportDecision.swift in Sources */,
 				B1000000000000000000003C /* LastPostedState.swift in Sources */,
+				B1000000000000000000003D /* IconUploadCoordinator.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

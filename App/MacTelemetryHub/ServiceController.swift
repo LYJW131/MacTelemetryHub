@@ -1,6 +1,5 @@
 import AppKit
 import Foundation
-import os
 
 @MainActor
 final class ServiceController: ObservableObject {
@@ -56,26 +55,11 @@ final class ServiceController: ObservableObject {
     /// 每个模块「已经发出去的是什么」。规则和推进方式都在 TelemetryCore，有单测；
     /// 重开一轮上报会话就是 `lastPosted = .init()`。
     private var lastPosted = LastPostedState()
-    /// 这个上报会话里已经在 R2 确认存在的图标身份指纹。
-    /// 桌面图标和充电头封面共用这一份记忆，所以名字里没有 desktop。
-    /// 本机 /health 会读，所以不是 private。
-    var uploadedIconHashes: Set<String> = []
-    /// 图标直传的重试额度与退避，按身份哈希记。规则本身在 TelemetryCore，有单测。
-    /// 本机 /health 会读，所以不是 private。
-    var iconUploadBudget = IconUploadBudget()
-    /** 图标直传的失败只进过 reporterLastError；写进统一日志才能事后查 */
-    private static let iconLogger = Logger(
-        subsystem: Bundle.main.bundleIdentifier ?? "MacTelemetryHub",
-        category: "desktop-icon"
-    )
-    /// 最近一次在 R2 确认存在的时间；过期后后台 HEAD 一次，接住手动清桶。
-    /// 和 uploadedIconHashes 一样，桌面图标和封面共用一份。
-    private var iconVerifiedAt: [String: Date] = [:]
-    private static let iconVerificationInterval: TimeInterval = 5 * 60
-    /// 同一枚图标在飞的那一次后台检查 / 直传。
-    /// 本机 /health 会读，所以不是 private。
-    var iconResolvers: [String: (id: UUID, task: Task<Void, Never>)] = [:]
-    private var uploadedIconOrder: [String] = []
+    /// 桌面图标和充电头封面共用的那份「已确认在 R2」的记忆、重试额度、
+    /// 在飞的后台解析。本机 /health 会读它的三个查询方法，所以不是 private。
+    lazy private(set) var icons = IconUploadCoordinator { [weak self] message in
+        self?.reporterLastError = message
+    }
     private var started = false
     private var observesPower = false
     /**
@@ -116,9 +100,6 @@ final class ServiceController: ObservableObject {
      */
     private static let desktopSettleDelay = Duration.milliseconds(400)
 
-    /// 防止长期运行、打开大量一次性应用时让图标缓存无限增长。
-    private static let uploadedIconLimit = 64
-
     init() {
         let settings = AppSettings()
         self.settings = settings
@@ -158,7 +139,7 @@ final class ServiceController: ObservableObject {
         reporterTask = nil
         desktopSettleTask?.cancel()
         desktopSettleTask = nil
-        cancelDesktopIconResolvers()
+        icons.cancelAll()
         vibeCodingCollectionTask?.cancel()
         vibeCodingSessionsTask?.cancel()
         vibeCodingCollectionTask = nil
@@ -669,11 +650,7 @@ final class ServiceController: ObservableObject {
         pendingWake = false
         reporterLastError = nil
         lastPosted = .init()
-        uploadedIconHashes.removeAll(keepingCapacity: true)
-        uploadedIconOrder.removeAll(keepingCapacity: true)
-        iconUploadBudget.removeAll()
-        iconVerifiedAt.removeAll(keepingCapacity: true)
-        cancelDesktopIconResolvers()
+        icons.reset()
         // 每个上报会话都完整发一次，之后两个 token 才分别判变。
         appleMusicCredentialStore.resetPostedTokens()
         pendingManualReports.removeAll()
@@ -839,9 +816,9 @@ final class ServiceController: ObservableObject {
                         if effects.coverIconRejected,
                            let source = covers.coverUploadSource,
                            let iconHash = source.iconHash {
-                            if effects.sentCoverHadObjectKey { forgetUploadedIcon(iconHash) }
+                            if effects.sentCoverHadObjectKey { icons.forget(iconHash) }
                             startCoverIconResolution(source)
-                            if uploadedIconHashes.contains(iconHash) {
+                            if icons.isConfirmed(iconHash) {
                                 lastPosted.chargingDevices = nil
                                 wakeReporter()
                             }
@@ -851,17 +828,17 @@ final class ServiceController: ObservableObject {
                             if desktopPayload?.iconObjectKey != nil {
                                 // 兼容服务端今后恢复对象校验：带了键仍返回 false，说明
                                 // 这份本地“已上传”记忆失效，后台重新 HEAD/PUT。
-                                forgetUploadedIcon(iconHash)
+                                icons.forget(iconHash)
                             }
                             startDesktopIconResolution(rejected)
                             // resolver 可能在 POST 飞行期间已经完成；补上那次竞态唤醒。
-                            if uploadedIconHashes.contains(iconHash) {
+                            if icons.isConfirmed(iconHash) {
                                 lastPosted.desktop = nil
                                 wakeReporter()
                             }
                         }
-                        if let confirmed = effects.desktopIconConfirmed {
-                            rememberUploadedDesktopIcon(confirmed)
+                        if let iconHash = effects.desktopIconConfirmed?.iconHash {
+                            icons.remember(iconHash)
                         }
                         if let credentialsToSend = decision.credentialsToSend {
                             appleMusicCredentialStore.notePosted(
@@ -919,131 +896,44 @@ final class ServiceController: ObservableObject {
     private func desktopIconObjectKeyIfReady(_ desktop: DesktopActivitySnapshot) -> String? {
         guard let iconHash = desktop.iconHash, let iconData = desktop.iconData else { return nil }
         startDesktopIconResolution(desktop)
-        return uploadedIconHashes.contains(iconHash)
-            ? R2IconUploader.objectKey(for: iconData)
-            : nil
+        return icons.objectKeyIfConfirmed(hash: iconHash, data: iconData, ext: "png")
     }
 
+    /**
+     * 桌面图标的直传由 coordinator 跑，这里只提供成功之后那件跟桌面有关的事。
+     *
+     * 两个条件缺一不可：`lastPosted.desktop == signature` 说明网页收到的正是
+     * 这份无图版本，而当前前台应用仍是它说明补发不会发出一个用户早就切走的
+     * 应用。少了后一个条件就是历史上那次热循环 —— 门闩清成 nil、循环被叫醒、
+     * 发出旧应用、resolver 再触发，来回打转。
+     */
     private func startDesktopIconResolution(_ desktop: DesktopActivitySnapshot) {
         guard settings.postEnabled,
               let iconHash = desktop.iconHash,
               let iconData = desktop.iconData,
-              let r2Configuration = settings.r2UploadConfiguration,
-              iconUploadBudgetAvailable(iconHash),
-              iconResolvers[iconHash] == nil else {
-            return
-        }
-
-        if uploadedIconHashes.contains(iconHash),
-           let verifiedAt = iconVerifiedAt[iconHash],
-           Date().timeIntervalSince(verifiedAt) < Self.iconVerificationInterval {
+              let r2Configuration = settings.r2UploadConfiguration else {
             return
         }
 
         let signature = DesktopUploadSignature(desktop)
-        let objectKey = R2IconUploader.objectKey(for: iconData)
-        let timeout = min(settings.postTimeout, 3)
-        let resolverID = UUID()
-        let task = Task<Void, Never> { @MainActor [weak self] in
+        icons.resolve(
+            kind: .desktop,
+            hash: iconHash,
+            data: iconData,
+            ext: "png",
+            configuration: r2Configuration,
+            timeout: min(settings.postTimeout, 3)
+        ) { [weak self] in
             guard let self else { return }
-
-            while !Task.isCancelled,
-                  self.iconUploadBudgetAvailable(iconHash) {
-                do {
-                    let exists = try await R2IconUploader.exists(
-                        objectKey: objectKey,
-                        configuration: r2Configuration,
-                        timeout: timeout
-                    )
-                    if !exists {
-                        self.forgetUploadedIcon(iconHash)
-                        try await R2IconUploader.upload(
-                            data: iconData,
-                            contentHash: R2IconUploader.contentHash(of: iconData),
-                            objectKey: objectKey,
-                            configuration: r2Configuration,
-                            timeout: timeout
-                        )
-                    }
-                    guard !Task.isCancelled else { break }
-                    self.iconUploadBudget.noteSuccess(iconHash)
-                    self.iconVerifiedAt[iconHash] = Date()
-                    self.rememberUploadedDesktopIcon(desktop)
-
-                    // resolver 早于首包完成时，400ms 防抖会自然把键带上，不额外叫醒。
-                    // 只有无图版本已经成功发过，才需要补发同一应用的对象键。
-                    if self.lastPosted.desktop == signature,
-                       self.desktopActivity.snapshot.map(DesktopUploadSignature.init) == signature {
-                        self.lastPosted.desktop = nil
-                        self.wakeReporter()
-                    }
-                    break
-                } catch is CancellationError {
-                    break
-                } catch {
-                    if Task.isCancelled { break }
-                    let delay = self.noteIconUploadFailure(iconHash, objectKey: objectKey, kind: "图标", error: error)
-                    try? await Task.sleep(for: delay)
-                }
+            // resolver 早于首包完成时，400ms 防抖会自然把键带上，不额外叫醒。
+            // 只有无图版本已经成功发过，才需要补发同一应用的对象键。
+            guard lastPosted.desktop == signature,
+                  desktopActivity.snapshot.map(DesktopUploadSignature.init) == signature else {
+                return
             }
-
-            if self.iconResolvers[iconHash]?.id == resolverID {
-                self.iconResolvers.removeValue(forKey: iconHash)
-            }
+            lastPosted.desktop = nil
+            wakeReporter()
         }
-        iconResolvers[iconHash] = (resolverID, task)
-    }
-
-    private func cancelDesktopIconResolvers() {
-        for resolver in iconResolvers.values { resolver.task.cancel() }
-        iconResolvers.removeAll(keepingCapacity: true)
-    }
-
-    /// 这个图标还有没有重试额度。冷却到点的清零发生在额度里，所以要传 now。
-    private func iconUploadBudgetAvailable(_ iconHash: String) -> Bool {
-        iconUploadBudget.isAvailable(iconHash, now: Date())
-    }
-
-    /// 记一次直传失败并写日志，返回下一次尝试前该等多久。退避规则在额度里。
-    private func noteIconUploadFailure(
-        _ iconHash: String,
-        objectKey: String,
-        kind: String,
-        error: Error
-    ) -> Duration {
-        let (attempts, delay) = iconUploadBudget.noteFailure(iconHash, now: Date())
-        reporterLastError = "\(kind)上传失败：\(error.localizedDescription)"
-        Self.iconLogger.error(
-            "\(kind, privacy: .public) \(objectKey, privacy: .public) 上传失败（第 \(attempts) 次）：\(error.localizedDescription, privacy: .public)"
-        )
-        return delay
-    }
-
-    private func rememberUploadedDesktopIcon(_ snapshot: DesktopActivitySnapshot) {
-        guard let iconHash = snapshot.iconHash else { return }
-        rememberUploadedIcon(iconHash)
-    }
-
-    private func rememberUploadedCoverIcon(_ iconHash: String) {
-        rememberUploadedIcon(iconHash)
-    }
-
-    /// 桌面图标和充电头封面共用同一份「已确认在 R2」的记忆和同一条 LRU 淘汰。
-    private func rememberUploadedIcon(_ iconHash: String) {
-        uploadedIconHashes.insert(iconHash)
-        uploadedIconOrder.removeAll { $0 == iconHash }
-        uploadedIconOrder.append(iconHash)
-        if uploadedIconOrder.count > Self.uploadedIconLimit {
-            let evicted = uploadedIconOrder.removeFirst()
-            uploadedIconHashes.remove(evicted)
-            iconVerifiedAt.removeValue(forKey: evicted)
-        }
-    }
-
-    private func forgetUploadedIcon(_ iconHash: String) {
-        uploadedIconHashes.remove(iconHash)
-        uploadedIconOrder.removeAll { $0 == iconHash }
-        iconVerifiedAt.removeValue(forKey: iconHash)
     }
 
     /// 已经确认在 R2 的封面对象键；没确认好就是 nil。纯读取，不发起解析。
@@ -1051,72 +941,37 @@ final class ServiceController: ObservableObject {
         guard let source, let iconHash = source.iconHash, let iconData = source.iconData else {
             return nil
         }
-        return uploadedIconHashes.contains(iconHash)
-            ? R2IconUploader.objectKey(for: iconData, ext: "jpg")
-            : nil
+        return icons.objectKeyIfConfirmed(hash: iconHash, data: iconData, ext: "jpg")
     }
 
+    /**
+     * 封面的直传同样由 coordinator 跑，成功之后这件事跟桌面图标不一样。
+     *
+     * 桌面比的是「此刻的前台应用」，封面比的是「上一次发出去的那张封面」——
+     * 封面不会像前台应用那样被用户随手切走，能跑到这里就说明网页手上那份
+     * 无图版本还是当前这张，只差一个对象键。
+     */
     private func startCoverIconResolution(_ source: CoverUploadSource) {
         guard settings.postEnabled,
               let iconHash = source.iconHash,
               let iconData = source.iconData,
-              let r2Configuration = settings.r2UploadConfiguration,
-              iconUploadBudgetAvailable(iconHash),
-              iconResolvers[iconHash] == nil else {
+              let r2Configuration = settings.r2UploadConfiguration else {
             return
         }
 
-        if uploadedIconHashes.contains(iconHash),
-           let verifiedAt = iconVerifiedAt[iconHash],
-           Date().timeIntervalSince(verifiedAt) < Self.iconVerificationInterval {
-            return
+        icons.resolve(
+            kind: .cover,
+            hash: iconHash,
+            data: iconData,
+            ext: "jpg",
+            configuration: r2Configuration,
+            timeout: min(settings.postTimeout, 3)
+        ) { [weak self] in
+            guard let self,
+                  lastPostedChargerCover(hash: iconHash, hasObjectKey: false) else { return }
+            lastPosted.chargingDevices = nil
+            wakeReporter()
         }
-
-        let objectKey = R2IconUploader.objectKey(for: iconData, ext: "jpg")
-        let timeout = min(settings.postTimeout, 3)
-        let resolverID = UUID()
-        let task = Task<Void, Never> { @MainActor [weak self] in
-            guard let self else { return }
-            while !Task.isCancelled,
-                  self.iconUploadBudgetAvailable(iconHash) {
-                do {
-                    let exists = try await R2IconUploader.exists(
-                        objectKey: objectKey,
-                        configuration: r2Configuration,
-                        timeout: timeout
-                    )
-                    if !exists {
-                        self.forgetUploadedIcon(iconHash)
-                        try await R2IconUploader.upload(
-                            data: iconData,
-                            contentHash: R2IconUploader.contentHash(of: iconData),
-                            objectKey: objectKey,
-                            configuration: r2Configuration,
-                            timeout: timeout
-                        )
-                    }
-                    guard !Task.isCancelled else { break }
-                    self.iconUploadBudget.noteSuccess(iconHash)
-                    self.iconVerifiedAt[iconHash] = Date()
-                    self.rememberUploadedCoverIcon(iconHash)
-                    if self.lastPostedChargerCover(hash: iconHash, hasObjectKey: false) {
-                        self.lastPosted.chargingDevices = nil
-                        self.wakeReporter()
-                    }
-                    break
-                } catch is CancellationError {
-                    break
-                } catch {
-                    if Task.isCancelled { break }
-                    let delay = self.noteIconUploadFailure(iconHash, objectKey: objectKey, kind: "封面", error: error)
-                    try? await Task.sleep(for: delay)
-                }
-            }
-            if self.iconResolvers[iconHash]?.id == resolverID {
-                self.iconResolvers.removeValue(forKey: iconHash)
-            }
-        }
-        iconResolvers[iconHash] = (resolverID, task)
     }
 
     private func lastPostedChargerCover(hash: String, hasObjectKey: Bool) -> Bool {
