@@ -1,5 +1,40 @@
 import SwiftUI
 
+/**
+ * 面板共用的那几个数字。
+ *
+ * 卡片背景以前在七八处各写一遍，圆角和描边浓度就慢慢对不上了。收在这里，改一次
+ * 全站一起变。
+ */
+enum PanelMetrics {
+    /// 卡片圆角
+    static let cornerRadius: CGFloat = 8
+    /// 卡片描边浓度
+    static let strokeOpacity: Double = 0.08
+    /// 卡片内边距
+    static let padding: CGFloat = 13
+    /// 状态圆点直径
+    static let statusDot: CGFloat = 7
+    /// 遥测静默多久算「数据过期」。两台设备都是约 1 Hz 推流，15 秒远在抖动之外。
+    static let staleThreshold: TimeInterval = 15
+}
+
+extension View {
+    /// 卡片统一的底：控件底色、一圈细描边、圆角裁切。
+    /// `stroke` 只给需要高亮的卡片（比如当前封面）用，默认那圈灰边。
+    func panelBackground(stroke: Color? = nil, lineWidth: CGFloat = 1) -> some View {
+        background(Color(nsColor: .controlBackgroundColor))
+            .overlay(
+                RoundedRectangle(cornerRadius: PanelMetrics.cornerRadius)
+                    .stroke(
+                        stroke ?? Color.primary.opacity(PanelMetrics.strokeOpacity),
+                        lineWidth: lineWidth
+                    )
+            )
+            .clipShape(RoundedRectangle(cornerRadius: PanelMetrics.cornerRadius))
+    }
+}
+
 enum StatusBadgeStyle {
     case info, success, warning, error, neutral
 
@@ -31,38 +66,5 @@ struct StatusBadge: View {
         .foregroundStyle(style.tint)
         .background(Capsule().fill(style.tint.opacity(style == .success ? 0.14 : 0.11)))
         .overlay(Capsule().stroke(style.tint.opacity(0.24), lineWidth: 0.5))
-    }
-}
-
-struct MetricCard<Trailing: View>: View {
-    let title: String
-    let value: String
-    let icon: String
-    let tint: Color
-    @ViewBuilder let trailing: () -> Trailing
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            HStack(spacing: 6) {
-                Image(systemName: icon).font(.caption).foregroundStyle(tint)
-                Text(title).font(.caption).foregroundStyle(.secondary)
-                Spacer()
-            }
-            Text(value)
-                .font(.title2.bold())
-                .foregroundStyle(tint)
-                .contentTransition(.numericText())
-            trailing()
-        }
-        .padding(14)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(RoundedRectangle(cornerRadius: 8).fill(Color(nsColor: .windowBackgroundColor)))
-        .overlay(RoundedRectangle(cornerRadius: 8).stroke(tint.opacity(0.15), lineWidth: 1))
-    }
-}
-
-extension MetricCard where Trailing == EmptyView {
-    init(title: String, value: String, icon: String, tint: Color) {
-        self.init(title: title, value: value, icon: icon, tint: tint) { EmptyView() }
     }
 }

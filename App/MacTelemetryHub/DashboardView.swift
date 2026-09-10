@@ -33,8 +33,31 @@ private enum DashboardSection: String, CaseIterable, Identifiable {
     }
 }
 
+/// 充电头铭牌上的额定上限，进度条和右边那行文字都按它算。
+private let chargerRatedMaxWatts: Double = 250
+
+/**
+ * 每秒重算一次的那一小块。
+ *
+ * 以前整个面板套在一个 1 秒的 TimelineView 里，于是每一秒所有卡片、端口格、封面
+ * 列表全部重新求值 —— 而真正跟时间有关的只有钟点、「上次上报多久前」和几处过期
+ * 判断。把 TimelineView 收到叶子上，其余部分只在数据真的变了才重绘。
+ */
+private struct Ticking<Content: View>: View {
+    @ViewBuilder let content: (Date) -> Content
+
+    var body: some View {
+        TimelineView(.periodic(from: .now, by: 1)) { context in
+            content(context.date)
+        }
+    }
+}
+
 struct DashboardView: View {
     @ObservedObject var service: ServiceController
+    /// 设置是采集模块的开关，界面到处都在读它。ServiceController 不会把它的
+    /// @Published 冒泡上来，得单独订阅，否则改了开关这一页要等别的东西触发才更新。
+    @ObservedObject private var settings: AppSettings
     @ObservedObject private var chargerLink: BluetoothService
     @ObservedObject private var covers: ChargerCoverController
     @ObservedObject private var powerBankLink: BluetoothService
@@ -51,6 +74,7 @@ struct DashboardView: View {
 
     init(service: ServiceController) {
         self.service = service
+        settings = service.settings
         chargerLink = service.chargerLink
         covers = service.covers
         powerBankLink = service.powerBankLink
@@ -63,14 +87,12 @@ struct DashboardView: View {
     }
 
     var body: some View {
-        TimelineView(.periodic(from: .now, by: 1)) { context in
-            NavigationSplitView {
-                sidebar(now: context.date)
-            } detail: {
-                detail(now: context.date)
-            }
-            .navigationSplitViewStyle(.balanced)
+        NavigationSplitView {
+            sidebar
+        } detail: {
+            detail
         }
+        .navigationSplitViewStyle(.balanced)
         .frame(minWidth: 880, minHeight: 620)
         .task {
             await covers.refresh(force: false)
@@ -80,7 +102,7 @@ struct DashboardView: View {
         }
     }
 
-    private func sidebar(now: Date) -> some View {
+    private var sidebar: some View {
         List(selection: $selection) {
             Section("监测") {
                 ForEach(DashboardSection.allCases) { section in
@@ -100,18 +122,18 @@ struct DashboardView: View {
             }
 
             Section("连接") {
-                chargingLinkStatusRow(chargerLink, now: now)
-                chargingLinkStatusRow(powerBankLink, now: now)
+                chargingLinkStatusRow(chargerLink)
+                chargingLinkStatusRow(powerBankLink)
 
                 HStack(spacing: 8) {
                     Circle()
-                        .fill(!service.settings.httpServerEnabled ? Color.secondary : httpServer.listeningURL == nil ? .orange : .green)
-                        .frame(width: 7, height: 7)
+                        .fill(!settings.httpServerEnabled ? Color.secondary : httpServer.listeningURL == nil ? .orange : .green)
+                        .frame(width: PanelMetrics.statusDot, height: PanelMetrics.statusDot)
                     VStack(alignment: .leading, spacing: 2) {
-                        Text(!service.settings.httpServerEnabled ? "本地 HTTP 已关闭" : httpServer.listeningURL == nil ? "本地 HTTP 未监听" : "本地 HTTP 在线")
+                        Text(localHTTPStatusText)
                             .font(.callout.weight(.medium))
                         Text(httpServer.listeningDescription
-                             ?? (service.settings.httpServerEnabled ? "在设置中检查地址和端口" : "远端上报继续运行"))
+                             ?? (settings.httpServerEnabled ? "在设置中检查地址和端口" : "远端上报继续运行"))
                             .font(.caption2.monospaced())
                             .foregroundStyle(.secondary)
                             .lineLimit(1)
@@ -126,9 +148,9 @@ struct DashboardView: View {
             VStack(alignment: .leading, spacing: 8) {
                 Divider()
                 HStack(spacing: 8) {
-                    Image(systemName: service.settings.postEnabled ? "paperplane.fill" : "paperplane")
-                        .foregroundStyle(service.settings.postEnabled ? .blue : .secondary)
-                    Text(service.settings.postEnabled ? "远端上报已启用" : "远端上报未启用")
+                    Image(systemName: settings.postEnabled ? "paperplane.fill" : "paperplane")
+                        .foregroundStyle(settings.postEnabled ? .blue : .secondary)
+                    Text(settings.postEnabled ? "远端上报已启用" : "远端上报未启用")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                     Spacer()
@@ -140,20 +162,31 @@ struct DashboardView: View {
         }
     }
 
-    private func detail(now: Date) -> some View {
+    /// 三个页面共用一套本地 HTTP 三态文案，侧栏、页脚、设置页说的必须是同一句话。
+    private var localHTTPStatusText: String {
+        if !settings.httpServerEnabled { return "本地 HTTP 已关闭" }
+        return httpServer.listeningURL == nil ? "本地 HTTP 未启动" : "本地 HTTP 正在监听"
+    }
+
+    private var detail: some View {
         VStack(spacing: 0) {
-            detailHeader(now: now)
+            detailHeader
             Divider()
 
             ScrollView {
-                Group {
+                VStack(alignment: .leading, spacing: 18) {
+                    // 上报坏了是全局状态，跟当前翻到哪一页无关：三个页面都要看得见。
+                    if settings.postEnabled, let error = service.reporterLastError {
+                        errorBanner("上报异常：\(error)")
+                    }
+
                     switch selection {
                     case .overview:
                         overviewContent
                     case .charger:
-                        chargerContent(now: now)
+                        chargerContent
                     case .powerBank:
-                        powerBankContent(now: now)
+                        powerBankContent
                     }
                 }
                 .frame(maxWidth: 980, alignment: .topLeading)
@@ -164,35 +197,45 @@ struct DashboardView: View {
         }
     }
 
-    private func detailHeader(now: Date) -> some View {
+    private var detailHeader: some View {
         HStack(spacing: 12) {
             VStack(alignment: .leading, spacing: 3) {
                 Text(selection.title)
                     .font(.title2.weight(.semibold))
-                Text(selection == .overview ? "Mac Telemetry Hub · \(now.formatted(date: .abbreviated, time: .shortened))" : selection.subtitle)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
+                Ticking { now in
+                    Text(selection == .overview
+                        ? "Mac Telemetry Hub · \(now.formatted(date: .abbreviated, time: .shortened))"
+                        : selection.subtitle)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
             }
 
             Spacer(minLength: 16)
 
-            if service.settings.postEnabled {
-                Label(lastReportText(now: now), systemImage: "paperplane.fill")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
+            if settings.postEnabled {
+                Ticking { now in
+                    Label(lastReportText(now: now), systemImage: "paperplane.fill")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                }
             }
 
             StatusBadge(
                 text: service.reporterLastError == nil ? "遥测运行中" : "上报异常",
                 style: service.reporterLastError == nil ? .success : .warning
             )
+            // 徽章上只有「上报异常」四个字，原因得能看到，否则只能去翻页脚
+            .help(service.reporterLastError ?? "所有已启用模块都在正常上报")
 
             SettingsLink {
                 Image(systemName: "gearshape")
-                    .frame(width: 16, height: 16)
+                    .frame(width: 20, height: 20)
+                    .contentShape(Rectangle())
             }
             .help("打开设置")
+            .accessibilityLabel("打开设置")
         }
         .buttonStyle(.bordered)
         .controlSize(.regular)
@@ -219,23 +262,41 @@ struct DashboardView: View {
         }
     }
 
+    /// 一个模块都没开：整页给一个空状态，比八张「已关闭」的卡片有用。
+    private var everyModuleDisabled: Bool {
+        !settings.desktopModuleEnabled
+            && !settings.appleMusicModuleEnabled
+            && !settings.timezoneModuleEnabled
+            && !settings.vibeCodingModuleEnabled
+            && !settings.chargerModuleEnabled
+            && !settings.powerBankModuleEnabled
+    }
+
     private var overviewContent: some View {
         VStack(alignment: .leading, spacing: 18) {
-            sectionHeading("数据源", detail: "每个模块独立运行，状态变化会在这里反映")
-            moduleGrid
+            if everyModuleDisabled {
+                EmptyModuleView(
+                    title: "还没有启用任何数据源",
+                    detail: "所有采集模块都已关闭，这台 Mac 不会产生任何遥测。在设置里打开需要的模块。",
+                    icon: "square.stack.3d.up.slash"
+                )
+            } else {
+                sectionHeading("数据源", detail: "每个模块独立运行，状态变化会在这里反映")
+                moduleGrid
+            }
 
-            footer(now: Date())
+            footer
         }
     }
 
     @ViewBuilder
-    private func chargerContent(now: Date) -> some View {
-        if service.settings.chargerModuleEnabled {
+    private var chargerContent: some View {
+        if settings.chargerModuleEnabled {
             VStack(alignment: .leading, spacing: 18) {
                 chargingLinkSessionHeader(chargerLink)
 
                 if chargerLink.hasTelemetry {
-                    overviewCard(now: now)
+                    overviewCard
 
                     sectionHeading("端口", detail: "实时电压、电流、功率与识别到的设备")
                     LazyVGrid(columns: [GridItem(.flexible(), spacing: 12), GridItem(.flexible(), spacing: 12), GridItem(.flexible(), spacing: 12)], spacing: 12) {
@@ -264,13 +325,13 @@ struct DashboardView: View {
     }
 
     @ViewBuilder
-    private func powerBankContent(now: Date) -> some View {
-        if service.settings.powerBankModuleEnabled {
+    private var powerBankContent: some View {
+        if settings.powerBankModuleEnabled {
             VStack(alignment: .leading, spacing: 18) {
                 chargingLinkSessionHeader(powerBankLink)
 
                 if let state = powerBankLink.powerBankState, powerBankLink.hasTelemetry {
-                    powerBankOverviewCard(state, now: now)
+                    powerBankOverviewCard(state)
                     sectionHeading("端口", detail: "C1 与 C2 双向，A 口只出，B 为底座输入。空闲端口不显示功率 —— 那个读数是过期的")
                     LazyVGrid(
                         columns: Array(repeating: GridItem(.flexible(), spacing: 12), count: 4),
@@ -299,7 +360,7 @@ struct DashboardView: View {
 
     /// 和充电头的 overviewCard 同一套版式：左边大数字加进度条，右边设备事实网格。
     /// 两个页面看起来该是同一个产品的两个页签，而不是两个人写的。
-    private func powerBankOverviewCard(_ state: PowerBankState, now: Date) -> some View {
+    private func powerBankOverviewCard(_ state: PowerBankState) -> some View {
         HStack(spacing: 22) {
             VStack(alignment: .leading, spacing: 10) {
                 HStack(spacing: 8) {
@@ -356,9 +417,7 @@ struct DashboardView: View {
             .frame(maxWidth: .infinity)
         }
         .padding(18)
-        .background(Color(nsColor: .controlBackgroundColor))
-        .overlay(RoundedRectangle(cornerRadius: 8).stroke(.primary.opacity(0.08), lineWidth: 1))
-        .clipShape(RoundedRectangle(cornerRadius: 8))
+        .panelBackground()
     }
 
     /// 进度条右侧那行。充电宝没有「额定上限」可写，写当前收放电更有信息量。
@@ -402,7 +461,7 @@ struct DashboardView: View {
 
     /// 总览卡片正面：有读数就显示读数，没有就显示连接阶段。
     private var chargerOverviewValue: String {
-        guard service.settings.chargerModuleEnabled else { return "已关闭" }
+        guard settings.chargerModuleEnabled else { return "已关闭" }
         if chargerLink.hasTelemetry, let watts = chargerLink.chargerStateForDisplay.totalOutputPowerW {
             return String(format: "%.2f W", watts)
         }
@@ -410,13 +469,13 @@ struct DashboardView: View {
     }
 
     private var chargerOverviewDetail: String? {
-        guard service.settings.chargerModuleEnabled else { return nil }
+        guard settings.chargerModuleEnabled else { return nil }
         guard chargerLink.hasTelemetry else { return chargerLink.lastError }
         return chargerLink.isConnected ? nil : chargerLink.phase.label
     }
 
     private var powerBankOverviewValue: String {
-        guard service.settings.powerBankModuleEnabled else { return "已关闭" }
+        guard settings.powerBankModuleEnabled else { return "已关闭" }
         guard let state = powerBankLink.powerBankState, let percent = state.batteryPercent else {
             return powerBankLink.phase.label
         }
@@ -424,7 +483,7 @@ struct DashboardView: View {
     }
 
     private var powerBankOverviewDetail: String? {
-        guard service.settings.powerBankModuleEnabled else { return nil }
+        guard settings.powerBankModuleEnabled else { return nil }
         guard let state = powerBankLink.powerBankState, powerBankLink.hasTelemetry else {
             return powerBankLink.lastError
         }
@@ -441,123 +500,155 @@ struct DashboardView: View {
 
     private var moduleGrid: some View {
         LazyVGrid(columns: [GridItem(.flexible(), spacing: 12), GridItem(.flexible(), spacing: 12)], spacing: 12) {
-            ModuleStatusCard(
-                title: "前台应用",
-                icon: "macwindow",
-                enabled: service.settings.desktopModuleEnabled,
-                value: desktopActivity.snapshot?.applicationName ?? "等待活动",
-                detail: desktopActivityDetail,
-                action: { _ = service.requestImmediateReport(.desktop) },
-                actionEnabled: service.canRequestImmediateReport(.desktop),
-                isReporting: service.isManualReportInFlight(.desktop),
-                feedback: service.manualReportMessage(for: .desktop),
-                feedbackIsError: service.manualReportFailed(.desktop)
-            )
-            ModuleStatusCard(
-                title: "Apple Music",
-                icon: "music.note",
-                enabled: service.settings.appleMusicModuleEnabled,
-                value: appleMusicStateText,
-                detail: appleMusicDetailText,
-                action: { _ = service.requestImmediateReport(.appleMusic) },
-                actionEnabled: service.canRequestImmediateReport(.appleMusic),
-                isReporting: service.isManualReportInFlight(.appleMusic),
-                feedback: service.manualReportMessage(for: .appleMusic),
-                feedbackIsError: service.manualReportFailed(.appleMusic)
-            )
-            ModuleStatusCard(
-                title: "Mac 时区",
-                icon: "clock",
-                enabled: service.settings.timezoneModuleEnabled,
-                value: service.timeZone.snapshot?.identifier ?? "等待时区",
-                detail: service.timeZone.snapshot.map { formatUTCOffset($0.secondsFromGMT) },
-                action: { _ = service.requestImmediateReport(.timezone) },
-                actionEnabled: service.canRequestImmediateReport(.timezone),
-                isReporting: service.isManualReportInFlight(.timezone),
-                feedback: service.manualReportMessage(for: .timezone),
-                feedbackIsError: service.manualReportFailed(.timezone)
-            )
-            // Vibe coding 一行拆两行，一个采集器一行，也正好是一个上报模块一行：
+            desktopModuleCard
+            appleMusicModuleCard
+            timezoneModuleCard
+            // Vibe coding 一行拆三行，一个采集器一行，也正好是一个上报模块一行：
             // 「此刻在不在用」60 秒一轮，用量十分钟一轮，两边的失败原因互不相干。
-            ModuleStatusCard(
-                title: "会话状态",
-                icon: "terminal",
-                enabled: service.settings.vibeCodingModuleEnabled,
-                value: codingSessions.lastSuccess == nil ? "等待扫描" : "扫描完成",
-                detail: codingSessions.lastError
-                    ?? codingSessions.lastSuccess?.formatted(date: .omitted, time: .standard),
-                action: { Task { await service.refreshVibeCodingSessionsNow() } },
-                actionIcon: "arrow.clockwise",
-                actionHelp: "重新读取本地会话状态并上报",
-                actionEnabled: service.settings.vibeCodingModuleEnabled,
-                isReporting: service.isRefreshingVibeCodingSessions
-                    || service.isManualReportInFlight(.vibeCoding),
-                feedback: service.isRefreshingVibeCodingSessions
-                    ? "正在扫描会话状态…"
-                    : service.manualReportMessage(for: .vibeCoding),
-                feedbackIsError: service.manualReportFailed(.vibeCoding)
-            )
-            ModuleStatusCard(
-                title: "用量",
-                icon: "chart.bar",
-                enabled: service.settings.vibeCodingModuleEnabled,
-                value: vibeCodingUsageCollector.lastSuccess == nil ? "等待统计" : "聚合完成",
-                detail: vibeCodingUsageCollector.lastError
-                    ?? vibeCodingUsageCollector.lastSuccess?.formatted(date: .omitted, time: .standard),
-                action: { Task { await service.refreshVibeCodingUsageNow() } },
-                actionIcon: "arrow.clockwise",
-                actionHelp: "重新统计本地与 Cursor 云端完整历史并上报",
-                actionEnabled: service.settings.vibeCodingModuleEnabled,
-                isReporting: service.isRefreshingVibeCodingUsage
-                    || service.isManualReportInFlight(.vibeCoding),
-                feedback: service.isRefreshingVibeCodingUsage
-                    ? "正在重新统计用量…"
-                    : service.manualReportMessage(for: .vibeCoding),
-                feedbackIsError: service.manualReportFailed(.vibeCoding)
-            )
-            ModuleStatusCard(
-                title: "年度用量",
-                icon: "calendar",
-                enabled: service.settings.vibeCodingModuleEnabled,
-                value: vibeCodingYearCollector.lastSuccess == nil ? "等待日历" : "已采集",
-                detail: vibeCodingYearCollector.lastError
-                    ?? vibeCodingYearCollector.lastSuccess?.formatted(date: .omitted, time: .standard),
-                action: { Task { await service.refreshVibeCodingYearNow() } },
-                actionIcon: "arrow.clockwise",
-                actionHelp: "重新读取过去 53 周的日合计并上报",
-                actionEnabled: service.settings.vibeCodingModuleEnabled,
-                isReporting: service.isRefreshingVibeCodingYear
-                    || service.isManualReportInFlight(.vibeCodingYear),
-                feedback: service.isRefreshingVibeCodingYear
-                    ? "正在读取年度用量…"
-                    : service.manualReportMessage(for: .vibeCodingYear),
-                feedbackIsError: service.manualReportFailed(.vibeCodingYear)
-            )
-            ModuleStatusCard(
-                title: "充电头",
-                icon: "bolt.fill",
-                enabled: service.settings.chargerModuleEnabled,
-                value: chargerOverviewValue,
-                detail: chargerOverviewDetail,
-                action: { _ = service.requestImmediateReport(.charger) },
-                actionEnabled: service.canRequestImmediateReport(.charger),
-                isReporting: service.isManualReportInFlight(.charger),
-                feedback: service.manualReportMessage(for: .charger),
-                feedbackIsError: service.manualReportFailed(.charger)
-            )
-            ModuleStatusCard(
-                title: "充电宝",
-                icon: "minus.plus.batteryblock.fill",
-                enabled: service.settings.powerBankModuleEnabled,
-                value: powerBankOverviewValue,
-                detail: powerBankOverviewDetail,
-                action: { _ = service.requestImmediateReport(.powerBank) },
-                actionEnabled: service.canRequestImmediateReport(.powerBank),
-                isReporting: service.isManualReportInFlight(.powerBank),
-                feedback: service.manualReportMessage(for: .powerBank),
-                feedbackIsError: service.manualReportFailed(.powerBank)
-            )
+            vibeCodingSessionCard
+            vibeCodingUsageCard
+            vibeCodingYearCard
+            chargerModuleCard
+            powerBankModuleCard
         }
+    }
+
+    private var desktopModuleCard: some View {
+        ModuleStatusCard(
+            title: "前台应用",
+            icon: "macwindow",
+            enabled: settings.desktopModuleEnabled,
+            value: desktopActivity.snapshot?.applicationName ?? "等待活动",
+            detail: desktopActivityDetail,
+            action: { _ = service.requestImmediateReport(.desktop) },
+            actionEnabled: service.canRequestImmediateReport(.desktop),
+            isReporting: service.isManualReportInFlight(.desktop),
+            feedback: service.manualReportMessage(for: .desktop),
+            feedbackIsError: service.manualReportFailed(.desktop)
+        )
+    }
+
+    private var appleMusicModuleCard: some View {
+        ModuleStatusCard(
+            title: "Apple Music",
+            icon: "music.note",
+            enabled: settings.appleMusicModuleEnabled,
+            value: appleMusicStateText,
+            detail: appleMusicDetailText,
+            action: { _ = service.requestImmediateReport(.appleMusic) },
+            actionEnabled: service.canRequestImmediateReport(.appleMusic),
+            isReporting: service.isManualReportInFlight(.appleMusic),
+            feedback: service.manualReportMessage(for: .appleMusic),
+            feedbackIsError: service.manualReportFailed(.appleMusic)
+        )
+    }
+
+    private var timezoneModuleCard: some View {
+        ModuleStatusCard(
+            title: "Mac 时区",
+            icon: "clock",
+            enabled: settings.timezoneModuleEnabled,
+            value: service.timeZone.snapshot?.identifier ?? "等待时区",
+            detail: service.timeZone.snapshot.map { formatUTCOffset($0.secondsFromGMT) },
+            action: { _ = service.requestImmediateReport(.timezone) },
+            actionEnabled: service.canRequestImmediateReport(.timezone),
+            isReporting: service.isManualReportInFlight(.timezone),
+            feedback: service.manualReportMessage(for: .timezone),
+            feedbackIsError: service.manualReportFailed(.timezone)
+        )
+    }
+
+    private var vibeCodingSessionCard: some View {
+        ModuleStatusCard(
+            title: "Vibe · 会话状态",
+            icon: "terminal",
+            enabled: settings.vibeCodingModuleEnabled,
+            value: codingSessions.lastSuccess == nil ? "等待扫描" : "扫描完成",
+            detail: codingSessions.lastError
+                ?? codingSessions.lastSuccess?.formatted(date: .omitted, time: .standard),
+            action: { Task { await service.refreshVibeCodingSessionsNow() } },
+            actionIcon: "arrow.clockwise",
+            actionHelp: "重新读取本地会话状态并上报",
+            actionEnabled: settings.vibeCodingModuleEnabled,
+            isReporting: service.isRefreshingVibeCodingSessions
+                || service.isManualReportInFlight(.vibeCoding),
+            feedback: service.isRefreshingVibeCodingSessions
+                ? "正在扫描会话状态…"
+                : service.manualReportMessage(for: .vibeCoding),
+            feedbackIsError: service.manualReportFailed(.vibeCoding)
+        )
+    }
+
+    private var vibeCodingUsageCard: some View {
+        ModuleStatusCard(
+            title: "Vibe · 用量",
+            icon: "chart.bar",
+            enabled: settings.vibeCodingModuleEnabled,
+            value: vibeCodingUsageCollector.lastSuccess == nil ? "等待统计" : "聚合完成",
+            detail: vibeCodingUsageCollector.lastError
+                ?? vibeCodingUsageCollector.lastSuccess?.formatted(date: .omitted, time: .standard),
+            action: { Task { await service.refreshVibeCodingUsageNow() } },
+            actionIcon: "arrow.clockwise",
+            actionHelp: "重新统计本地与 Cursor 云端完整历史并上报",
+            actionEnabled: settings.vibeCodingModuleEnabled,
+            isReporting: service.isRefreshingVibeCodingUsage
+                || service.isManualReportInFlight(.vibeCoding),
+            feedback: service.isRefreshingVibeCodingUsage
+                ? "正在重新统计用量…"
+                : service.manualReportMessage(for: .vibeCoding),
+            feedbackIsError: service.manualReportFailed(.vibeCoding)
+        )
+    }
+
+    private var vibeCodingYearCard: some View {
+        ModuleStatusCard(
+            title: "Vibe · 年度用量",
+            icon: "calendar",
+            enabled: settings.vibeCodingModuleEnabled,
+            value: vibeCodingYearCollector.lastSuccess == nil ? "等待日历" : "已采集",
+            detail: vibeCodingYearCollector.lastError
+                ?? vibeCodingYearCollector.lastSuccess?.formatted(date: .omitted, time: .standard),
+            action: { Task { await service.refreshVibeCodingYearNow() } },
+            actionIcon: "arrow.clockwise",
+            actionHelp: "重新读取过去 53 周的日合计并上报",
+            actionEnabled: settings.vibeCodingModuleEnabled,
+            isReporting: service.isRefreshingVibeCodingYear
+                || service.isManualReportInFlight(.vibeCodingYear),
+            feedback: service.isRefreshingVibeCodingYear
+                ? "正在读取年度用量…"
+                : service.manualReportMessage(for: .vibeCodingYear),
+            feedbackIsError: service.manualReportFailed(.vibeCodingYear)
+        )
+    }
+
+    private var chargerModuleCard: some View {
+        ModuleStatusCard(
+            title: "充电头",
+            icon: "bolt.fill",
+            enabled: settings.chargerModuleEnabled,
+            value: chargerOverviewValue,
+            detail: chargerOverviewDetail,
+            action: { _ = service.requestImmediateReport(.charger) },
+            actionEnabled: service.canRequestImmediateReport(.charger),
+            isReporting: service.isManualReportInFlight(.charger),
+            feedback: service.manualReportMessage(for: .charger),
+            feedbackIsError: service.manualReportFailed(.charger)
+        )
+    }
+
+    private var powerBankModuleCard: some View {
+        ModuleStatusCard(
+            title: "充电宝",
+            icon: "minus.plus.batteryblock.fill",
+            enabled: settings.powerBankModuleEnabled,
+            value: powerBankOverviewValue,
+            detail: powerBankOverviewDetail,
+            action: { _ = service.requestImmediateReport(.powerBank) },
+            actionEnabled: service.canRequestImmediateReport(.powerBank),
+            isReporting: service.isManualReportInFlight(.powerBank),
+            feedback: service.manualReportMessage(for: .powerBank),
+            feedbackIsError: service.manualReportFailed(.powerBank)
+        )
     }
 
     private var desktopActivityDetail: String? {
@@ -637,7 +728,7 @@ struct DashboardView: View {
                     .font(.caption)
                     .foregroundStyle(.orange)
                     .fixedSize(horizontal: false, vertical: true)
-            } else if !service.settings.hasAnkerCloudCredentials {
+            } else if !settings.hasAnkerCloudCredentials {
                 Label("在设置里填写 Anker 账号密码并登录后，这里会列出封面预览。", systemImage: "person.badge.key")
                     .font(.caption)
                     .foregroundStyle(.secondary)
@@ -678,7 +769,7 @@ struct DashboardView: View {
         }
     }
 
-    private func overviewCard(now: Date) -> some View {
+    private var overviewCard: some View {
         HStack(spacing: 22) {
             VStack(alignment: .leading, spacing: 10) {
                 Label("实时总输出", systemImage: "bolt.fill")
@@ -695,9 +786,14 @@ struct DashboardView: View {
                 }
 
                 HStack(spacing: 10) {
-                    ProgressView(value: min(max((chargerLink.chargerStateForDisplay.totalOutputPowerW ?? 0) / 250, 0), 1))
-                        .tint(.blue)
-                    Text("250 W MAX")
+                    ProgressView(
+                        value: min(
+                            max((chargerLink.chargerStateForDisplay.totalOutputPowerW ?? 0) / chargerRatedMaxWatts, 0),
+                            1
+                        )
+                    )
+                    .tint(.blue)
+                    Text("\(Int(chargerRatedMaxWatts)) W MAX")
                         .font(.caption2.monospacedDigit().weight(.medium))
                         .foregroundStyle(.tertiary)
                         .fixedSize()
@@ -711,37 +807,38 @@ struct DashboardView: View {
                 DeviceFact(title: "序列号", value: chargerLink.chargerStateForDisplay.device.serialNumber, icon: "number")
                 DeviceFact(title: "MAC 地址", value: chargerLink.chargerStateForDisplay.device.macAddress, icon: "antenna.radiowaves.left.and.right")
                 DeviceFact(title: "固件版本", value: chargerLink.chargerStateForDisplay.device.firmwareVersion, icon: "cpu")
-                DeviceFact(title: "数据更新", value: ageText(now: now), icon: "clock.arrow.circlepath")
+                // 「多久之前」是这张卡里唯一跟时间走的一格，只有它需要每秒重算
+                Ticking { now in
+                    DeviceFact(title: "数据更新", value: ageText(now: now), icon: "clock.arrow.circlepath")
+                }
                 DeviceFact(title: "当前封面", value: currentCoverText, icon: "photo")
             }
             .frame(maxWidth: .infinity)
         }
         .padding(18)
-        .background(Color(nsColor: .controlBackgroundColor))
-        .overlay(RoundedRectangle(cornerRadius: 8).stroke(.primary.opacity(0.08), lineWidth: 1))
-        .clipShape(RoundedRectangle(cornerRadius: 8))
+        .panelBackground()
     }
 
-    private func footer(now: Date) -> some View {
+    private var footer: some View {
         HStack(spacing: 10) {
             if let url = httpServer.listeningURL {
-                Circle().fill(.green).frame(width: 7, height: 7)
-                Text("本地 HTTP 在线").font(.caption.weight(.semibold))
+                Circle().fill(.green).frame(width: PanelMetrics.statusDot, height: PanelMetrics.statusDot)
+                Text(localHTTPStatusText).font(.caption.weight(.semibold))
                 Text(httpServer.listeningDescription ?? url.absoluteString)
                     .font(.caption.monospaced())
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
-                Button("打开") { NSWorkspace.shared.open(url) }
+                Button("打开端点") { NSWorkspace.shared.open(url) }
                     .buttonStyle(.link)
                     .font(.caption)
-            } else if !service.settings.httpServerEnabled {
+            } else if !settings.httpServerEnabled {
                 Image(systemName: "lock.fill").foregroundStyle(.secondary)
-                Text("本地 HTTP 已关闭")
+                Text(localHTTPStatusText)
                     .font(.caption)
                     .foregroundStyle(.secondary)
             } else {
                 Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(.orange)
-                Text(httpServer.lastError ?? "HTTP 服务未启动")
+                Text(httpServer.lastError ?? localHTTPStatusText)
                     .font(.caption)
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
@@ -749,19 +846,19 @@ struct DashboardView: View {
 
             Spacer(minLength: 12)
 
-            if service.settings.postEnabled {
+            if settings.postEnabled {
                 if let error = service.reporterLastError {
-                    Label("POST 失败：\(error)", systemImage: "exclamationmark.triangle.fill")
+                    Label("上报失败：\(error)", systemImage: "exclamationmark.triangle.fill")
                         .foregroundStyle(.orange)
                 } else if let date = service.reporterLastSuccess {
-                    Label("已于 \(date.formatted(date: .omitted, time: .standard)) POST", systemImage: "paperplane.fill")
+                    Label("已于 \(date.formatted(date: .omitted, time: .standard)) 上报", systemImage: "paperplane.fill")
                         .foregroundStyle(.secondary)
                 } else {
-                    Label("等待首份数据后 POST", systemImage: "paperplane")
+                    Label("等待首份数据后上报", systemImage: "paperplane")
                         .foregroundStyle(.secondary)
                 }
             } else {
-                Label("定时 POST 未启用", systemImage: "paperplane")
+                Label("定时上报未启用", systemImage: "paperplane")
                     .foregroundStyle(.tertiary)
             }
         }
@@ -778,22 +875,28 @@ struct DashboardView: View {
         }
         .padding(10)
         .background(.orange.opacity(0.09))
-        .overlay(RoundedRectangle(cornerRadius: 8).stroke(.orange.opacity(0.18), lineWidth: 1))
-        .clipShape(RoundedRectangle(cornerRadius: 8))
+        .overlay(
+            RoundedRectangle(cornerRadius: PanelMetrics.cornerRadius)
+                .stroke(.orange.opacity(0.18), lineWidth: 1)
+        )
+        .clipShape(RoundedRectangle(cornerRadius: PanelMetrics.cornerRadius))
     }
 
-    private func chargingLinkStatusRow(_ link: BluetoothService, now: Date) -> some View {
-        let enabled = link.slot.isEnabled(service.settings)
-        return HStack(spacing: 8) {
-            Circle()
-                .fill(chargingLinkStatusColor(link, now: now))
-                .frame(width: 7, height: 7)
-            VStack(alignment: .leading, spacing: 2) {
-                Text(enabled ? chargingLinkStatusText(link, now: now) : "已关闭")
-                    .font(.callout.weight(.medium))
-                Text(link.slot.displayName)
-                    .font(.caption2)
-                    .foregroundStyle(.secondary)
+    /// 过期判断要跟着秒走，所以这一行整个挂在 Ticking 上 —— 它本身很小，重算不心疼。
+    private func chargingLinkStatusRow(_ link: BluetoothService) -> some View {
+        let enabled = link.slot.isEnabled(settings)
+        return Ticking { now in
+            HStack(spacing: 8) {
+                Circle()
+                    .fill(chargingLinkStatusColor(link, now: now))
+                    .frame(width: PanelMetrics.statusDot, height: PanelMetrics.statusDot)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(enabled ? chargingLinkStatusText(link, now: now) : "已关闭")
+                        .font(.callout.weight(.medium))
+                    Text(link.slot.displayName)
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                }
             }
         }
         .padding(.vertical, 3)
@@ -828,7 +931,7 @@ struct DashboardView: View {
     }
 
     private func chargingLinkStatusColor(_ link: BluetoothService, now: Date) -> Color {
-        guard link.slot.isEnabled(service.settings) else { return .secondary }
+        guard link.slot.isEnabled(settings) else { return .secondary }
         if link.isConnected { return isStale(link, now: now) ? .orange : .green }
         switch link.phase {
         case .connecting, .handshaking: return .blue
@@ -840,7 +943,7 @@ struct DashboardView: View {
 
     private func isStale(_ link: BluetoothService, now: Date) -> Bool {
         guard link.isConnected, let updatedAt = link.lastTelemetryAt else { return false }
-        return now.timeIntervalSince1970 - updatedAt > 15
+        return now.timeIntervalSince1970 - updatedAt > PanelMetrics.staleThreshold
     }
 
     private func ageText(now: Date) -> String? {
@@ -872,11 +975,15 @@ private struct EmptyModuleView: View {
                 .foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)
                 .frame(maxWidth: 420)
+            // 空状态每一句话都在说「去设置里打开」，那就把设置放在手边
+            SettingsLink {
+                Label("打开设置", systemImage: "gearshape")
+            }
+            .buttonStyle(.borderedProminent)
+            .padding(.top, 2)
         }
         .frame(maxWidth: .infinity, minHeight: 220)
-        .background(Color(nsColor: .controlBackgroundColor))
-        .overlay(RoundedRectangle(cornerRadius: 8).stroke(.primary.opacity(0.08), lineWidth: 1))
-        .clipShape(RoundedRectangle(cornerRadius: 8))
+        .panelBackground()
     }
 }
 
@@ -919,15 +1026,18 @@ private struct ModuleStatusCard: View {
                                 Image(systemName: actionIcon)
                             }
                         }
-                        .frame(width: 14, height: 14)
+                        // 图标本身只有 14 点，撑到 20 点才好点中
+                        .frame(width: 20, height: 20)
+                        .contentShape(Rectangle())
                     }
                     .buttonStyle(.borderless)
                     .disabled(!actionEnabled || isReporting)
                     .help(actionHelp ?? "立即上报\(title)")
+                    .accessibilityLabel(actionHelp ?? "立即上报\(title)")
                 }
                 Circle()
                     .fill(enabled ? Color.green : Color.secondary.opacity(0.35))
-                    .frame(width: 7, height: 7)
+                    .frame(width: PanelMetrics.statusDot, height: PanelMetrics.statusDot)
             }
             Text(enabled ? value : "已关闭")
                 .font(.callout.weight(.medium))
@@ -943,11 +1053,91 @@ private struct ModuleStatusCard: View {
                 .foregroundStyle(feedbackIsError ? .red : .secondary)
                 .lineLimit(1)
         }
-        .padding(13)
+        .padding(PanelMetrics.padding)
         .frame(maxWidth: .infinity, minHeight: 101, alignment: .leading)
-        .background(Color(nsColor: .controlBackgroundColor))
-        .overlay(RoundedRectangle(cornerRadius: 8).stroke(.primary.opacity(0.08), lineWidth: 1))
-        .clipShape(RoundedRectangle(cornerRadius: 8))
+        .panelBackground()
+    }
+}
+
+/**
+ * 端口卡的骨架：抬头、大瓦数、电压电流条、底下三行说明。
+ *
+ * 充电头和充电宝的端口卡本来是两份一模一样的版式，只有取值不同 —— 改一边忘另一边
+ * 就会错位。骨架收在这里，两边只负责把字算出来。
+ */
+private struct ChargingPortCard: View {
+    let icon: String
+    let title: String
+    let subtitle: String
+    let isActive: Bool
+    let badgeText: String
+    let badgeStyle: StatusBadgeStyle
+    let powerText: String
+    let voltageText: String
+    let currentText: String
+    let cableIcon: String
+    let cableText: String
+    let statusText: String
+    let roleText: String
+    /// 底下那行是不是识别出了具体东西。没识别出来就压成三级灰。
+    let roleIsResolved: Bool
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack(spacing: 8) {
+                Image(systemName: icon)
+                    .font(.system(size: 14, weight: .semibold))
+                    .foregroundStyle(isActive ? .blue : .secondary)
+                    .frame(width: 24, height: 24)
+                VStack(alignment: .leading, spacing: 1) {
+                    Text(title)
+                        .font(.headline)
+                    Text(subtitle)
+                        .font(.caption2.monospaced())
+                        .foregroundStyle(.tertiary)
+                }
+                Spacer()
+                StatusBadge(text: badgeText, style: badgeStyle)
+            }
+
+            HStack(alignment: .firstTextBaseline, spacing: 5) {
+                Text(powerText)
+                    .font(.system(size: 30, weight: .semibold, design: .rounded))
+                    .contentTransition(.numericText())
+                Text("W")
+                    .font(.callout.weight(.medium))
+                    .foregroundStyle(.tertiary)
+            }
+
+            HStack(spacing: 0) {
+                CompactMetric(title: "电压", value: voltageText, unit: "V", icon: "waveform.path", tint: .blue)
+                Divider().frame(height: 30)
+                CompactMetric(
+                    title: "电流",
+                    value: currentText,
+                    unit: "A",
+                    icon: "gauge.with.dots.needle.33percent",
+                    tint: .purple
+                )
+            }
+            .padding(.vertical, 8)
+            .background(.primary.opacity(0.035))
+
+            VStack(alignment: .leading, spacing: 3) {
+                Label(cableText, systemImage: cableIcon)
+                Text(statusText)
+                    .foregroundStyle(.secondary)
+                Text(roleText)
+                    .fontWeight(.medium)
+                    .foregroundStyle(roleIsResolved ? AnyShapeStyle(.primary) : AnyShapeStyle(.tertiary))
+            }
+            .font(.caption)
+            .lineLimit(1)
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
+        .padding(PanelMetrics.padding)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        .panelBackground()
     }
 }
 
@@ -959,57 +1149,22 @@ private struct PortCard: View {
     private var displayModel: String? { port.deviceModel ?? port.vendor }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            HStack(spacing: 8) {
-                Image(systemName: "cable.connector.horizontal")
-                    .font(.system(size: 14, weight: .semibold))
-                    .foregroundStyle(active ? .blue : .secondary)
-                    .frame(width: 24, height: 24)
-                VStack(alignment: .leading, spacing: 1) {
-                    Text("USB-C \(key.dropFirst())")
-                        .font(.headline)
-                    Text(key)
-                        .font(.caption2.monospaced())
-                        .foregroundStyle(.tertiary)
-                }
-                Spacer()
-                StatusBadge(text: active ? "输出" : "关闭", style: active ? .success : .neutral)
-            }
-
-            HStack(alignment: .firstTextBaseline, spacing: 5) {
-                Text(number(port.powerW, digits: 2))
-                    .font(.system(size: 30, weight: .semibold, design: .rounded))
-                    .contentTransition(.numericText())
-                Text("W")
-                    .font(.callout.weight(.medium))
-                    .foregroundStyle(.tertiary)
-            }
-
-            HStack(spacing: 0) {
-                CompactMetric(title: "电压", value: number(port.voltageV, digits: 2), unit: "V", icon: "waveform.path", tint: .blue)
-                Divider().frame(height: 30)
-                CompactMetric(title: "电流", value: number(port.currentA, digits: 2), unit: "A", icon: "gauge.with.dots.needle.33percent", tint: .purple)
-            }
-            .padding(.vertical, 8)
-            .background(.primary.opacity(0.035))
-
-            VStack(alignment: .leading, spacing: 3) {
-                Label(port.cable ?? "未检测到线缆", systemImage: "cable.connector")
-                Text(port.chargingInfo ?? "未识别充电协议")
-                    .foregroundStyle(.secondary)
-                Text(displayModel ?? "未识别设备")
-                    .fontWeight(.medium)
-                    .foregroundStyle(displayModel == nil ? .tertiary : .primary)
-            }
-            .font(.caption)
-            .lineLimit(1)
-            .frame(maxWidth: .infinity, alignment: .leading)
-        }
-        .padding(13)
-        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-        .background(Color(nsColor: .controlBackgroundColor))
-        .overlay(RoundedRectangle(cornerRadius: 8).stroke(.primary.opacity(0.08), lineWidth: 1))
-        .clipShape(RoundedRectangle(cornerRadius: 8))
+        ChargingPortCard(
+            icon: "cable.connector.horizontal",
+            title: "USB-C \(key.dropFirst())",
+            subtitle: key,
+            isActive: active,
+            badgeText: active ? "输出" : "关闭",
+            badgeStyle: active ? .success : .neutral,
+            powerText: number(port.powerW, digits: 2),
+            voltageText: number(port.voltageV, digits: 2),
+            currentText: number(port.currentA, digits: 2),
+            cableIcon: "cable.connector",
+            cableText: port.cable ?? "未检测到线缆",
+            statusText: port.chargingInfo ?? "未识别充电协议",
+            roleText: displayModel ?? "未识别设备",
+            roleIsResolved: displayModel != nil
+        )
     }
 }
 
@@ -1078,75 +1233,37 @@ private struct PowerBankPortCard: View {
         }
     }
 
+    private var isDock: Bool { port.name == "B" }
+
     var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            HStack(spacing: 8) {
-                Image(systemName: port.name == "B" ? "powerplug.fill" : "cable.connector.horizontal")
-                    .font(.system(size: 14, weight: .semibold))
-                    .foregroundStyle(port.isActive ? .blue : .secondary)
-                    .frame(width: 24, height: 24)
-                VStack(alignment: .leading, spacing: 1) {
-                    Text(title).font(.headline)
-                    Text(port.name == "B" ? "底座" : port.name)
-                        .font(.caption2.monospaced())
-                        .foregroundStyle(.tertiary)
-                }
-                Spacer()
-                StatusBadge(text: badge.0, style: badge.1)
-            }
+        ChargingPortCard(
+            icon: isDock ? "powerplug.fill" : "cable.connector.horizontal",
+            title: title,
+            subtitle: isDock ? "底座" : port.name,
+            isActive: port.isActive,
+            badgeText: badge.0,
+            badgeStyle: badge.1,
+            powerText: port.isActive ? number(port.powerW, digits: 2) : "—",
+            voltageText: port.isActive || port.isEnergized ? number(port.voltageV, digits: 2) : "—",
+            currentText: port.isActive ? number(port.currentA, digits: 2) : "—",
+            cableIcon: isDock ? "powerplug" : "cable.connector",
+            cableText: cableText,
+            statusText: statusText,
+            roleText: isDock ? "仅输入" : (port.name == "A" ? "仅输出" : "支持双向"),
+            // 供电方向是这台设备的固有属性，不是「识别出来的东西」，一律压成三级灰
+            roleIsResolved: false
+        )
+    }
 
-            HStack(alignment: .firstTextBaseline, spacing: 5) {
-                Text(port.isActive ? number(port.powerW, digits: 2) : "—")
-                    .font(.system(size: 30, weight: .semibold, design: .rounded))
-                    .contentTransition(.numericText())
-                Text("W")
-                    .font(.callout.weight(.medium))
-                    .foregroundStyle(.tertiary)
-            }
+    private var cableText: String {
+        if isDock { return port.isActive ? "已连接底座" : "未连接底座" }
+        return port.attached ? "已插线" : "未检测到线缆"
+    }
 
-            HStack(spacing: 0) {
-                CompactMetric(
-                    title: "电压",
-                    value: port.isActive || port.isEnergized ? number(port.voltageV, digits: 2) : "—",
-                    unit: "V", icon: "waveform.path", tint: .blue
-                )
-                Divider().frame(height: 30)
-                CompactMetric(
-                    title: "电流",
-                    value: port.isActive ? number(port.currentA, digits: 2) : "—",
-                    unit: "A", icon: "gauge.with.dots.needle.33percent", tint: .purple
-                )
-            }
-            .padding(.vertical, 8)
-            .background(.primary.opacity(0.035))
-
-            VStack(alignment: .leading, spacing: 3) {
-                if port.name == "B" {
-                    Label(port.isActive ? "已连接底座" : "未连接底座", systemImage: "powerplug")
-                    Text(port.isActive ? "正在通过底座取电" : "未放置在充电底座上")
-                        .foregroundStyle(.secondary)
-                    Text("仅输入")
-                        .fontWeight(.medium)
-                        .foregroundStyle(.tertiary)
-                } else {
-                    Label(port.attached ? "已插线" : "未检测到线缆", systemImage: "cable.connector")
-                    Text(port.isActive ? (port.direction == "in" ? "正在取电" : "正在供电")
-                         : port.isEnergized ? "已通电，无负载" : "未协商供电")
-                        .foregroundStyle(.secondary)
-                    Text(port.name == "A" ? "仅输出" : "支持双向")
-                        .fontWeight(.medium)
-                        .foregroundStyle(.tertiary)
-                }
-            }
-            .font(.caption)
-            .lineLimit(1)
-            .frame(maxWidth: .infinity, alignment: .leading)
-        }
-        .padding(13)
-        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-        .background(Color(nsColor: .controlBackgroundColor))
-        .overlay(RoundedRectangle(cornerRadius: 8).stroke(.primary.opacity(0.08), lineWidth: 1))
-        .clipShape(RoundedRectangle(cornerRadius: 8))
+    private var statusText: String {
+        if isDock { return port.isActive ? "正在通过底座取电" : "未放置在充电底座上" }
+        if port.isActive { return port.direction == "in" ? "正在取电" : "正在供电" }
+        return port.isEnergized ? "已通电，无负载" : "未协商供电"
     }
 }
 
@@ -1215,17 +1332,14 @@ private struct CoverPreviewTile: View {
                 .frame(width: imageSize, alignment: .leading)
             }
             .padding(8)
-            .background(Color(nsColor: .controlBackgroundColor))
-            .overlay(
-                RoundedRectangle(cornerRadius: 8)
-                    .stroke(isCurrent ? Color.blue : Color.primary.opacity(0.08), lineWidth: isCurrent ? 2 : 1)
-            )
-            .clipShape(RoundedRectangle(cornerRadius: 8))
+            // 当前那张用蓝色粗边挑出来，其余走统一的灰边
+            .panelBackground(stroke: isCurrent ? Color.blue : nil, lineWidth: isCurrent ? 2 : 1)
             .opacity(enabled ? 1 : 0.65)
         }
         .buttonStyle(.plain)
         .disabled((!enabled && !isCurrent) || isSelecting)
         .help(isCurrent ? "当前封面" : "切换到 \(title)")
+        .accessibilityLabel(isCurrent ? "当前封面 \(title)" : "切换到 \(title)")
     }
 }
 
@@ -1250,17 +1364,6 @@ private struct DeviceFact: View {
                     .lineLimit(1)
             }
         }
-    }
-}
-
-extension View {
-    func dashboardPanel(cornerRadius: CGFloat = 8) -> some View {
-        background(Color(nsColor: .controlBackgroundColor))
-            .overlay(
-                RoundedRectangle(cornerRadius: min(cornerRadius, 8), style: .continuous)
-                    .stroke(.primary.opacity(0.075), lineWidth: 1)
-            )
-            .clipShape(RoundedRectangle(cornerRadius: min(cornerRadius, 8), style: .continuous))
     }
 }
 

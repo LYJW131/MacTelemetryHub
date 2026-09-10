@@ -8,7 +8,20 @@ import SwiftUI
  * 以为一个窗口都不剩了，默认就把进程杀掉 —— 菜单栏图标跟着消失，看起来像
  * 上报器自己退出。登录项只在登录时拉起，不会在这里补救。
  */
+@MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
+    /**
+     * 采集服务归 AppDelegate 持有。
+     *
+     * 以前是控制面板 `onAppear` 才 start()：登录自启拉起来时面板并不打开，采集要等
+     * 到用户第一次点开窗口才真正开始。启动本来就该跟窗口无关。
+     */
+    let service = ServiceController()
+
+    func applicationDidFinishLaunching(_ notification: Notification) {
+        service.start()
+    }
+
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
         false
     }
@@ -17,26 +30,36 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 @main
 struct MacTelemetryHubApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
-    @StateObject private var service = ServiceController()
 
     var body: some Scene {
         Window("Mac Telemetry Hub", id: "dashboard") {
-            DashboardView(service: service)
-                .onAppear { service.start() }
+            DashboardView(service: appDelegate.service)
         }
         .defaultSize(width: 940, height: 640)
 
         Settings {
-            SettingsView(service: service)
+            SettingsView(service: appDelegate.service)
         }
         .defaultSize(width: 860, height: 600)
         .windowResizability(.contentSize)
 
         MenuBarExtra {
-            MenuBarView(service: service)
+            MenuBarView(service: appDelegate.service)
         } label: {
-            Image(systemName: service.reporterLastError == nil ? "wave.3.right.circle.fill" : "exclamationmark.arrow.triangle.2.circlepath")
+            // 图标要跟着上报状态变，所以订阅收在这一小块里 —— App 的 body 自己
+            // 不观察任何东西，直接在这里读 service 的话图标会一直停在启动那一帧。
+            MenuBarLabel(service: appDelegate.service)
         }
+    }
+}
+
+private struct MenuBarLabel: View {
+    @ObservedObject var service: ServiceController
+
+    var body: some View {
+        Image(systemName: service.reporterLastError == nil
+            ? "wave.3.right.circle.fill"
+            : "exclamationmark.arrow.triangle.2.circlepath")
     }
 }
 
@@ -70,6 +93,11 @@ private struct MenuBarView: View {
         }
         chargingMenuStatus(chargerLink)
         chargingMenuStatus(powerBankLink)
+        // 上报断了要在菜单里看得见。菜单栏图标只换了个符号，说不出坏在哪。
+        if let error = service.reporterLastError {
+            Text("上报异常：\(error)")
+                .lineLimit(2)
+        }
         Divider()
         Button("打开控制面板", systemImage: "rectangle.inset.filled") {
             openWindow(id: "dashboard")
@@ -85,6 +113,7 @@ private struct MenuBarView: View {
             service.stop()
             NSApplication.shared.terminate(nil)
         }
+        .keyboardShortcut("q")
     }
 
     @ViewBuilder
@@ -103,8 +132,10 @@ private struct MenuBarView: View {
     @ViewBuilder
     private func chargingMenuActions(_ link: BluetoothService) -> some View {
         if link.slot.isEnabled(service.settings) {
+            // 判据跟控制面板保持一致：没连上就没什么可断的。desiredConnection 只是
+            // 「想连」，链路正在重试时它也是 true，菜单里那一项就一直亮着。
             Button("断开\(link.slot.displayName)", systemImage: "bolt.slash") { link.disconnect() }
-                .disabled(!link.desiredConnection)
+                .disabled(!link.isConnected)
             Button("重连\(link.slot.displayName)", systemImage: "arrow.clockwise") { link.reconnect() }
         }
     }

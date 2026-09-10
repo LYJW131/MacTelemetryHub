@@ -44,51 +44,69 @@ final class AppSettings: ObservableObject {
         static let ankerAuthExpiresAt = "ankerAuthExpiresAt"
     }
 
-    @Published var userID: String
-    @Published var ankerAccount: String
-    @Published var ankerPassword: String
-    @Published var ankerAuthToken: String
-    @Published var ankerAuthExpiresAt: TimeInterval
-    @Published var peripheralID: String
-    @Published var powerBankPeripheralID: String
-    @Published var httpServerEnabled: Bool
-    @Published var httpBindAddress: String
-    @Published var httpPort: Int
-    @Published var postEnabled: Bool
-    @Published var postURL: String
-    @Published var postInterval: Double
-    @Published var postTimeout: Double
-    @Published var deviceID: String
-    @Published var telemetrySecret: String
-    @Published var chargerModuleEnabled: Bool
-    @Published var powerBankModuleEnabled: Bool
+    // 这些默认值只是占位：真正的取值全在 load() 里，init 和 reload() 共用它。
+    // 有了默认值，init 才能把读取逻辑交给一个普通方法，而不用把同一段抄两遍。
+    @Published var userID = ""
+    @Published var ankerAccount = ""
+    @Published var ankerPassword = ""
+    @Published var ankerAuthToken = ""
+    @Published var ankerAuthExpiresAt: TimeInterval = 0
+    @Published var peripheralID = ""
+    @Published var powerBankPeripheralID = ""
+    @Published var httpServerEnabled = false
+    @Published var httpBindAddress = "127.0.0.1"
+    @Published var httpPort = 8787
+    @Published var postEnabled = false
+    @Published var postURL = ""
+    @Published var postInterval: Double = 10
+    @Published var postTimeout: Double = 10
+    @Published var deviceID = ""
+    @Published var telemetrySecret = ""
+    @Published var chargerModuleEnabled = true
+    @Published var powerBankModuleEnabled = false
     /// 充电宝长时间没有充放电就断开蓝牙，隔一段时间再连上去看一眼。
-    @Published var powerBankIdleSleepEnabled: Bool
-    @Published var desktopModuleEnabled: Bool
-    @Published var desktopReportingBlacklist: String
-    @Published var windowTitleApplicationWhitelist: String
-    @Published var appleMusicModuleEnabled: Bool
-    @Published var timezoneModuleEnabled: Bool
-    @Published var vibeCodingModuleEnabled: Bool
+    @Published var powerBankIdleSleepEnabled = true
+    @Published var desktopModuleEnabled = true
+    @Published var desktopReportingBlacklist = ""
+    @Published var windowTitleApplicationWhitelist = ""
+    @Published var appleMusicModuleEnabled = true
+    @Published var timezoneModuleEnabled = true
+    @Published var vibeCodingModuleEnabled = false
     /// ccusage 可执行文件，读取本地完整历史与会话摘要。
-    @Published var ccusageCLIPath: String
+    @Published var ccusageCLIPath = ""
     /// 短间隔那份：此刻在不在用
-    @Published var codingSessionRefreshInterval: Double
+    @Published var codingSessionRefreshInterval: Double = 60
     /// 长间隔那份：全历史 token 与费用，限额由 NAS 独立采集。
-    @Published var vibeCodingUsageRefreshInterval: Double
+    @Published var vibeCodingUsageRefreshInterval: Double = 600
     /// 年度热力图：过去 53 周日合计。格子按天变，默认一小时。
-    @Published var vibeCodingYearRefreshInterval: Double
-    @Published var r2Endpoint: String
-    @Published var r2Bucket: String
-    @Published var r2AccessKeyID: String
-    @Published var r2SecretAccessKey: String
+    @Published var vibeCodingYearRefreshInterval: Double = 3_600
+    @Published var r2Endpoint = ""
+    @Published var r2Bucket = ""
+    @Published var r2AccessKeyID = ""
+    @Published var r2SecretAccessKey = ""
     @Published var launchAtLoginEnabled = false
 
     private let defaults: UserDefaults
+    private let environment: [String: String]
     private let keychain = KeychainStore(service: "com.liangyangjunwei.MacTelemetryHub")
 
     init(defaults: UserDefaults = .standard, environment: [String: String] = ProcessInfo.processInfo.environment) {
         self.defaults = defaults
+        self.environment = environment
+        load()
+    }
+
+    /**
+     * 把所有字段重新读回落盘的值，丢掉界面上没保存的改动。
+     *
+     * 设置页的控件直接绑在这个对象上，输入的一刻就已经改了内存里的值 —— 点「取消」
+     * 只关窗口的话，改动会留在采集模块脚下继续生效。回滚必须真的重读一遍。
+     */
+    func reload() {
+        load()
+    }
+
+    private func load() {
         let environmentUserID = environment["A2687_USER_ID"]?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         // A freshly rebuilt/ad-hoc-signed app can trigger a synchronous Keychain ACL
         // prompt.  Prefer an explicitly supplied launch value and avoid touching the
@@ -131,7 +149,12 @@ final class AppSettings: ObservableObject {
         postInterval = storedInterval == 0 ? Double(environment["TELEMETRY_POST_INTERVAL"] ?? environment["A2687_POST_INTERVAL"] ?? "10") ?? 10 : storedInterval
         let storedTimeout = defaults.double(forKey: Key.postTimeout)
         postTimeout = storedTimeout == 0 ? Double(environment["A2687_POST_TIMEOUT"] ?? "10") ?? 10 : storedTimeout
-        deviceID = defaults.string(forKey: Key.deviceID) ?? UUID().uuidString.lowercased()
+        // 设备 ID 只在保存时落盘。还没保存过就重读（点了取消）时不能顺手换一个新的 ——
+        // 站点会把它当成另一台 Mac，历史就断在这里。
+        let storedDeviceID = defaults.string(forKey: Key.deviceID) ?? ""
+        deviceID = storedDeviceID.isEmpty
+            ? (deviceID.isEmpty ? UUID().uuidString.lowercased() : deviceID)
+            : storedDeviceID
         telemetrySecret = environment["TELEMETRY_INGEST_SECRET"]
             ?? keychain.read(account: Key.telemetrySecretAccount)
             ?? ""
@@ -383,6 +406,24 @@ final class AppSettings: ObservableObject {
         defaults.set(ankerAuthExpiresAt, forKey: Key.ankerAuthExpiresAt)
     }
 
+    /**
+     * 只把某一台设备的配对 UUID 写进去，不碰别的字段、不做整页校验。
+     *
+     * 在配对列表里点一台设备，UUID 当场就进了内存。如果这时走整页保存，一个跟配对
+     * 毫无关系的字段（比如上报端点还没填完）会让保存失败 —— 界面报一个看不懂的错，
+     * 配对却已经改掉了，两边对不上。配对是一个独立动作，落盘也该是独立的。
+     */
+    func persistPeripheralIdentifier(for slot: ChargingDeviceSlot) {
+        switch slot {
+        case .charger:
+            peripheralID = peripheralID.trimmingCharacters(in: .whitespacesAndNewlines)
+            defaults.set(peripheralID, forKey: Key.peripheralID)
+        case .powerBank:
+            powerBankPeripheralID = powerBankPeripheralID.trimmingCharacters(in: .whitespacesAndNewlines)
+            defaults.set(powerBankPeripheralID, forKey: Key.powerBankPeripheralID)
+        }
+    }
+
     func setLaunchAtLogin(_ enabled: Bool) throws {
         if enabled {
             try SMAppService.mainApp.register()
@@ -410,8 +451,9 @@ enum SettingsError: LocalizedError {
         case .invalidPeripheralID: "配对的设备 ID 必须是有效 UUID，或留空重新配对。"
         case .invalidPort: "HTTP 端口必须在 1 到 65535 之间。"
         case .invalidBindAddress: "绑定地址必须是 IP，例如 127.0.0.1、0.0.0.0 或 ::1。"
-        case .invalidTiming: "POST 间隔和超时必须大于 0。"
-        case .invalidPostURL: "POST 地址必须是完整的 http:// 或 https:// URL。"
+        // 错误里出现的名字必须和设置页上那一栏的标题一模一样，否则用户不知道该改哪里。
+        case .invalidTiming: "上报间隔和请求超时必须大于 0。"
+        case .invalidPostURL: "上报端点必须是完整的 http:// 或 https:// URL。"
         case .invalidCcusagePath: "启用 Vibe Coding 用量时，ccusage CLI 路径必须指向可执行文件。"
         case .invalidCodingSessionInterval: "会话状态刷新间隔不能低于 60 秒。"
         case .invalidVibeCodingUsageInterval: "用量刷新间隔不能低于 60 秒。"

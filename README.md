@@ -316,8 +316,10 @@ pause land in 320–490 ms, application switches in 560–620 ms.
    enabled.
 4. Run on **My Mac** and approve the Bluetooth prompt once.
 5. Open Settings in the app, enter the Anker user ID, then press **扫描充电头**
-   and pick the charger from the list. Choosing one stores its CoreBluetooth
-   UUID and saves.
+   and pick the charger from the list. Choosing one writes just that
+   CoreBluetooth UUID to disk and reconnects the link. It deliberately skips the
+   whole-page validation: an unrelated half-filled field must not fail the
+   pairing after the UUID has already changed in memory.
 
 Pairing is the only time the app scans. Once a UUID is stored, it only ever
 issues a directed connect to that one charger — the request stays pending until
@@ -390,14 +392,27 @@ Xcode must be able to provision that team. The diagnostic `coding-usage` command
 is a separate Swift package executable; the app bundles the ccusage helper and
 links `CodingUsageKit` directly.
 
+`Sources/TelemetryCore` holds the pure, `Sendable` half of the reporter — the
+telemetry envelope and module snapshots, per-module upload signatures (change
+detection), the R2 SigV4 signer, the icon upload retry budget, and developer-token
+JWT lifetime rules. Like `ChargerTelemetryKit` it is compiled straight into the app
+target as a source group (register new files with `Tools/add-source-file.py`) and
+doubles as an SPM target so `Tests/TelemetryCoreTests` can pin the wire format and
+the change-detection semantics with `swift test`.
+
 ## Login launch
 
 After installing the signed app in `/Applications`, enable **登录后自动启动** in
 Settings. This uses the supported macOS `SMAppService` API and starts after the
-user logs in; it is not a root LaunchDaemon.
+user logs in; it is not a root LaunchDaemon. This one toggle applies the moment
+it is flipped — the page says so under the switch. Every other field applies on
+**保存**; **取消**, or simply closing the Settings window, re-reads the persisted
+values and drops the unsaved edits.
 
-Closing the dashboard window does not stop the service. Use the menu-bar status
-icon to reopen the window, disconnect, reconnect, or quit.
+Collection starts in `applicationDidFinishLaunching`, not when the dashboard
+window opens: a login launch normally shows no window at all. Closing the
+dashboard window does not stop the service either. Use the menu-bar status icon
+to reopen the window, disconnect, reconnect, or quit.
 
 ## Local HTTP
 
