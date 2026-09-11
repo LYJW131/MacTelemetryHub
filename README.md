@@ -334,42 +334,37 @@ The current charger's CoreBluetooth identifier is
 
 The app keeps the existing playback snapshot separate from MusicKit. In the
 Apple Music section of Settings, click **授权并上报 Apple Music token**. After
-the user approves the macOS media-library prompt, MusicKit obtains both tokens
-and the app sends them through the unified ingest endpoint, as an
+the user approves the macOS media-library prompt, MusicKit hands over the Music
+User Token and the app sends it through the unified ingest endpoint, as an
 `appleMusicCredentials` module of the v4 envelope:
 
 ```json
 {
   "appleMusicCredentials": {
-    "musicUserToken": "<Music User Token>",
-    "developerToken": "<developer token>",
-    "expiresAt": 1760000000
+    "musicUserToken": "<Music User Token>"
   }
 }
 ```
 
 There is no separate credentials endpoint — the button only wakes the reporter
-loop, and the two tokens are compared independently, so a rotation uploads just
-the field that changed. The backend should treat both token fields as secrets,
-avoid logging them, and return a 2xx response only after accepting the payload.
+loop. The backend should treat the token as a secret, avoid logging it, and
+return a 2xx response only after accepting the payload.
 
-The reporter loop re-reads MusicKit's cached tokens every five minutes. MusicKit
-does not rotate a cached developer token on its own (an expired one is handed
-back unchanged), so the app decodes the token's `iat`/`exp` and, once past the
-half-life (the same rule as the site's and the API Worker's `pastHalfLife`),
-requests a fresh one with `ignoreCache`; the backend receives the new
-`developerToken` + `expiresAt` on the next envelope. A token that would expire
-earlier than the one already held never replaces it.
+The developer token is no longer part of this contract: the API Worker signs its
+own with the team's `.p8` key, so nothing expiring travels in the envelope, and
+an envelope that still carries `developerToken` or `expiresAt` is rejected. The
+app only re-reads MusicKit's cached user token every five minutes and uploads it
+when the value changes (it still asks MusicKit for a developer token in passing,
+because `userToken(for:)` requires one, but that value is neither kept nor sent).
 
 The local `GET /apple-music/authorization` endpoint exposes status only and never
-returns token values: authorization status, whether a user token is held, the
-held developer token's `developerTokenExpiresAt` (Unix seconds), `lastUploadAt`
-(Unix milliseconds) and `lastError`. Mint failures and forced renewals are also
+returns token values: authorization status, whether a user token is held,
+`lastUploadAt` (Unix milliseconds) and `lastError`. Mint failures are also
 written to the unified log under the `apple-music` category
 (`log show --predicate 'category == "apple-music"'`).
 
 The ingest URL is only validated as http-or-https with a host; nothing in the app
-forces TLS. Since that one envelope carries both tokens and the Bearer secret,
+forces TLS. Since that one envelope carries the user token and the Bearer secret,
 use HTTPS for anything but a local backend.
 
 For automatic developer-token generation, enable **MusicKit** in the App ID's
@@ -395,8 +390,8 @@ links `CodingUsageKit` directly.
 
 `Sources/TelemetryCore` holds the pure, `Sendable` half of the reporter — the
 telemetry envelope and module snapshots, per-module upload signatures (change
-detection), the R2 SigV4 signer, the icon upload retry budget, and developer-token
-JWT lifetime rules. Like `ChargerTelemetryKit` it is compiled straight into the app
+detection), the R2 SigV4 signer, and the icon upload retry budget. Like
+`ChargerTelemetryKit` it is compiled straight into the app
 target as a source group (register new files with `Tools/add-source-file.py`) and
 doubles as an SPM target so `Tests/TelemetryCoreTests` can pin the wire format and
 the change-detection semantics with `swift test`.

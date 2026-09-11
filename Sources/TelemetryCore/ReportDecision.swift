@@ -64,7 +64,6 @@ struct ReportInputs: Sendable {
     var music: AppleMusicSnapshot?
 
     var credentials: AppleMusicCredentialsSnapshot?
-    var developerTokenChanged = false
     var musicUserTokenChanged = false
 
     var vibeCodingUsagePayload: JSONValue?
@@ -88,20 +87,16 @@ struct ReportInputs: Sendable {
 }
 
 /**
- * 两个 Apple Music token 与 developer token 的到期时刻。
+ * 手里那份 Apple Music user token。
  *
- * App 那侧的 `AppleMusicCredentials` 拖着 MusicKit 与 JWT 的解析，判断逻辑
- * 用不上；这里只留信封真正要写出去的三个值。
+ * App 那侧的 `AppleMusicCredentials` 拖着 MusicKit，判断逻辑用不上；这里只留
+ * 信封真正要写出去的那一个值。developer token 由 Worker 自己签，不经过这里。
  */
 struct AppleMusicCredentialsSnapshot: Equatable, Sendable {
     let musicUserToken: String
-    let developerToken: String
-    let expiresAt: Date
 
-    init(musicUserToken: String, developerToken: String, expiresAt: Date) {
+    init(musicUserToken: String) {
         self.musicUserToken = musicUserToken
-        self.developerToken = developerToken
-        self.expiresAt = expiresAt
     }
 }
 
@@ -291,16 +286,8 @@ struct ReportDecision: Sendable {
             : nowChanged
         yearToSend = manualMode ? manualKinds.contains(.vibeCodingYear) : yearChanged
         // 手动上报只发用户选中的模块；token 的自动变化留到下一轮。
-        if !manualMode,
-           let credentials = inputs.credentials,
-           inputs.developerTokenChanged || inputs.musicUserTokenChanged {
-            credentialsToSend = AppleMusicCredentialsPayload(
-                musicUserToken: inputs.musicUserTokenChanged ? credentials.musicUserToken : nil,
-                developerToken: inputs.developerTokenChanged ? credentials.developerToken : nil,
-                expiresAt: inputs.developerTokenChanged
-                    ? Int(credentials.expiresAt.timeIntervalSince1970)
-                    : nil
-            )
+        if !manualMode, let credentials = inputs.credentials, inputs.musicUserTokenChanged {
+            credentialsToSend = AppleMusicCredentialsPayload(musicUserToken: credentials.musicUserToken)
         } else {
             credentialsToSend = nil
         }

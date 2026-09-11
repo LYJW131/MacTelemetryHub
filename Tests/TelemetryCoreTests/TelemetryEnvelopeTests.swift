@@ -96,9 +96,7 @@ struct TelemetryEnvelopeTests {
                 ),
             ]),
             desktop: desktop,
-            appleMusicCredentials: AppleMusicCredentialsPayload(
-                musicUserToken: "mut", developerToken: "dev", expiresAt: 1_789_099_506
-            ),
+            appleMusicCredentials: AppleMusicCredentialsPayload(musicUserToken: "mut"),
             timezone: TimeZoneSnapshot(
                 identifier: "Asia/Shanghai", abbreviation: "GMT+8",
                 secondsFromGMT: 28_800, observedAt: 1_789_099_506_000
@@ -119,6 +117,9 @@ struct TelemetryEnvelopeTests {
         #expect(Set(desktopJSON.keys) == [
             "applicationName", "bundleIdentifier", "iconHash", "iconObjectKey", "observedAt",
         ])
+        // developer token 已经归后端，带上它的信封会被整封退回：这一格只能有 user token
+        let credentialsJSON = try #require(modules["appleMusicCredentials"] as? [String: Any])
+        #expect(Set(credentialsJSON.keys) == ["musicUserToken"])
         #expect(json["activeModules"] as? [String] == ["charger", "desktop", "timezone"])
     }
 

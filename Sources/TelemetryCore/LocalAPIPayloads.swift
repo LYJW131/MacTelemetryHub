@@ -48,8 +48,6 @@ struct AppleMusicAuthorizationPayload: Encodable {
     let status: String
     let authorized: Bool
     let hasUserToken: Bool
-    /** 手里那份 developer token 的到期时刻，Unix 秒；还没取到时为空 */
-    let developerTokenExpiresAt: Int?
     /** 上次成功把 token 送到后端的时刻，Unix 毫秒 */
     let lastUploadAt: Int?
     let lastError: String?

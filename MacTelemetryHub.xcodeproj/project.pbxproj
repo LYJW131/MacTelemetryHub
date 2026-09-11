@@ -43,7 +43,6 @@
 		B10000000000000000000034 /* R2IconUploader.swift in Sources */ = {isa = PBXBuildFile; fileRef = F10000000000000000000030 /* R2IconUploader.swift */; };
 		B10000000000000000000035 /* IconUploadBudget.swift in Sources */ = {isa = PBXBuildFile; fileRef = F10000000000000000000034 /* IconUploadBudget.swift */; };
 		B10000000000000000000036 /* LocalAPIPayloads.swift in Sources */ = {isa = PBXBuildFile; fileRef = F10000000000000000000035 /* LocalAPIPayloads.swift */; };
-		B10000000000000000000037 /* DeveloperTokenJWT.swift in Sources */ = {isa = PBXBuildFile; fileRef = F10000000000000000000036 /* DeveloperTokenJWT.swift */; };
 		B10000000000000000000038 /* AppSettings+R2.swift in Sources */ = {isa = PBXBuildFile; fileRef = F10000000000000000000037 /* AppSettings+R2.swift */; };
 		B10000000000000000000039 /* AppleMusicCredentialStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = F10000000000000000000038 /* AppleMusicCredentialStore.swift */; };
 		B1000000000000000000003A /* ServiceController+LocalAPI.swift in Sources */ = {isa = PBXBuildFile; fileRef = F10000000000000000000039 /* ServiceController+LocalAPI.swift */; };
@@ -91,7 +90,6 @@
 		F10000000000000000000030 /* R2IconUploader.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = R2IconUploader.swift; sourceTree = "<group>"; };
 		F10000000000000000000034 /* IconUploadBudget.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = IconUploadBudget.swift; sourceTree = "<group>"; };
 		F10000000000000000000035 /* LocalAPIPayloads.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LocalAPIPayloads.swift; sourceTree = "<group>"; };
-		F10000000000000000000036 /* DeveloperTokenJWT.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DeveloperTokenJWT.swift; sourceTree = "<group>"; };
 		F10000000000000000000037 /* AppSettings+R2.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "AppSettings+R2.swift"; sourceTree = "<group>"; };
 		F10000000000000000000038 /* AppleMusicCredentialStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppleMusicCredentialStore.swift; sourceTree = "<group>"; };
 		F10000000000000000000039 /* ServiceController+LocalAPI.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "ServiceController+LocalAPI.swift"; sourceTree = "<group>"; };
@@ -190,7 +188,6 @@
 				F10000000000000000000030 /* R2IconUploader.swift */,
 				F10000000000000000000034 /* IconUploadBudget.swift */,
 				F10000000000000000000035 /* LocalAPIPayloads.swift */,
-				F10000000000000000000036 /* DeveloperTokenJWT.swift */,
 				F1000000000000000000003A /* ReportDecision.swift */,
 				F1000000000000000000003B /* LastPostedState.swift */,
 			);
@@ -298,7 +295,6 @@
 				B10000000000000000000034 /* R2IconUploader.swift in Sources */,
 				B10000000000000000000035 /* IconUploadBudget.swift in Sources */,
 				B10000000000000000000036 /* LocalAPIPayloads.swift in Sources */,
-				B10000000000000000000037 /* DeveloperTokenJWT.swift in Sources */,
 				B10000000000000000000038 /* AppSettings+R2.swift in Sources */,
 				B10000000000000000000039 /* AppleMusicCredentialStore.swift in Sources */,
 				B1000000000000000000003A /* ServiceController+LocalAPI.swift in Sources */,

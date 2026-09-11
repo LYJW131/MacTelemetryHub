@@ -103,6 +103,8 @@ struct ReportDecisionTests {
         desktopBlocked: Bool = false,
         timezone: TimeZoneSnapshot? = nil,
         music: AppleMusicSnapshot? = nil,
+        credentials: AppleMusicCredentialsSnapshot? = nil,
+        musicUserTokenChanged: Bool = false,
         manualModules: Set<TelemetryModule> = []
     ) -> ReportInputs {
         ReportInputs(
@@ -114,6 +116,8 @@ struct ReportDecisionTests {
             desktopBlocked: desktopBlocked,
             timezone: timezone,
             music: music,
+            credentials: credentials,
+            musicUserTokenChanged: musicUserTokenChanged,
             manualModules: manualModules
         )
     }
@@ -394,6 +398,35 @@ struct ReportDecisionTests {
         #expect(!decision.timezoneToSend)
         #expect(decision.manualModules == [.charger])
         #expect(decision.unsatisfiableManualModules == [.timezone])
+    }
+
+    /**
+     * Apple Music 凭据只在 user token 变了的时候发，而且只发那一个值。
+     *
+     * developer token 现在由 Worker 自己签，带上它的信封会被整封退回，所以这一格
+     * 没有别的字段可判 —— 唯一的门就是 user token 有没有变。
+     */
+    @Test func appleMusicCredentialsFollowTheUserTokenOnly() {
+        let credentials = AppleMusicCredentialsSnapshot(musicUserToken: "mut")
+
+        let changed = decide(inputs(now: t0, credentials: credentials, musicUserTokenChanged: true))
+        #expect(changed.credentialsToSend?.musicUserToken == "mut")
+        #expect(changed.dataChanged)
+
+        // 没变就不发，也不该把这一圈算成有数据
+        let unchanged = decide(inputs(now: t0, credentials: credentials))
+        #expect(unchanged.credentialsToSend == nil)
+        #expect(!unchanged.dataChanged)
+
+        // 手动上报只发用户选中的模块，token 的变化留到下一轮
+        let manual = decide(inputs(
+            now: t0,
+            charger: charger(),
+            credentials: credentials,
+            musicUserTokenChanged: true,
+            manualModules: [.charger]
+        ))
+        #expect(manual.credentialsToSend == nil)
     }
 
     /// 没有数据要发的时候才补心跳 —— 有数据时那个包本身就证明活着。

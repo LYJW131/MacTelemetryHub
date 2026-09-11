@@ -97,15 +97,14 @@ struct AppleMusicSnapshot: Codable, Equatable, Sendable {
 }
 
 /**
- * 并入统一遥测信封的 Apple Music token 增量。
+ * 并入统一遥测信封的 Apple Music user token 增量。
  *
- * 两个 token 分别判变，所以字段都是可选的；developer token 的 expiresAt 和它
- * 同进同出。远端信封只带变化的字段；本机不再另开遥测 HTTP。
+ * developer token 归后端 —— Worker 自己拿 .p8 私钥签，这台机器不再上报它，带上
+ * 它的信封会因为字段已停用而整封被退。这里只剩用户那份授权，变了才带这一格，
+ * 所以字段是非可选的。本机不再另开遥测 HTTP。
  */
 struct AppleMusicCredentialsPayload: Encodable, Sendable {
-    let musicUserToken: String?
-    let developerToken: String?
-    let expiresAt: Int?
+    let musicUserToken: String
 }
 
 struct TimeZoneSnapshot: Codable, Equatable, Sendable {

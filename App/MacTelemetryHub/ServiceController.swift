@@ -710,13 +710,8 @@ final class ServiceController: ObservableObject {
                         timezone: settings.timezoneModuleEnabled ? timeZone.snapshot : nil,
                         music: settings.appleMusicModuleEnabled ? appleMusic.snapshot : nil,
                         credentials: credentials.map {
-                            AppleMusicCredentialsSnapshot(
-                                musicUserToken: $0.musicUserToken,
-                                developerToken: $0.developerToken,
-                                expiresAt: $0.expiresAt
-                            )
+                            AppleMusicCredentialsSnapshot(musicUserToken: $0.musicUserToken)
                         },
-                        developerTokenChanged: appleMusicCredentialStore.developerTokenChanged,
                         musicUserTokenChanged: appleMusicCredentialStore.musicUserTokenChanged,
                         vibeCodingUsagePayload: vibeCodingUsageCollector.uploadPayload,
                         vibeCodingNowPayload: codingSessions.uploadPayload,
@@ -840,12 +835,8 @@ final class ServiceController: ObservableObject {
                         if let iconHash = effects.desktopIconConfirmed?.iconHash {
                             icons.remember(iconHash)
                         }
-                        if let credentialsToSend = decision.credentialsToSend {
-                            appleMusicCredentialStore.notePosted(
-                                credentials,
-                                developerToken: credentialsToSend.developerToken != nil,
-                                musicUserToken: credentialsToSend.musicUserToken != nil
-                            )
+                        if decision.credentialsToSend != nil {
+                            appleMusicCredentialStore.notePosted(credentials)
                             appleMusicCredentialsUploadAt = Date()
                             appleMusicCredentialsUploadError = nil
                         }

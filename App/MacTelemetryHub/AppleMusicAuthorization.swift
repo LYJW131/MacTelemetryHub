@@ -2,22 +2,21 @@ import Foundation
 import MusicKit
 import os
 
+/// 这台机器唯一还往后端送的 Apple Music 凭据：用户那份授权。
 struct AppleMusicCredentials: Sendable {
     let musicUserToken: String
-    let developerToken: String
-    /// developer token 自己 JWT 里的签发与到期时刻。
-    /// 后端拿到的是一份会过期的凭据，续期时机全靠这两个数，所以它们跟 token 一起走。
-    let lifetime: DeveloperTokenLifetime
-
-    var expiresAt: Date { lifetime.expiresAt }
 }
 
 /**
- * MusicKit 授权与取 token。
+ * MusicKit 授权与取 music user token。
  *
- * 存在的理由是不想把 .p8 私钥放到后端：签名密钥留在这台机器的钥匙串里由系统
- * 保管，后端只拿一份短期的 developer token 加 music user token。代价是后端手上
- * 那份会过期，得由这边持续续上 —— 见 ServiceController 里按 `exp` 触发的那段。
+ * 两份凭据现在各归各家：developer token 是 Worker 的事，它自己拿 .p8 私钥签，
+ * 想签多新签多新，不会过期在别人手里；这台 Mac 只管用户那份授权 —— 它绑的是
+ * 这台机器上登录的 Apple 账号，除了这里没有别的地方能拿到。信封里也就只剩
+ * musicUserToken 一个字段，developer token 带上去会被判为已停用而整封退回。
+ *
+ * 这里仍要向 MusicKit 要一份 developer token，但只是为了换 user token —— SDK 的
+ * `userToken(for:)` 必须收一份，值本身既不留也不上报。
  *
  * 这里不自己存任何 token。授权状态是系统（TCC）在管，只要还是 authorized，
  * MusicKit 随时能再签一份出来，自己存一份既多余、又是一处不会被清理的长期凭据
@@ -77,22 +76,15 @@ final class AppleMusicAuthorizationManager: ObservableObject {
     }
 
     /**
-     * 现签一对 token。
+     * 读一次 MusicKit 缓存里的 music user token。
      *
-     * 先读 MusicKit 的缓存：缓存值没变就静默，不产生网络请求。但缓存不会自己
-     * 轮换 —— 实测 developer token 过期两天后，不带 ignoreCache 拿到的还是那份
-     * 过期的，后端因此一直拿 401。所以这里按 token 自己的 `iat`/`exp` 判：过了
-     * 半衰期（或已经过期）就带 `.ignoreCache` 重签一份，规则和站点、Worker 那侧
-     * 的 pastHalfLife 一致。user token 总是对着最终那份 developer token 去取。
-     *
-     * `held` 是调用方手里、已经上报出去的那份 developer token 的时刻。判要不要重签
-     * 以它为准而不是以缓存那份：万一 ignoreCache 重签后 SDK 缓存没跟着换，下一轮
-     * 缓存读回的还是旧的，按旧的判就会每轮都重签、每轮都上报一份新 token。以手里
-     * 那份为准，缓存回退到更旧的只会被调用方按到期时刻丢弃，不会触发新一轮签发。
+     * 读的是 SDK 缓存，缓存没变就不产生网络请求。中途那份 developer token 只是
+     * `userToken(for:)` 的入参 —— 它归 Worker 自己签，这边既不判它的寿命也不留它，
+     * 拿到的是不是过期的都无所谓，user token 换出来就行。
      *
      * 不弹窗：授权没批准就直接返回 nil，交给调用方决定要不要提示。
      */
-    func mintCredentials(held: DeveloperTokenLifetime? = nil) async -> AppleMusicCredentials? {
+    func mintCredentials() async -> AppleMusicCredentials? {
         authorizationStatus = MusicAuthorization.currentStatus
         guard authorizationStatus == .authorized else {
             hasUserToken = false
@@ -103,43 +95,15 @@ final class AppleMusicAuthorizationManager: ObservableObject {
             // MusicDataRequest.tokenProvider 是 SDK 里的可变全局量，Swift 6 的严格
             // 并发检查不让碰。新建一个默认 provider 行为一样，且不动那个全局量。
             let provider = DefaultMusicTokenProvider()
-            var developerToken = try await provider.developerToken(options: [])
+            let developerToken = try await provider.developerToken(options: [])
             guard !developerToken.isEmpty else { throw AppleMusicAuthorizationError.emptyToken }
-            guard var lifetime = Self.lifetime(ofJWT: developerToken) else {
-                throw AppleMusicAuthorizationError.unreadableExpiry
-            }
-
-            // 缓存那份比手里的还旧（或一样），就按手里那份的寿命判；缓存已经轮换到更新的，按新的判
-            let reference = held.map { lifetime.expiresAt <= $0.expiresAt ? $0 : lifetime } ?? lifetime
-            if Self.shouldRenew(reference, now: Date()) {
-                Self.logger.notice(
-                    "developer token 到期 \(reference.expiresAt.ISO8601Format(), privacy: .public)，已过半衰期，忽略缓存重签"
-                )
-                developerToken = try await provider.developerToken(options: .ignoreCache)
-                guard !developerToken.isEmpty else { throw AppleMusicAuthorizationError.emptyToken }
-                guard let renewed = Self.lifetime(ofJWT: developerToken) else {
-                    throw AppleMusicAuthorizationError.unreadableExpiry
-                }
-                if renewed.expiresAt <= reference.expiresAt {
-                    // 重签也没拿到更新的：不是缓存问题，多半是 Apple 那边没签出来。
-                    // 记下来，仍把它交出去 —— 调用方按到期时刻比较，不会拿它顶掉手里更好的
-                    Self.logger.error(
-                        "忽略缓存重签后 developer token 到期仍是 \(renewed.expiresAt.ISO8601Format(), privacy: .public)"
-                    )
-                }
-                lifetime = renewed
-            }
 
             let musicUserToken = try await provider.userToken(for: developerToken, options: [])
             guard !musicUserToken.isEmpty else { throw AppleMusicAuthorizationError.emptyToken }
 
             hasUserToken = true
             lastError = nil
-            return AppleMusicCredentials(
-                musicUserToken: musicUserToken,
-                developerToken: developerToken,
-                lifetime: lifetime
-            )
+            return AppleMusicCredentials(musicUserToken: musicUserToken)
         } catch {
             lastError = error.localizedDescription
             Self.logger.error("取 Apple Music token 失败：\(error.localizedDescription, privacy: .public)")
@@ -151,26 +115,14 @@ final class AppleMusicAuthorizationManager: ObservableObject {
         subsystem: Bundle.main.bundleIdentifier ?? "MacTelemetryHub",
         category: "apple-music"
     )
-
-    /// 这两条规则是纯的，实现在 TelemetryCore 的 `DeveloperTokenJWT`（有单测）。
-    /// 这里只留一层转发，免得调用点分成两种写法。
-    static func shouldRenew(_ lifetime: DeveloperTokenLifetime, now: Date) -> Bool {
-        DeveloperTokenJWT.shouldRenew(lifetime, now: now)
-    }
-
-    static func lifetime(ofJWT token: String) -> DeveloperTokenLifetime? {
-        DeveloperTokenJWT.lifetime(ofJWT: token)
-    }
 }
 
 private enum AppleMusicAuthorizationError: LocalizedError {
     case emptyToken
-    case unreadableExpiry
 
     var errorDescription: String? {
         switch self {
         case .emptyToken: "MusicKit 返回了空的 Apple Music token。"
-        case .unreadableExpiry: "developer token 里读不到有效期，无法安排续期。"
         }
     }
 }

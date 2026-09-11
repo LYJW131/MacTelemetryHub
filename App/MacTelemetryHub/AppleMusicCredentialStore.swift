@@ -1,11 +1,11 @@
 import Foundation
 
 /**
- * 手里那对 Apple Music token，以及「什么时候再去要一份」。
+ * 手里那份 Apple Music user token，以及「什么时候再去要一份」。
  *
- * 从 ServiceController 拆出来的理由是它自成一件事：MusicKit 的缓存读取、到期
- * 更早的那份不许顶掉手里的、失败退避、已经发出去的两个 token 各自记一份。上报
- * 循环只需要问它三句话 —— 有没有新的、发出去了、重开一轮把记录清掉。
+ * 从 ServiceController 拆出来的理由是它自成一件事：MusicKit 的缓存读取、失败
+ * 退避、已经发出去的那份记一笔。上报循环只需要问它三句话 —— 有没有新的、发出
+ * 去了、重开一轮把记录清掉。developer token 归 Worker 自己签，不进这里。
  *
  * UI 状态（在飞、上次成功时刻、错误文案）仍然留在 ServiceController 上：那几个
  * 是 `@Published`，搬成转发属性的话 SwiftUI 的观察会静默失效。这里只把结果交出去。
@@ -35,7 +35,6 @@ final class AppleMusicCredentialStore {
     private let authorization: AppleMusicAuthorizationManager
     /// MusicKit 最近一次返回的缓存值。
     private(set) var credentials: AppleMusicCredentials?
-    private var lastPostedDeveloperToken: String?
     private var lastPostedUserToken: String?
     private var nextRefreshAt = Date.distantPast
     private var isRefreshing = false
@@ -44,29 +43,23 @@ final class AppleMusicCredentialStore {
         self.authorization = authorization
     }
 
-    var developerTokenChanged: Bool {
-        credentials.map { $0.developerToken != lastPostedDeveloperToken } ?? false
-    }
-
     var musicUserTokenChanged: Bool {
         credentials.map { $0.musicUserToken != lastPostedUserToken } ?? false
     }
 
-    /// 每个上报会话都完整发一次，之后两个 token 才分别判变。
+    /// 每个上报会话都完整发一次，之后才判变。
     func resetPostedTokens() {
-        lastPostedDeveloperToken = nil
         lastPostedUserToken = nil
     }
 
     /**
-     * 记下这封信实际带出去的字段。
+     * 记下这封信实际带出去的那份 token。
      *
      * 传的是循环开头捕获的那份而不是此刻手里的：POST 飞行期间可能又刷了一次，
      * 那份新的还没发出去，不能算已上报。
      */
-    func notePosted(_ sent: AppleMusicCredentials?, developerToken: Bool, musicUserToken: Bool) {
-        if developerToken { lastPostedDeveloperToken = sent?.developerToken }
-        if musicUserToken { lastPostedUserToken = sent?.musicUserToken }
+    func notePosted(_ sent: AppleMusicCredentials?) {
+        lastPostedUserToken = sent?.musicUserToken
     }
 
     /**
@@ -88,11 +81,9 @@ final class AppleMusicCredentialStore {
     }
 
     /**
-     * 在主上报循环里定期读取 MusicKit 的 token。
+     * 在主上报循环里定期读取 MusicKit 的 user token。
      *
-     * 平时读的是 SDK 缓存，不产生网络请求；缓存那份过了半衰期由
-     * AppleMusicAuthorizationManager 带 ignoreCache 重签。主循环分别比较
-     * 两个 token，只上报变了的字段。
+     * 读的是 SDK 缓存，不产生网络请求；值没变就什么都不发。
      */
     @discardableResult
     func refreshIfNeeded(force: Bool = false) async -> RefreshOutcome {
@@ -102,22 +93,11 @@ final class AppleMusicCredentialStore {
         guard force || Date() >= nextRefreshAt else { return .skipped }
         isRefreshing = true
         defer { isRefreshing = false }
-        guard let minted = await authorization.mintCredentials(held: credentials?.lifetime) else {
+        guard let minted = await authorization.mintCredentials() else {
             nextRefreshAt = Date().addingTimeInterval(Self.retryDelay)
             return .failed(authorization.lastError)
         }
-        // 到期更早的 developer token 不能顶掉手里的：SDK 缓存可能回退到重签前那份，
-        // 要不要重签已经按手里那份判过了（见 mintCredentials 的 held），这里只负责
-        // 不让旧的顶掉新的。user token 不绑定某一份 developer token，它的变化照常接受。
-        if let held = credentials, minted.expiresAt < held.expiresAt {
-            credentials = AppleMusicCredentials(
-                musicUserToken: minted.musicUserToken,
-                developerToken: held.developerToken,
-                lifetime: held.lifetime
-            )
-        } else {
-            credentials = minted
-        }
+        credentials = minted
         nextRefreshAt = Date().addingTimeInterval(Self.refreshInterval)
         return .refreshed
     }

@@ -23,14 +23,11 @@ extension ServiceController {
                 "appleMusicAuthorization": "/apple-music/authorization",
             ])
         case ("GET", "/apple-music/authorization"):
-            // 只报状态，两个 token 的值绝不出本机。给排查「后端手里那份为什么过期」用：
-            // 这里的到期时刻就是上次上报出去的那份 developer token 的到期时刻
+            // 只报状态，token 的值绝不出本机。给排查「后端为什么没拿到 user token」用
             return json(AppleMusicAuthorizationPayload(
                 status: appleMusicAuthorization.statusDescription,
                 authorized: appleMusicAuthorization.isAuthorized,
                 hasUserToken: appleMusicAuthorization.hasUserToken,
-                developerTokenExpiresAt: appleMusicCredentialStore.credentials
-                    .map { Int($0.expiresAt.timeIntervalSince1970) },
                 lastUploadAt: appleMusicCredentialsUploadAt.map { Int($0.timeIntervalSince1970 * 1000) },
                 lastError: appleMusicCredentialsUploadError ?? appleMusicAuthorization.lastError
             ))
