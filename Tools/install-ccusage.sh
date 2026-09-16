@@ -2,10 +2,10 @@
 # Official ccusage CI build with Antigravity SQLite support. No global install.
 set -euo pipefail
 cd "$(dirname "$0")/.."
-REVISION="51bc8650630de569e5a07f72c65a2e7de8657e11"
+REVISION="d34194988f460fdb9572d138226b9d9380c04a48"
 case "${CCUSAGE_ARCH:-$(uname -m)}" in
-  arm64) PLATFORM="darwin-arm64"; ARCHIVE_SHA="80f8289338f8772283c20a250f7ec445e9a17f945ffca2727ea23e5c5cd00167" ;;
-  x86_64) PLATFORM="darwin-x64"; ARCHIVE_SHA="75d8624f6b115ad06647fdbb74f688777cea4be3142c32c6f2c41ffe6a370adb" ;;
+  arm64) PLATFORM="darwin-arm64"; ARCHIVE_SHA="3d08a5fd602cd3b3f7e0eb887329f60763c94c468abad5d0aaffe0188cb109e4" ;;
+  x86_64) PLATFORM="darwin-x64"; ARCHIVE_SHA="e8c17e0a04f704edcc5d24c66687f647d6502fcf7ab57a04f03a7b569b8f03fe" ;;
   *) echo "Unsupported ccusage architecture" >&2; exit 1 ;;
 esac
 DEST=".build/ccusage"

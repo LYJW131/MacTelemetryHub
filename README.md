@@ -154,8 +154,9 @@ Token 分列互斥：`inputTokens` 不包含缓存读写，`cacheReadTokens` 与
 ### Pinned ccusage helper
 
 `Tools/install-ccusage.sh` 下载官方 ccusage CI 预览构建，固定提交为
-`51bc8650630de569e5a07f72c65a2e7de8657e11`。选择该构建是因为它包含 Antigravity SQLite
-支持。脚本按本机架构选择 `darwin-arm64` 或 `darwin-x64`，校验对应归档的 SHA-256，
+`d34194988f460fdb9572d138226b9d9380c04a48`。该构建包含 Antigravity SQLite 支持，并已合入
+ccusage/ccusage#1719：不再丢弃 `usage.iterations[].model` 为 `null` 的 Claude 条目
+（Fable 5.1 会话）。脚本按本机架构选择 `darwin-arm64` 或 `darwin-x64`，校验对应归档的 SHA-256，
 再检查 Antigravity 子命令，输出到 `.build/ccusage/ccusage`；不会修改全局 npm/Homebrew
 安装。`CCUSAGE_ARCH=arm64` 或 `x86_64` 可显式选择构建架构，需与目标 Mac 匹配。
 
