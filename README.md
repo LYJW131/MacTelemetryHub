@@ -448,3 +448,18 @@ minimal JSON response. `CodingUsageKitTests` additionally covers source parsing,
 token/cache/reasoning invariants, Cursor pagination and CSV formats, price
 completeness, historical correction and retention, account isolation, process
 cancellation, and engine-to-ledger mapping without real credentials or network.
+
+## Pulse window usage
+
+The session refresh includes `modules.vibeCodingNow.tokenUsage`: a rolling 24-hour
+set of five-minute, epoch-millisecond usage buckets from Codex and Claude JSONL logs.
+The scanner follows file offsets, handles unfinished lines, deduplicates Codex totals
+and Claude streaming messages, and never uploads content, paths or session IDs.
+`inputTokens` excludes cache reads; reasoning is a subset of output. `eventCount`
+counts usage events, not HTTP requests. Source status is `ok`, `partial` or
+`unavailable`; unsupported providers are unknown, not zero. Daily usage is unchanged.
+Window usage is reconciled by event time, including late-arriving records. It is
+internal Jev evidence and does not appear in the public Vibe Coding patch.
+
+Read-only diagnostic: `swift run coding-usage pulse --output /tmp/pulse-usage.json`.
+Deploy the matching lyjwpage Worker and frontend before installing this reporter.

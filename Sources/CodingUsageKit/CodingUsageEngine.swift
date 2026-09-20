@@ -4,6 +4,7 @@ import Foundation
 public actor CodingUsageEngine {
     public let ledgerURL: URL
     public let home: URL
+    private var tokenScanner = CodingTokenScanner()
     private var inFlight: (id: UUID, task: Task<CodingUsageSnapshot, Error>)?
 
     public init(ledgerURL: URL, home: URL = FileManager.default.homeDirectoryForCurrentUser) {
@@ -71,7 +72,10 @@ public actor CodingUsageEngine {
             case let .failure(_, message, _): errors.append(message)
             }
         }
-        return (try ledger.snapshot(at: now), errors)
+        let saved = try ledger.snapshot(at: now)
+        var current = saved.now
+        current.tokenUsage = try tokenScanner.scan(home: home, at: now)
+        return (CodingUsageSnapshot(usage: saved.usage, now: current, year: saved.year), errors)
     }
 
     public func snapshot(at now: Date = Date()) throws -> CodingUsageSnapshot {

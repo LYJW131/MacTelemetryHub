@@ -228,6 +228,7 @@ public struct CodingUsageNowAgentPayload: Codable, Equatable, Sendable {
 }
 public struct CodingUsageNowPayload: Codable, Equatable, Sendable {
     public let agents: [CodingUsageNowAgentPayload]
+    public var tokenUsage: CodingTokenUsage? = nil
 }
 public struct CodingUsageYearPayload: Codable, Equatable, Sendable {
     public let origin: String

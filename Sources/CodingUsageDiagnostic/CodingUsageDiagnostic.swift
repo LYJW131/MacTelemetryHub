@@ -14,8 +14,8 @@ struct CodingUsageDiagnostic {
 
     static func run() async throws {
         var args = Array(CommandLine.arguments.dropFirst())
-        guard let command = args.first, ["collect", "snapshot", "sessions"].contains(command) else {
-            print("coding-usage collect|snapshot|sessions --ledger <path> --ccusage <path> [--output <path>] [--offline] [--local-only]")
+        guard let command = args.first, ["collect", "snapshot", "sessions", "pulse"].contains(command) else {
+            print("coding-usage collect|snapshot|sessions|pulse --ledger <path> --ccusage <path> [--output <path>] [--offline] [--local-only]")
             return
         }
         args.removeFirst()
@@ -28,6 +28,16 @@ struct CodingUsageDiagnostic {
                 throw CodingUsageError.invalid("无效诊断参数：\(key)")
             }
             values[key] = args.removeFirst()
+        }
+        if command == "pulse" {
+            var scanner = CodingTokenScanner()
+            let value = try scanner.scan(home: FileManager.default.homeDirectoryForCurrentUser)
+            let encoder = JSONEncoder(); encoder.outputFormatting = [.sortedKeys]
+            if let output = values["--output"] {
+                try encoder.encode(value).write(to: URL(fileURLWithPath: output), options: .atomic)
+            }
+            print("Collected \(value.windows.count) five-minute token windows; " + value.sources.map { "\($0.id): \($0.state)" }.joined(separator: ", "))
+            return
         }
         guard let ledgerPath = values["--ledger"] else {
             throw CodingUsageError.invalid("请用 --ledger 指定独立诊断账本")
