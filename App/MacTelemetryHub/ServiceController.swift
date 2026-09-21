@@ -49,6 +49,13 @@ final class ServiceController: ObservableObject {
     @Published private(set) var lastManualReportAt: [TelemetryModule: Date] = [:]
 
     private var reporterTask: Task<Void, Never>?
+    /// 非阻塞心跳。宣告离线时先取消，避免 online 还在队列里、offline 已经返回。
+    private var presenceTask: Task<Void, Never>?
+    /// 图标直传在 POST 飞行期间可能作废门闩。commit 之后代次变了，作废仍然有效。
+    private var desktopLatchGeneration = 0
+    private var chargingLatchGeneration = 0
+    private var reporterGeneration = 0
+    private var tickTimer: Task<Void, Never>?
     /// vibe coding 的采集循环，跟上报循环各转各的
     private var vibeCodingCollectionTask: Task<Void, Never>?
     private var vibeCodingSessionsTask: Task<Void, Never>?
@@ -200,10 +207,15 @@ final class ServiceController: ObservableObject {
         suspended = true
         desktopSettleTask?.cancel()
         desktopSettleTask = nil
+        presenceTask?.cancel()
+        presenceTask = nil
         sendHeartbeat("offline", blocking: true)
     }
 
     func applySettings() throws {
+        let previousReporter = reporterRestartKey
+        let previousCoding = codingScheduleKey
+        let previousIcons = iconUploadKey
         let oldHost = httpServer.boundHost
         let oldPort = httpServer.boundPort
         try settings.save()
@@ -216,8 +228,58 @@ final class ServiceController: ObservableObject {
             chargingSSE.closeAll()
             httpServer.stop()
         }
-        configureModules()
-        restartReporter()
+        // 黑名单、窗口标题、HTTP 端口不重开上报会话：重开会把已确认的图标和
+        // 已经发出去的门闩一起擦掉，对端再收一整轮「首次」信封。
+        configureModules(restartCodingCollection: previousCoding != codingScheduleKey)
+        if previousIcons != iconUploadKey {
+            icons.reset()
+            desktopLatchGeneration += 1
+            chargingLatchGeneration += 1
+            lastPosted.desktop = nil
+            lastPosted.chargingDevices = nil
+            lastPosted.chargingContent = nil
+            wakeReporter()
+        }
+        if previousReporter != reporterRestartKey {
+            restartReporter()
+        }
+    }
+
+    /// 改了这些才需要把上报会话从头发一遍。
+    private var reporterRestartKey: ReporterRestartKey {
+        ReporterRestartKey(
+            postEnabled: settings.postEnabled,
+            postURL: settings.postURL,
+            telemetrySecret: settings.telemetrySecret,
+            postInterval: settings.postInterval,
+            postTimeout: settings.postTimeout,
+            chargerModuleEnabled: settings.chargerModuleEnabled,
+            powerBankModuleEnabled: settings.powerBankModuleEnabled,
+            desktopModuleEnabled: settings.desktopModuleEnabled,
+            appleMusicModuleEnabled: settings.appleMusicModuleEnabled,
+            timezoneModuleEnabled: settings.timezoneModuleEnabled,
+            vibeCodingModuleEnabled: settings.vibeCodingModuleEnabled,
+            userID: settings.userID
+        )
+    }
+
+    private var codingScheduleKey: CodingScheduleKey {
+        CodingScheduleKey(
+            enabled: settings.vibeCodingModuleEnabled,
+            cliPath: settings.ccusageCLIPath,
+            sessionInterval: settings.codingSessionRefreshInterval,
+            usageInterval: settings.vibeCodingUsageRefreshInterval,
+            yearInterval: settings.vibeCodingYearRefreshInterval
+        )
+    }
+
+    private var iconUploadKey: IconUploadKey {
+        IconUploadKey(
+            endpoint: settings.r2Endpoint,
+            bucket: settings.r2Bucket,
+            accessKeyID: settings.r2AccessKeyID,
+            secretAccessKey: settings.r2SecretAccessKey
+        )
     }
 
     /// 把一个模块排进「立刻发一封只带它的信封」的队列。
@@ -355,7 +417,8 @@ final class ServiceController: ObservableObject {
     private func moduleHasData(_ module: TelemetryModule) -> Bool {
         switch module {
         case .desktop:
-            desktopActivity.snapshot.map { !isDesktopReportingBlocked($0) } ?? false
+            // 黑名单前台仍然要发一次隐藏态，和 ReportDecision.hasPayload 同一套。
+            desktopActivity.snapshot != nil
         case .appleMusic: appleMusic.snapshot != nil
         case .charger: chargerLink.hasTelemetry
         case .powerBank: powerBankLink.hasTelemetry
@@ -432,6 +495,36 @@ final class ServiceController: ObservableObject {
      * HTTP 端口）不应该把已经连上的充电头和充电宝一起踢掉 —— 那是充电头监测
      * App 留下的「保存并重连」。
      */
+    private struct ReporterRestartKey: Equatable {
+        var postEnabled: Bool
+        var postURL: String
+        var telemetrySecret: String
+        var postInterval: Double
+        var postTimeout: Double
+        var chargerModuleEnabled: Bool
+        var powerBankModuleEnabled: Bool
+        var desktopModuleEnabled: Bool
+        var appleMusicModuleEnabled: Bool
+        var timezoneModuleEnabled: Bool
+        var vibeCodingModuleEnabled: Bool
+        var userID: String
+    }
+
+    private struct CodingScheduleKey: Equatable {
+        var enabled: Bool
+        var cliPath: String
+        var sessionInterval: Double
+        var usageInterval: Double
+        var yearInterval: Double
+    }
+
+    private struct IconUploadKey: Equatable {
+        var endpoint: String
+        var bucket: String
+        var accessKeyID: String
+        var secretAccessKey: String
+    }
+
     private struct ChargingLinkSession: Equatable {
         var enabled: Bool
         var peripheralID: String
@@ -508,7 +601,7 @@ final class ServiceController: ObservableObject {
      * 本轮耗时超过一个周期时不补睡，直接进入下一轮：追进度没有意义，只会让
      * 循环一直欠着时间往前赶。
      */
-    private func waitForNextTick(since cycleStart: ContinuousClock.Instant) async {
+    private func waitForNextTick(since cycleStart: ContinuousClock.Instant, generation: Int) async {
         if pendingWake {
             pendingWake = false
             return
@@ -516,19 +609,22 @@ final class ServiceController: ObservableObject {
         let elapsed = ContinuousClock.now - cycleStart
         let remaining = Self.tickInterval - elapsed
         guard remaining > .zero else { return }
+        tickTimer?.cancel()
         let timer = Task { [weak self] in
             try? await Task.sleep(for: remaining)
-            // 被 cancel 说明已经有事件把循环叫醒了，别再多放行一次
-            guard !Task.isCancelled else { return }
-            self?.wakeReporter()
+            // 被 cancel 说明已经有事件把循环叫醒了，别再多放行一次。
+            // 代次对不上说明这是上一轮会话留下的定时器。
+            guard !Task.isCancelled, let self, self.reporterGeneration == generation else { return }
+            self.wakeReporter()
         }
+        tickTimer = timer
         await withCheckedContinuation { continuation in
             wakeContinuation = continuation
         }
         timer.cancel()
     }
 
-    private func configureModules() {
+    private func configureModules(restartCodingCollection: Bool = true) {
         for link in chargingLinks {
             configure(link: link)
         }
@@ -585,7 +681,9 @@ final class ServiceController: ObservableObject {
             codingSessions.onChange = { [weak self] in self?.wakeReporter() }
             vibeCodingUsageCollector.onChange = { [weak self] in self?.wakeReporter() }
             vibeCodingYearCollector.onChange = { [weak self] in self?.wakeReporter() }
-            startVibeCodingCollection()
+            if restartCodingCollection || vibeCodingCollectionTask == nil {
+                startVibeCodingCollection()
+            }
         } else {
             codingSessions.onChange = nil
             vibeCodingUsageCollector.onChange = nil
@@ -642,10 +740,14 @@ final class ServiceController: ObservableObject {
     }
 
     private func restartReporter() {
+        reporterGeneration += 1
         reporterTask?.cancel()
         // 旧循环可能还挂在等待上，先放行让它认领 cancel 并退出
         wakeReporter()
         reporterTask = nil
+        // 上一轮的 tick 定时器不属于新会话，否则它会在 pendingWake 清掉之后再置上。
+        tickTimer?.cancel()
+        tickTimer = nil
         // 上一轮遗留的唤醒标记不能带进新循环，否则第一圈会白转一次
         pendingWake = false
         reporterLastError = nil
@@ -658,6 +760,7 @@ final class ServiceController: ObservableObject {
         let url = settings.postEnabled ? URL(string: settings.postURL) : nil
         let interval = settings.postInterval
         let timeout = settings.postTimeout
+        let generation = reporterGeneration
         reporterTask = Task { [weak self] in
             guard let self else { return }
             var nextPostAt = Date.distantPast
@@ -747,6 +850,8 @@ final class ServiceController: ObservableObject {
                     }
 
                     if let url, decision.dataChanged, decision.shouldPost {
+                        let desktopGeneration = desktopLatchGeneration
+                        let chargingGeneration = chargingLatchGeneration
                         let desktopPayload: DesktopActivitySnapshot?
                         if inputs.desktopBlocked, let capturedDesktop = inputs.capturedDesktop {
                             desktopPayload = .hidden(observedAt: capturedDesktop.observedAt)
@@ -776,26 +881,15 @@ final class ServiceController: ObservableObject {
                             activeModules: activeModuleNames,
                             now: inputs.now
                         )
-                        var request = URLRequest(url: url)
-                        request.httpMethod = "POST"
-                        request.httpBody = try JSONCoding.encoder().encode(envelope)
-                        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-                        request.setValue("mac-telemetry-hub/4", forHTTPHeaderField: "User-Agent")
-                        if !settings.telemetrySecret.isEmpty {
-                            request.setValue("Bearer \(settings.telemetrySecret)", forHTTPHeaderField: "Authorization")
-                        }
-                        request.timeoutInterval = timeout
+                        let request = TelemetryPoster.request(
+                            url: url,
+                            body: try JSONCoding.encoder().encode(envelope),
+                            secret: settings.telemetrySecret,
+                            timeout: timeout
+                        )
                         attemptedAppleMusicCredentials = decision.credentialsToSend != nil
-                        let (responseData, response) = try await IsolatedHTTPClient.data(for: request)
+                        let responsePayload = try await TelemetryPoster.post(request)
                         try Task.checkCancellation()
-                        if let response = response as? HTTPURLResponse, !(200..<300).contains(response.statusCode) {
-                            throw ReporterError.httpStatus(
-                                response.statusCode,
-                                detail: ReporterError.ingestErrorDetail(responseData)
-                            )
-                        }
-                        let responsePayload = try JSONDecoder()
-                            .decode(TelemetryIngestResponse.self, from: responseData)
                         if decision.desktopToSend, responsePayload.data.desktopIconAvailable == nil {
                             throw ReporterError.invalidTelemetryResponse
                         }
@@ -808,13 +902,23 @@ final class ServiceController: ObservableObject {
                             response: responsePayload.data,
                             desktopPayloadHasObjectKey: desktopPayload?.iconObjectKey != nil
                         )
+                        // 飞行期间图标回调清过门闩的话，commit 会把它写回去。代次变了就再清一次。
+                        if desktopLatchGeneration != desktopGeneration {
+                            lastPosted.desktop = nil
+                        }
+                        if chargingLatchGeneration != chargingGeneration {
+                            lastPosted.chargingDevices = nil
+                            lastPosted.chargingContent = nil
+                        }
                         if effects.coverIconRejected,
                            let source = covers.coverUploadSource,
                            let iconHash = source.iconHash {
                             if effects.sentCoverHadObjectKey { icons.forget(iconHash) }
                             startCoverIconResolution(source)
                             if icons.isConfirmed(iconHash) {
+                                chargingLatchGeneration += 1
                                 lastPosted.chargingDevices = nil
+                                lastPosted.chargingContent = nil
                                 wakeReporter()
                             }
                         }
@@ -828,6 +932,7 @@ final class ServiceController: ObservableObject {
                             startDesktopIconResolution(rejected)
                             // resolver 可能在 POST 飞行期间已经完成；补上那次竞态唤醒。
                             if icons.isConfirmed(iconHash) {
+                                desktopLatchGeneration += 1
                                 lastPosted.desktop = nil
                                 wakeReporter()
                             }
@@ -872,7 +977,7 @@ final class ServiceController: ObservableObject {
                 // 采集和发送解耦：前台应用和音乐由各自的通知驱动，变化时会把
                 // 这里提前叫醒；没有事件时按 tickInterval 转一圈照顾充电器和心跳。
                 // 远端 POST 仍按用户设置的 interval 节流。
-                await waitForNextTick(since: cycleStart)
+                await waitForNextTick(since: cycleStart, generation: generation)
             }
         }
     }
@@ -922,6 +1027,7 @@ final class ServiceController: ObservableObject {
                   desktopActivity.snapshot.map(DesktopUploadSignature.init) == signature else {
                 return
             }
+            desktopLatchGeneration += 1
             lastPosted.desktop = nil
             wakeReporter()
         }
@@ -960,7 +1066,9 @@ final class ServiceController: ObservableObject {
         ) { [weak self] in
             guard let self,
                   lastPostedChargerCover(hash: iconHash, hasObjectKey: false) else { return }
+            chargingLatchGeneration += 1
             lastPosted.chargingDevices = nil
+            lastPosted.chargingContent = nil
             wakeReporter()
         }
     }
@@ -986,9 +1094,7 @@ final class ServiceController: ObservableObject {
         // 拦得住上报循环的补心跳，也拦得住此后任何一条想说在线的路。
         guard presence == "offline" || !suspended else { return }
         guard settings.postEnabled, let url = URL(string: settings.postURL) else { return }
-        var request = URLRequest(url: url)
-        request.httpMethod = "POST"
-        request.httpBody = try? JSONCoding.encoder().encode(
+        let body = (try? JSONCoding.encoder().encode(
             TelemetryEnvelope.make(
                 includeDesktop: false,
                 includeAppleMusic: false,
@@ -996,32 +1102,22 @@ final class ServiceController: ObservableObject {
                 now: Date(),
                 presence: presence
             )
+        )) ?? Data()
+        let request = TelemetryPoster.request(
+            url: url,
+            body: body,
+            secret: settings.telemetrySecret,
+            timeout: 3
         )
-        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        request.setValue("mac-telemetry-hub/4", forHTTPHeaderField: "User-Agent")
-        if !settings.telemetrySecret.isEmpty {
-            request.setValue("Bearer \(settings.telemetrySecret)", forHTTPHeaderField: "Authorization")
-        }
-        request.timeoutInterval = 3
 
         guard blocking else {
-            Task { _ = try? await IsolatedHTTPClient.data(for: request) }
+            presenceTask?.cancel()
+            presenceTask = TelemetryPoster.send(request)
             return
         }
-        /**
-         * 睡眠和退出这两条路必须同步等。
-         *
-         * `willSleepNotification` 的观察者返回后系统就接着睡了，异步任务根本
-         * 来不及跑完；退出同理，进程先没了。所以这里用信号量把主线程挡住 ——
-         * 上限 3 秒，且 URLSession 的回调在后台队列，不会和主线程互锁。
-         */
-        let done = DispatchSemaphore(value: 0)
-        let session = IsolatedHTTPClient.session(for: request)
-        session.dataTask(with: request) { _, _, _ in
-            session.finishTasksAndInvalidate()
-            done.signal()
-        }.resume()
-        _ = done.wait(timeout: .now() + 3)
+        // 睡眠和退出必须同步等。观察者返回后系统就接着睡了，异步任务来不及跑完。
+        // 上限 3 秒，URLSession 的回调在后台队列，不会和主线程互锁。
+        TelemetryPoster.sendBlocking(request)
     }
 
     /**

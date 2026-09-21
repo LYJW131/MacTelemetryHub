@@ -35,6 +35,13 @@ extension View {
     }
 }
 
+enum LocalHTTPStatusText {
+    static func sentence(enabled: Bool, listening: Bool) -> String {
+        if !enabled { return "本地 HTTP 已关闭" }
+        return listening ? "本地 HTTP 正在监听" : "本地 HTTP 未启动"
+    }
+}
+
 enum StatusBadgeStyle {
     case info, success, warning, error, neutral
 

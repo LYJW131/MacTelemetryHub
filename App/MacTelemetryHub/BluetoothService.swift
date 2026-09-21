@@ -94,8 +94,8 @@ final class BluetoothService: NSObject, ObservableObject {
     private var streamIdleTimeout: Duration { slot.streamIdleTimeout }
     private var streamStallTimeout: Duration { slot.streamStallTimeout }
 
-    private var crypto = A2687CryptoContext()
-    private var assembler = FrameAssembler()
+    /// 切帧和解密。握手开始时整段换新；发送仍用同一份会话密钥。
+    private var pipeline = A2687NotificationPipeline()
     private var handshakeTask: Task<Void, Never>?
     private var streamWatchdogTask: Task<Void, Never>?
     /// Monotonic stamp of the last decoded frame — the only liveness signal
@@ -421,7 +421,7 @@ final class BluetoothService: NSObject, ObservableObject {
         self.peripheral = nil
         writeCharacteristic = nil
         notifyCharacteristic = nil
-        assembler.reset()
+        pipeline.assembler.reset()
         manager?.delegate = nil
         central = nil
         connectingSince = nil
@@ -635,8 +635,7 @@ final class BluetoothService: NSObject, ObservableObject {
     private func startHandshake() {
         guard handshakeTask == nil else { return }
         phase = .handshaking
-        crypto = A2687CryptoContext()
-        assembler.reset()
+        pipeline.resetSession()
         handshakeTask = Task { [weak self] in
             guard let self else { return }
             do {
@@ -686,7 +685,7 @@ final class BluetoothService: NSObject, ObservableObject {
             throw BLEError.missingDeviceKey
         }
         let material = try ecdh.derive(deviceCoordinates: deviceKey)
-        try crypto.setSession(key: material.key, nonce: material.nonce)
+        try pipeline.crypto.setSession(key: material.key, nonce: material.nonce)
         try await Task.sleep(for: .milliseconds(120))
 
         for step in try A2687Protocol.postSessionSteps(userID: userID) {
@@ -863,7 +862,7 @@ final class BluetoothService: NSObject, ObservableObject {
             throw BLEError.disconnected
         }
         let plaintext = try A2687Protocol.buildTLV(fields)
-        let ciphertext = try crypto.encrypt(plaintext)
+        let ciphertext = try pipeline.crypto.encrypt(plaintext)
         let frame = A2687Protocol.buildFrame(group: group, command: command, ciphertext: ciphertext)
         capture("tx", command: command, ["group": Int(group), "raw": frame.hexString])
         peripheral.writeValue(frame, for: writeCharacteristic, type: .withoutResponse)
@@ -898,41 +897,23 @@ final class BluetoothService: NSObject, ObservableObject {
     private func handleNotification(_ data: Data) {
         // 抓在切帧之前：如果问题出在切帧本身，切完再抓就什么都看不到了。
         capture("notify", command: 0, ["raw": data.hexString])
-        for raw in assembler.feed(data) {
-            guard let frame = A2687Protocol.parseFrame(raw) else {
-                capture("rx", command: 0, ["ok": false, "reason": "unparsed", "raw": raw.hexString])
-                continue
+        let ingested = pipeline.ingest(data)
+        for failure in ingested.failures {
+            capture("rx", command: failure.command, [
+                "ok": false, "reason": failure.reason, "raw": data.hexString,
+            ])
+            if failure.reason == "decrypt" {
+                lastError = "解密 0x\(String(format: "%04X", failure.command)) 失败"
             }
-            /**
-             * 加密位不是恒真的 —— 两台设备在这里的行为不一样。
-             *
-             * 充电头的遥测是加密的，所以这段代码原本直接 `guard frame.encrypted`，
-             * 把未加密帧全丢掉。**充电宝的 0x0300 是明文发的**：帧头之后直接就是
-             * TLV。那个 guard 于是把它每一帧都吃掉了 —— 握手能成（握手帧确实加密），
-             * 但一帧遥测都进不来，watchdog 判定停流，表现成「已连接但没数据、还偶尔
-             * 断线」。
-             *
-             * 按帧上的标志位走，不要按设备假设走。
-             */
-            let payload: Data
-            if frame.encrypted {
-                do {
-                    payload = try crypto.decrypt(frame.body)
-                } catch {
-                    capture("rx", command: frame.command, ["ok": false, "reason": "decrypt", "raw": raw.hexString])
-                    lastError = "解密 0x\(String(format: "%04X", frame.command)) 失败：\(error.localizedDescription)"
-                    continue
-                }
-            } else {
-                payload = frame.body
-            }
+        }
+        for frame in ingested.frames {
             capture("rx", command: frame.command, [
                 "enc": frame.encrypted, "ack": frame.acknowledged, "ok": true,
-                "plain": payload.hexString, "raw": raw.hexString,
+                "plain": frame.payload.hexString, "raw": frame.raw.hexString,
             ])
             // 任何一帧收到都证明会话还活着，包括握手回复和不带端口数据的空 ack。
             lastFrameAt = .now
-            if decoder.handleFrame(command: frame.command, payload: payload) {
+            if decoder.handleFrame(command: frame.command, payload: frame.payload) {
                 objectWillChange.send()
                 onStateChange?()
                 tickIdleSleep()
@@ -940,7 +921,7 @@ final class BluetoothService: NSObject, ObservableObject {
             if let pending, pending.command == frame.command {
                 pending.timeout.cancel()
                 self.pending = nil
-                pending.continuation.resume(returning: payload)
+                pending.continuation.resume(returning: frame.payload)
             }
         }
     }

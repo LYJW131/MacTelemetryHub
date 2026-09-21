@@ -424,6 +424,43 @@ final class AppSettings: ObservableObject {
         }
     }
 
+    /// 关设置窗口时用来判断有没有没保存的改动。登录自启和配对 UUID 当场落盘，不在这里。
+    var draftToken: SettingsDraftToken {
+        SettingsDraftToken(
+            userID: userID,
+            ankerAccount: ankerAccount,
+            ankerPassword: ankerPassword,
+            ankerAuthToken: ankerAuthToken,
+            ankerAuthExpiresAt: ankerAuthExpiresAt,
+            httpServerEnabled: httpServerEnabled,
+            httpBindAddress: httpBindAddress,
+            httpPort: httpPort,
+            postEnabled: postEnabled,
+            postURL: postURL,
+            telemetrySecret: telemetrySecret,
+            postInterval: postInterval,
+            postTimeout: postTimeout,
+            deviceID: deviceID,
+            chargerModuleEnabled: chargerModuleEnabled,
+            powerBankModuleEnabled: powerBankModuleEnabled,
+            powerBankIdleSleepEnabled: powerBankIdleSleepEnabled,
+            desktopModuleEnabled: desktopModuleEnabled,
+            desktopReportingBlacklist: desktopReportingBlacklist,
+            windowTitleApplicationWhitelist: windowTitleApplicationWhitelist,
+            appleMusicModuleEnabled: appleMusicModuleEnabled,
+            timezoneModuleEnabled: timezoneModuleEnabled,
+            vibeCodingModuleEnabled: vibeCodingModuleEnabled,
+            ccusageCLIPath: ccusageCLIPath,
+            codingSessionRefreshInterval: codingSessionRefreshInterval,
+            vibeCodingUsageRefreshInterval: vibeCodingUsageRefreshInterval,
+            vibeCodingYearRefreshInterval: vibeCodingYearRefreshInterval,
+            r2Endpoint: r2Endpoint,
+            r2Bucket: r2Bucket,
+            r2AccessKeyID: r2AccessKeyID,
+            r2SecretAccessKey: r2SecretAccessKey
+        )
+    }
+
     func setLaunchAtLogin(_ enabled: Bool) throws {
         if enabled {
             try SMAppService.mainApp.register()
@@ -436,6 +473,40 @@ final class AppSettings: ObservableObject {
     private static func firstExistingPath(_ candidates: [String]) -> String? {
         candidates.first { FileManager.default.isExecutableFile(atPath: $0) }
     }
+}
+
+struct SettingsDraftToken: Equatable {
+    var userID: String
+    var ankerAccount: String
+    var ankerPassword: String
+    var ankerAuthToken: String
+    var ankerAuthExpiresAt: TimeInterval
+    var httpServerEnabled: Bool
+    var httpBindAddress: String
+    var httpPort: Int
+    var postEnabled: Bool
+    var postURL: String
+    var telemetrySecret: String
+    var postInterval: Double
+    var postTimeout: Double
+    var deviceID: String
+    var chargerModuleEnabled: Bool
+    var powerBankModuleEnabled: Bool
+    var powerBankIdleSleepEnabled: Bool
+    var desktopModuleEnabled: Bool
+    var desktopReportingBlacklist: String
+    var windowTitleApplicationWhitelist: String
+    var appleMusicModuleEnabled: Bool
+    var timezoneModuleEnabled: Bool
+    var vibeCodingModuleEnabled: Bool
+    var ccusageCLIPath: String
+    var codingSessionRefreshInterval: Double
+    var vibeCodingUsageRefreshInterval: Double
+    var vibeCodingYearRefreshInterval: Double
+    var r2Endpoint: String
+    var r2Bucket: String
+    var r2AccessKeyID: String
+    var r2SecretAccessKey: String
 }
 
 enum SettingsError: LocalizedError {

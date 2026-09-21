@@ -39,11 +39,11 @@ class CodingUsageMonitor: ObservableObject {
     }
 
     func refresh<T: Encodable & Sendable>(
-        _ work: @escaping @MainActor () async throws -> (T, String?)
+        _ work: @escaping @MainActor () async throws -> (T, String?),
+        comparable: ((JSONValue) -> JSONValue)? = nil
     ) async -> Bool {
         guard !refreshing else { return false }
         refreshing = true
-        lastAttempt = Date()
         let startedGeneration = generation
         defer {
             if generation == startedGeneration { refreshing = false; collectionTask = nil }
@@ -59,7 +59,11 @@ class CodingUsageMonitor: ObservableObject {
                 operation: { try await task.value }, onCancel: { task.cancel() }
             )
             guard generation == startedGeneration, !Task.isCancelled else { return false }
-            if payload != uploadPayload {
+            // 间隔从这次结束算起。采集本身若已超过间隔，下一圈 5 秒 tick 不该立刻再开一轮。
+            lastAttempt = Date()
+            let signature = comparable?(payload) ?? payload
+            let previous = uploadPayload.map { comparable?($0) ?? $0 }
+            if signature != previous {
                 uploadPayload = payload
                 payloadUpdatedAt = Date()
                 onChange?()
@@ -72,6 +76,7 @@ class CodingUsageMonitor: ObservableObject {
                 if error is CancellationError || Task.isCancelled {
                     lastAttempt = nil
                 } else {
+                    lastAttempt = Date()
                     lastError = error.localizedDescription
                 }
             }
@@ -106,10 +111,23 @@ final class CodingSessionMonitor: CodingUsageMonitor {
 
     @discardableResult
     func refreshNow(ccusageCLIPath: String) async -> Bool {
-        await refresh {
+        await refresh({
             let result = try await usageEngine.refreshSessions(executableURL: URL(fileURLWithPath: ccusageCLIPath))
             return (result.snapshot.now, result.errors.isEmpty ? nil : result.errors.joined(separator: "；"))
-        }
+        }, comparable: Self.ignoringScanClock)
+    }
+}
+
+extension CodingSessionMonitor {
+    /// 滚动窗口的起止和采集时刻每扫一次都变，用量窗口本身没变就不该再上报。
+    fileprivate static func ignoringScanClock(_ value: JSONValue) -> JSONValue {
+        guard case var .object(object) = value else { return value }
+        guard case var .object(usage) = object["tokenUsage"] else { return value }
+        usage.removeValue(forKey: "from")
+        usage.removeValue(forKey: "to")
+        usage.removeValue(forKey: "collectedAt")
+        object["tokenUsage"] = .object(usage)
+        return .object(object)
     }
 }
 

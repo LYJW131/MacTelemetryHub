@@ -81,6 +81,10 @@ struct ReportInputs: Sendable {
     var chargerStructural: ChargingDevicesStructuralSignature? {
         charger.map(ChargingDevicesStructuralSignature.init)
     }
+    /// 节流用的显示内容。不含 `updatedAt`。
+    var chargerContent: ChargingDevicesContentSignature? {
+        charger.map(ChargingDevicesContentSignature.init)
+    }
     var desktopSignature: DesktopUploadSignature? { desktop.map(DesktopUploadSignature.init) }
     var timezoneSignature: TimeZoneUploadSignature? { timezone.map(TimeZoneUploadSignature.init) }
     var musicSignature: AppleMusicUploadSignature? { music.map(AppleMusicUploadSignature.init) }
@@ -209,7 +213,9 @@ struct ReportDecision: Sendable {
         let music = inputs.music
         let musicSignature = inputs.musicSignature
 
-        let chargerChanged = charger != nil && charger != lastPosted.chargingDevices
+        // 不拿整份载荷相等：`updatedAt` 每帧都变，安静连接会被打成按间隔轮询。
+        let chargerChanged = inputs.chargerContent != nil
+            && inputs.chargerContent != lastPosted.chargingContent
         // 三态：没有前台应用 / 命中黑名单（只发一次虚拟应用）/ 正常身份变化。
         // 单靠 Optional 分不出「尚未发过」和「已发隐藏态」，所以另有一个标志位。
         let desktopChanged = inputs.capturedDesktop != nil && (
@@ -253,7 +259,9 @@ struct ReportDecision: Sendable {
         func hasPayload(_ kind: ReportPayloadKind) -> Bool {
             switch kind {
             case .chargingDevices: charger != nil
-            case .desktop: desktop != nil
+            // 黑名单前台发的是虚拟应用，仍然有载荷。按钮和循环必须同一套判断，
+            // 否则手动上报会被摘成「没有数据」，自动路径却把隐藏态发出去。
+            case .desktop: inputs.capturedDesktop != nil
             case .timezone: timezone != nil
             case .appleMusic: music != nil
             // 两份任一有值就能发：用量还没采到时，「此刻在不在用」也值得单独发
@@ -361,7 +369,11 @@ struct ReportDecision: Sendable {
             burst.dueAt = now.addingTimeInterval(Self.chargingBurstInterval)
         }
         self.chargingBurst = burst
-        let chargerUrgent = !manualMode && (chargerStructuralChanged || chargingBurstDue)
+        // 封面对象键到了就该马上补上。它不在结构指纹里，否则要干等一个节流窗口，
+        // 网页一直看着无图版本。功率滚动不会让这个键变。
+        let coverKey = chargerCoverObjectKey(charger)
+        let coverKeyUrgent = coverKey != nil && coverKey != chargerCoverObjectKey(lastPosted.chargingDevices)
+        let chargerUrgent = !manualMode && (chargerStructuralChanged || chargingBurstDue || coverKeyUrgent)
         // 退避期内一律不放行。否则服务端挂掉时，未推进的 lastPosted 会让
         // urgent 一直为真，即时上报就变成每圈一次的重试风暴。
         urgent = (manualMode || musicUrgent || desktopUrgent || timezoneUrgent ||
@@ -370,5 +382,9 @@ struct ReportDecision: Sendable {
         // 醒来那一下这些变化仍然是 urgent，会立刻补发。
         shouldPost = !inputs.suspended && now >= backoffUntil &&
             (manualMode || urgent || now >= nextPostAt)
+    }
+
+    private func chargerCoverObjectKey(_ payload: ChargingDevicesPayload?) -> String? {
+        payload?.devices.first { $0.kind == .charger }?.cover?.iconObjectKey
     }
 }

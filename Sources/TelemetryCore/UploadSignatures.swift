@@ -70,6 +70,98 @@ struct ChargingDevicesStructuralSignature: Equatable {
     }
 }
 
+/**
+ * 「显示内容变了没有」。
+ *
+ * 节流窗口看的是这一份，不看整份 `ChargingDevicesPayload`。载荷里的
+ * `updatedAt` 每一帧都在走，拿结构体相等当变化会让安静的连接也每到
+ * 发送间隔就打一包。功率、电压、电流、电量、温度、封面对象键都算显示
+ * 内容；时间戳和只在连接时出现一次的电池健康度不算。
+ *
+ * 插拔仍然只看 `ChargingDevicesStructuralSignature`，不进这里。
+ */
+struct ChargingDevicesContentSignature: Equatable {
+    private struct Port: Equatable {
+        let name: String
+        let active: Bool
+        let direction: String?
+        let voltageV: Double?
+        let currentA: Double?
+        let powerW: Double?
+        let attached: Bool?
+        let cable: String?
+        let chargingInfo: String?
+        let deviceModel: String?
+        let vendor: String?
+
+        init(_ port: DevicePortPayload) {
+            name = port.name
+            active = port.active
+            direction = port.direction
+            voltageV = port.voltageV
+            currentA = port.currentA
+            powerW = port.powerW
+            attached = port.attached
+            cable = port.cable
+            chargingInfo = port.chargingInfo
+            deviceModel = port.attachedDevice?.model
+            vendor = port.attachedDevice?.vendor
+        }
+    }
+
+    private struct Battery: Equatable {
+        let percent: Double?
+        let charging: Bool?
+        let timeToFullMinutes: Int?
+        let thermalLimited: Bool?
+
+        init(_ battery: BatteryPayload) {
+            percent = battery.percent
+            charging = battery.charging
+            timeToFullMinutes = battery.timeToFullMinutes
+            thermalLimited = battery.thermalLimited
+        }
+    }
+
+    private struct Device: Equatable {
+        let id: String
+        let kind: ChargingDeviceKind
+        let model: String?
+        let connected: Bool
+        let firmware: String?
+        let totalInputW: Double?
+        let totalOutputW: Double?
+        let battery: Battery?
+        let temperaturesC: [Int]?
+        let ports: [Port]
+        let coverName: String?
+        let coverIconHash: String?
+        let coverIconObjectKey: String?
+
+        init(_ device: ChargingDevicePayload) {
+            id = device.id
+            kind = device.kind
+            model = device.model
+            connected = device.connected
+            firmware = device.firmware
+            totalInputW = device.totalInputW
+            totalOutputW = device.totalOutputW
+            battery = device.battery.map(Battery.init)
+            temperaturesC = device.temperaturesC
+            ports = device.ports.map(Port.init)
+            coverName = device.cover?.name
+            coverIconHash = device.cover?.iconHash
+            coverIconObjectKey = device.cover?.iconObjectKey
+        }
+    }
+
+    private let devices: [Device]
+
+    init(_ payload: ChargingDevicesPayload) {
+        devices = payload.devices.map(Device.init)
+    }
+}
+
 struct DesktopUploadSignature: Equatable {
     let applicationName: String
     let bundleIdentifier: String?

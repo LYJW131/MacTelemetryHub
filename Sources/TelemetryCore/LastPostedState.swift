@@ -18,6 +18,8 @@ struct LastPostedState {
     var vibeCodingNowAt: Date?
     var vibeCodingYearAt: Date?
     var chargingDevices: ChargingDevicesPayload?
+    /// 显示内容门闩。和上面那份载荷分开，是为了不让 `updatedAt` 参与「变没变」。
+    var chargingContent: ChargingDevicesContentSignature?
     /// 只跟结构性变化比，管的是「要不要即时发」，不管「要不要带 charger 模块」
     var chargingStructural: ChargingDevicesStructuralSignature?
     var desktop: DesktopUploadSignature?
@@ -69,6 +71,7 @@ extension LastPostedState {
 
         if decision.chargerToSend {
             chargingDevices = inputs.charger
+            chargingContent = inputs.chargerContent
             if response.chargerCoverIconAvailable == false {
                 effects.coverIconRejected = true
                 effects.sentCoverHadObjectKey = inputs.charger?.devices

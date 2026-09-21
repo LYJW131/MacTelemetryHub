@@ -23,12 +23,17 @@ public struct CcusageCollector: Sendable {
         self.sourceIDs = sourceIDs; self.timeout = timeout; self.offline = offline
     }
 
+    /// `cursor` 是云端账号，不是 ccusage 来源。发现结果里若出现同名 id，不能并进本地采集。
+    static func sources(requested: [String], discovered: Set<String>) -> [String] {
+        Set(requested).union(discovered).subtracting(["cursor"]).sorted()
+    }
+
     public func collect(at now: Date = Date()) async -> [CodingUsageSourceResult] {
         let available = await availableSources()
         let (discovered, discoveryError) = await discoveredSources(useCache: false)
-        let requested = Set(sourceIDs).union(discovered)
+        let requested = Self.sources(requested: sourceIDs, discovered: discovered)
         return await withTaskGroup(of: CodingUsageSourceResult.self, returning: [CodingUsageSourceResult].self) { group in
-            for source in requested.sorted() {
+            for source in requested {
                 group.addTask {
                     if let available, !available.contains(source) {
                         return .failure(sourceID: source, message: "当前 ccusage 版本不支持此来源", unavailable: true)
@@ -70,7 +75,7 @@ public struct CcusageCollector: Sendable {
         let available = await availableSources()
         let (discovered, _) = await discoveredSources(useCache: true)
         return await withTaskGroup(of: CodingUsageSessionsResult.self, returning: [CodingUsageSessionsResult].self) { group in
-            for source in Set(sourceIDs).union(discovered).sorted() {
+            for source in Self.sources(requested: sourceIDs, discovered: discovered) {
                 group.addTask {
                     if let available, !available.contains(source) {
                         return .failure(sourceID: source, message: "当前 ccusage 版本不支持 \(source)", unavailable: true)

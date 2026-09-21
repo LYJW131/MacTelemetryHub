@@ -58,32 +58,23 @@ struct DashboardView: View {
     /// 设置是采集模块的开关，界面到处都在读它。ServiceController 不会把它的
     /// @Published 冒泡上来，得单独订阅，否则改了开关这一页要等别的东西触发才更新。
     @ObservedObject private var settings: AppSettings
-    @ObservedObject private var chargerLink: BluetoothService
-    @ObservedObject private var covers: ChargerCoverController
-    @ObservedObject private var powerBankLink: BluetoothService
-    @ObservedObject private var httpServer: LocalHTTPServer
-    @ObservedObject private var desktopActivity: DesktopActivityMonitor
-    @ObservedObject private var appleMusic: AppleMusicMonitor
-    // 两张卡各看一个采集器，两个都得单独订阅：ServiceController 是 ObservableObject，
-    // 但它内部这几个 monitor 的 @Published 不会冒泡上来。从前会话状态那行的错误
-    // 就是这么挂在 service 下面读的，只有别的东西触发重绘时才会跟着变。
-    @ObservedObject private var vibeCodingUsageCollector: VibeCodingUsageMonitor
-    @ObservedObject private var codingSessions: CodingSessionMonitor
-    @ObservedObject private var vibeCodingYearCollector: VibeCodingYearMonitor
     @State private var selection: DashboardSection = .overview
+
+    // 子对象的 @Published 不会冒泡。这里不订阅它们：蓝牙大约 1 Hz 一帧，
+    // 挂在窗口根上会把总览、设置无关的卡片一起重算。需要刷新的叶子各自包一层。
+    private var chargerLink: BluetoothService { service.chargerLink }
+    private var covers: ChargerCoverController { service.covers }
+    private var powerBankLink: BluetoothService { service.powerBankLink }
+    private var httpServer: LocalHTTPServer { service.httpServer }
+    private var desktopActivity: DesktopActivityMonitor { service.desktopActivity }
+    private var appleMusic: AppleMusicMonitor { service.appleMusic }
+    private var vibeCodingUsageCollector: VibeCodingUsageMonitor { service.vibeCodingUsageCollector }
+    private var codingSessions: CodingSessionMonitor { service.codingSessions }
+    private var vibeCodingYearCollector: VibeCodingYearMonitor { service.vibeCodingYearCollector }
 
     init(service: ServiceController) {
         self.service = service
         settings = service.settings
-        chargerLink = service.chargerLink
-        covers = service.covers
-        powerBankLink = service.powerBankLink
-        httpServer = service.httpServer
-        desktopActivity = service.desktopActivity
-        appleMusic = service.appleMusic
-        vibeCodingUsageCollector = service.vibeCodingUsageCollector
-        codingSessions = service.codingSessions
-        vibeCodingYearCollector = service.vibeCodingYearCollector
     }
 
     var body: some View {
@@ -97,8 +88,9 @@ struct DashboardView: View {
         .task {
             await covers.refresh(force: false)
         }
-        .onChange(of: chargerLink.chargerStateForDisplay.device.serialNumber) { _, _ in
-            Task { await covers.refresh(force: false) }
+        .background {
+            // 总览页也要在序列号变化时拉封面，所以这个观察不放进充电头那一页。
+            ChargerSerialRefresh(link: chargerLink, covers: covers)
         }
     }
 
@@ -122,24 +114,11 @@ struct DashboardView: View {
             }
 
             Section("连接") {
-                chargingLinkStatusRow(chargerLink)
-                chargingLinkStatusRow(powerBankLink)
-
-                HStack(spacing: 8) {
-                    Circle()
-                        .fill(!settings.httpServerEnabled ? Color.secondary : httpServer.listeningURL == nil ? .orange : .green)
-                        .frame(width: PanelMetrics.statusDot, height: PanelMetrics.statusDot)
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text(localHTTPStatusText)
-                            .font(.callout.weight(.medium))
-                        Text(httpServer.listeningDescription
-                             ?? (settings.httpServerEnabled ? "在设置中检查地址和端口" : "远端上报继续运行"))
-                            .font(.caption2.monospaced())
-                            .foregroundStyle(.secondary)
-                            .lineLimit(1)
-                    }
+                Refreshing(object: chargerLink) { chargingLinkStatusRow(chargerLink) }
+                Refreshing(object: powerBankLink) { chargingLinkStatusRow(powerBankLink) }
+                Refreshing(object: httpServer) {
+                    localHTTPRow
                 }
-                .padding(.vertical, 3)
             }
         }
         .listStyle(.sidebar)
@@ -162,10 +141,30 @@ struct DashboardView: View {
         }
     }
 
+    private var localHTTPRow: some View {
+        HStack(spacing: 8) {
+                    Circle()
+                        .fill(!settings.httpServerEnabled ? Color.secondary : httpServer.listeningURL == nil ? .orange : .green)
+                        .frame(width: PanelMetrics.statusDot, height: PanelMetrics.statusDot)
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(localHTTPStatusText)
+                            .font(.callout.weight(.medium))
+                        Text(httpServer.listeningDescription
+                             ?? (settings.httpServerEnabled ? "在设置中检查地址和端口" : "远端上报继续运行"))
+                            .font(.caption2.monospaced())
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                    }
+                }
+                .padding(.vertical, 3)
+    }
+
     /// 三个页面共用一套本地 HTTP 三态文案，侧栏、页脚、设置页说的必须是同一句话。
     private var localHTTPStatusText: String {
-        if !settings.httpServerEnabled { return "本地 HTTP 已关闭" }
-        return httpServer.listeningURL == nil ? "本地 HTTP 未启动" : "本地 HTTP 正在监听"
+        LocalHTTPStatusText.sentence(
+            enabled: settings.httpServerEnabled,
+            listening: httpServer.listeningURL != nil
+        )
     }
 
     private var detail: some View {
@@ -184,9 +183,11 @@ struct DashboardView: View {
                     case .overview:
                         overviewContent
                     case .charger:
-                        chargerContent
+                        Refreshing(object: chargerLink) {
+                            Refreshing(object: covers) { chargerContent }
+                        }
                     case .powerBank:
-                        powerBankContent
+                        Refreshing(object: powerBankLink) { powerBankContent }
                     }
                 }
                 .frame(maxWidth: 980, alignment: .topLeading)
@@ -285,7 +286,7 @@ struct DashboardView: View {
                 moduleGrid
             }
 
-            footer
+            Refreshing(object: httpServer) { footer }
         }
     }
 
@@ -422,11 +423,7 @@ struct DashboardView: View {
 
     /// 进度条右侧那行。充电宝没有「额定上限」可写，写当前收放电更有信息量。
     private func powerBankFlowText(_ state: PowerBankState) -> String {
-        let input = state.inputPowerW ?? 0
-        let output = state.outputPowerW ?? 0
-        if input > 0.05 { return String(format: "输入 %.1f W", input) }
-        if output > 0.05 { return String(format: "输出 %.1f W", output) }
-        return "待机"
+        powerBankFlowLabel(state)
     }
 
     private func powerBankTimeText(_ state: PowerBankState) -> String? {
@@ -489,27 +486,20 @@ struct DashboardView: View {
         }
         if !powerBankLink.isConnected { return powerBankLink.phase.label }
         if state.isThermallyLimited { return "过热受限，暂不充电" }
-        if let input = state.inputPowerW, input > 0.05 {
-            return String(format: "输入 %.1f W", input)
-        }
-        if let output = state.outputPowerW, output > 0.05 {
-            return String(format: "输出 %.1f W", output)
-        }
-        return "待机"
+        return powerBankFlowLabel(state)
     }
 
     private var moduleGrid: some View {
         LazyVGrid(columns: [GridItem(.flexible(), spacing: 12), GridItem(.flexible(), spacing: 12)], spacing: 12) {
-            desktopModuleCard
-            appleMusicModuleCard
-            timezoneModuleCard
-            // Vibe coding 一行拆三行，一个采集器一行，也正好是一个上报模块一行：
-            // 「此刻在不在用」60 秒一轮，用量十分钟一轮，两边的失败原因互不相干。
-            vibeCodingSessionCard
-            vibeCodingUsageCard
-            vibeCodingYearCard
-            chargerModuleCard
-            powerBankModuleCard
+            Refreshing(object: desktopActivity) { desktopModuleCard }
+            Refreshing(object: appleMusic) { appleMusicModuleCard }
+            Refreshing(object: service.timeZone) { timezoneModuleCard }
+            // 会话和用量共用一个手动上报模块，卡片却各看各的采集器。
+            Refreshing(object: codingSessions) { vibeCodingSessionCard }
+            Refreshing(object: vibeCodingUsageCollector) { vibeCodingUsageCard }
+            Refreshing(object: vibeCodingYearCollector) { vibeCodingYearCard }
+            Refreshing(object: chargerLink) { chargerModuleCard }
+            Refreshing(object: powerBankLink) { powerBankModuleCard }
         }
     }
 
@@ -959,6 +949,28 @@ struct DashboardView: View {
     }
 }
 
+/// 只让这一小块跟着某个 ObservableObject 重绘。窗口根上不订阅它。
+private struct Refreshing<Object: ObservableObject, Content: View>: View {
+    @ObservedObject var object: Object
+    @ViewBuilder var content: () -> Content
+
+    var body: some View { content() }
+}
+
+/// 充电头序列号变化时拉封面。挂在窗口上，不限于当前打开的是哪一页。
+private struct ChargerSerialRefresh: View {
+    @ObservedObject var link: BluetoothService
+    let covers: ChargerCoverController
+
+    var body: some View {
+        Color.clear
+            .frame(width: 0, height: 0)
+            .onChange(of: link.chargerStateForDisplay.device.serialNumber) { _, _ in
+                Task { await covers.refresh(force: false) }
+            }
+    }
+}
+
 private struct EmptyModuleView: View {
     let title: String
     let detail: String
@@ -985,6 +997,15 @@ private struct EmptyModuleView: View {
         .frame(maxWidth: .infinity, minHeight: 220)
         .panelBackground()
     }
+}
+
+/// 0.05 W 以下当成待机。总览卡和充电宝大数字共用这一句，避免两处阈值慢慢岔开。
+private func powerBankFlowLabel(_ state: PowerBankState) -> String {
+    let input = state.inputPowerW ?? 0
+    let output = state.outputPowerW ?? 0
+    if input > 0.05 { return String(format: "输入 %.1f W", input) }
+    if output > 0.05 { return String(format: "输出 %.1f W", output) }
+    return "待机"
 }
 
 private func formatUTCOffset(_ seconds: Int) -> String {

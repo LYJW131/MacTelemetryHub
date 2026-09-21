@@ -65,6 +65,7 @@ private struct MenuBarLabel: View {
 
 private struct MenuBarView: View {
     @ObservedObject var service: ServiceController
+    @ObservedObject private var settings: AppSettings
     @ObservedObject private var chargerLink: BluetoothService
     @ObservedObject private var powerBankLink: BluetoothService
     /// 单独订阅：ServiceController 是 ObservableObject，但它内部这个 monitor 的
@@ -74,6 +75,7 @@ private struct MenuBarView: View {
 
     init(service: ServiceController) {
         self.service = service
+        settings = service.settings
         chargerLink = service.chargerLink
         powerBankLink = service.powerBankLink
         desktopActivity = service.desktopActivity
@@ -83,7 +85,7 @@ private struct MenuBarView: View {
         Text("Mac Telemetry Hub")
         // 正在用的那个应用。菜单栏的菜单弹出来不会把本应用变成前台，所以这里
         // 读到的仍是用户真正在用的那个。
-        if service.settings.desktopModuleEnabled {
+        if settings.desktopModuleEnabled {
             Label {
                 Text(foregroundActivityLabel)
                     .lineLimit(1)
@@ -118,7 +120,7 @@ private struct MenuBarView: View {
 
     @ViewBuilder
     private func chargingMenuStatus(_ link: BluetoothService) -> some View {
-        if link.slot.isEnabled(service.settings) {
+        if link.slot.isEnabled(settings) {
             Text("\(link.slot.displayName) · \(link.phase.label)")
             if let power = link.chargerState?.totalOutputPowerW {
                 Text(String(format: "总输出 %.2f W", power))
@@ -131,7 +133,7 @@ private struct MenuBarView: View {
 
     @ViewBuilder
     private func chargingMenuActions(_ link: BluetoothService) -> some View {
-        if link.slot.isEnabled(service.settings) {
+        if link.slot.isEnabled(settings) {
             // 判据跟控制面板保持一致：没连上就没什么可断的。desiredConnection 只是
             // 「想连」，链路正在重试时它也是 true，菜单里那一项就一直亮着。
             Button("断开\(link.slot.displayName)", systemImage: "bolt.slash") { link.disconnect() }

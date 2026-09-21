@@ -64,9 +64,6 @@ private struct RunningApplicationChoice: Identifiable {
 struct SettingsView: View {
     @ObservedObject var service: ServiceController
     @ObservedObject private var settings: AppSettings
-    @ObservedObject private var covers: ChargerCoverController
-    @ObservedObject private var desktopActivity: DesktopActivityMonitor
-    @ObservedObject private var appleMusicAuthorization: AppleMusicAuthorizationManager
     @Environment(\.dismiss) private var dismiss
     @State private var selection: SettingsCategory = .general
     @State private var revealUserID = false
@@ -75,20 +72,21 @@ struct SettingsView: View {
     @State private var isError = false
     /// 成功提示自己消失用的计时；每来一条新提示都要先掐掉上一条的。
     @State private var messageClearTask: Task<Void, Never>?
-    /// 有没有动过设置。只有动过才在关窗时重读一遍，避免白敲一次钥匙串。
-    @State private var hasUnsavedChanges = false
+    /// 打开窗口时的落盘内容。登录自启和配对不在里面，它们当场就写下去了。
+    @State private var baseline: SettingsDraftToken
 
-    // 两条蓝牙链路不在这一层订阅：整页会跟着每一帧遥测重绘，而这一页真正关心
-    // 链路状态的只有顶栏徽章和配对区，各自订阅自己那条就够。
+    // 这些对象的 @Published 不在这一层订阅。封面传输、前台应用、本机 HTTP
+    // 各自包在自己那一页里，否则切到上报页也会跟着重绘。
+    private var covers: ChargerCoverController { service.covers }
+    private var desktopActivity: DesktopActivityMonitor { service.desktopActivity }
+    private var appleMusicAuthorization: AppleMusicAuthorizationManager { service.appleMusicAuthorization }
     private var chargerLink: BluetoothService { service.chargerLink }
     private var powerBankLink: BluetoothService { service.powerBankLink }
 
     init(service: ServiceController) {
         self.service = service
         settings = service.settings
-        covers = service.covers
-        desktopActivity = service.desktopActivity
-        appleMusicAuthorization = service.appleMusicAuthorization
+        _baseline = State(initialValue: service.settings.draftToken)
     }
 
     var body: some View {
@@ -134,8 +132,6 @@ struct SettingsView: View {
         }
         .navigationSplitViewStyle(.balanced)
         .frame(minWidth: 780, minHeight: 500)
-        // 界面直接绑在 settings 上，所以任何一次输入都已经改了内存里的值
-        .onReceive(settings.objectWillChange) { _ in hasUnsavedChanges = true }
         .onDisappear {
             chargerLink.stopPairingScan()
             powerBankLink.stopPairingScan()
@@ -185,11 +181,21 @@ struct SettingsView: View {
         case .general:
             generalSettings
         case .sources:
-            sourceSettings
+            // 只有这一页订阅前台应用和 MusicKit 状态。
+            SettingsSourcesRefresh(
+                desktopActivity: desktopActivity,
+                authorization: appleMusicAuthorization
+            ) {
+                sourceSettings
+            }
         case .charger:
-            chargerSettings
+            SettingsChargerRefresh(covers: covers) {
+                chargerSettings
+            }
         case .local:
-            localSettings
+            SettingsLocalRefresh(server: service.httpServer) {
+                localSettings
+            }
         case .reporting:
             reportingSettings
         }
@@ -666,7 +672,10 @@ struct SettingsView: View {
                     Circle()
                         .fill(!settings.httpServerEnabled ? Color.secondary : service.httpServer.listeningURL == nil ? .orange : .green)
                         .frame(width: 7, height: 7)
-                    Text(!settings.httpServerEnabled ? "本地 HTTP 已关闭" : service.httpServer.listeningURL == nil ? "本地 HTTP 未启动" : "本地 HTTP 正在监听")
+                    Text(LocalHTTPStatusText.sentence(
+                        enabled: settings.httpServerEnabled,
+                        listening: service.httpServer.listeningURL != nil
+                    ))
                         .font(.callout.weight(.medium))
                     Spacer()
                     if let url = service.httpServer.listeningURL {
@@ -857,7 +866,7 @@ struct SettingsView: View {
     private func saveSettings() async {
         do {
             try service.applySettings()
-            hasUnsavedChanges = false
+            baseline = settings.draftToken
             show("设置已保存。", failed: false)
         } catch {
             // 报错的字段在哪一页就跳到哪一页，否则底栏那行红字看起来毫无来由。
@@ -914,10 +923,33 @@ struct SettingsView: View {
     }
 
     private func rollbackUnsavedChanges() {
-        guard hasUnsavedChanges else { return }
-        hasUnsavedChanges = false
+        guard settings.draftToken != baseline else { return }
         settings.reload()
+        baseline = settings.draftToken
     }
+}
+
+/// 设置页里需要跟着子对象刷新的那一块。父视图不订阅这些对象。
+private struct SettingsSourcesRefresh<Content: View>: View {
+    @ObservedObject var desktopActivity: DesktopActivityMonitor
+    @ObservedObject var authorization: AppleMusicAuthorizationManager
+    @ViewBuilder var content: () -> Content
+
+    var body: some View { content() }
+}
+
+private struct SettingsChargerRefresh<Content: View>: View {
+    @ObservedObject var covers: ChargerCoverController
+    @ViewBuilder var content: () -> Content
+
+    var body: some View { content() }
+}
+
+private struct SettingsLocalRefresh<Content: View>: View {
+    @ObservedObject var server: LocalHTTPServer
+    @ViewBuilder var content: () -> Content
+
+    var body: some View { content() }
 }
 
 /// 顶栏的链路徽章。只有它订阅这条链路，整页不跟着每一帧遥测重绘。

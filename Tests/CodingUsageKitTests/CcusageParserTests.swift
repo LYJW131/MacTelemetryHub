@@ -3,6 +3,11 @@ import Testing
 @testable import CodingUsageKit
 
 struct CcusageParserTests {
+    @Test func cursorIsNotALocalSourceEvenWhenDiscovered() {
+        #expect(CcusageCollector.sources(requested: ["claude", "cursor"], discovered: ["opencode", "cursor"])
+            == ["claude", "opencode"])
+    }
+
     private let now = CodingUsageDates.parseInstant("2026-09-05T04:00:00Z")!
     private let noSessions = Data("{\"sessions\":[]}".utf8)
     private func data(_ value: Any) throws -> Data { try JSONSerialization.data(withJSONObject: value) }

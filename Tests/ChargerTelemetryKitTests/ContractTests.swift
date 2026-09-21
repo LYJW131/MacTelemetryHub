@@ -248,4 +248,15 @@ private func expectClose(_ actual: Double?, _ expected: Double?, _ label: String
     var state = PowerBankState()
     PowerBankProtocol.parseRealtime(frame.body, state: &state)
     #expect(state.batteryPercent != nil, "明文帧体应当能直接解出遥测")
+
+    // 接收路径本身也要走明文分支。只钉 parseFrame 挡不住有人再写回「非加密就丢弃」。
+    var pipeline = A2687NotificationPipeline()
+    let ingested = pipeline.ingest(raw)
+    let decoded = try #require(ingested.frames.first)
+    #expect(ingested.failures.isEmpty)
+    #expect(decoded.encrypted == false)
+    #expect(decoded.command == 0x0300)
+    var ingestedState = PowerBankState()
+    PowerBankProtocol.parseRealtime(decoded.payload, state: &ingestedState)
+    #expect(ingestedState.batteryPercent == state.batteryPercent)
 }

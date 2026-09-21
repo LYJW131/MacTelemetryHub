@@ -49,6 +49,8 @@
 		B1000000000000000000003B /* ReportDecision.swift in Sources */ = {isa = PBXBuildFile; fileRef = F1000000000000000000003A /* ReportDecision.swift */; };
 		B1000000000000000000003C /* LastPostedState.swift in Sources */ = {isa = PBXBuildFile; fileRef = F1000000000000000000003B /* LastPostedState.swift */; };
 		B1000000000000000000003D /* IconUploadCoordinator.swift in Sources */ = {isa = PBXBuildFile; fileRef = F1000000000000000000003C /* IconUploadCoordinator.swift */; };
+		B10000000000000000000037 /* A2687NotificationPipeline.swift in Sources */ = {isa = PBXBuildFile; fileRef = F10000000000000000000036 /* A2687NotificationPipeline.swift */; };
+		B1000000000000000000003E /* TelemetryPoster.swift in Sources */ = {isa = PBXBuildFile; fileRef = F1000000000000000000003D /* TelemetryPoster.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -96,6 +98,8 @@
 		F1000000000000000000003A /* ReportDecision.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ReportDecision.swift; sourceTree = "<group>"; };
 		F1000000000000000000003B /* LastPostedState.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LastPostedState.swift; sourceTree = "<group>"; };
 		F1000000000000000000003C /* IconUploadCoordinator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = IconUploadCoordinator.swift; sourceTree = "<group>"; };
+		F10000000000000000000036 /* A2687NotificationPipeline.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = A2687NotificationPipeline.swift; sourceTree = "<group>"; };
+		F1000000000000000000003D /* TelemetryPoster.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TelemetryPoster.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -156,6 +160,7 @@
 				F10000000000000000000038 /* AppleMusicCredentialStore.swift */,
 				F10000000000000000000039 /* ServiceController+LocalAPI.swift */,
 				F1000000000000000000003C /* IconUploadCoordinator.swift */,
+				F1000000000000000000003D /* TelemetryPoster.swift */,
 			);
 			path = App/MacTelemetryHub;
 			sourceTree = SOURCE_ROOT;
@@ -172,6 +177,7 @@
 				F10000000000000000000022 /* AnkerPrimeSpec.swift */,
 				F10000000000000000000025 /* DesktopReportingBlacklist.swift */,
 				F10000000000000000000026 /* AnkerPassportCrypto.swift */,
+				F10000000000000000000036 /* A2687NotificationPipeline.swift */,
 			);
 			path = Sources/ChargerTelemetryKit;
 			sourceTree = SOURCE_ROOT;
@@ -301,6 +307,8 @@
 				B1000000000000000000003B /* ReportDecision.swift in Sources */,
 				B1000000000000000000003C /* LastPostedState.swift in Sources */,
 				B1000000000000000000003D /* IconUploadCoordinator.swift in Sources */,
+				B10000000000000000000037 /* A2687NotificationPipeline.swift in Sources */,
+				B1000000000000000000003E /* TelemetryPoster.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

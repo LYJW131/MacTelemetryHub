@@ -67,7 +67,9 @@ struct ReportDecisionTests {
     private func charger(
         kind: ChargingDeviceKind = .charger,
         attached: Bool = true,
-        powerW: Double = 45
+        powerW: Double = 45,
+        updatedAt: TimeInterval = 1_789_099_506,
+        cover: CoverPayload? = nil
     ) -> ChargingDevicesPayload {
         ChargingDevicesPayload(devices: [
             ChargingDevicePayload(
@@ -75,7 +77,7 @@ struct ReportDecisionTests {
                 kind: kind,
                 model: "A2687",
                 connected: true,
-                updatedAt: 1_789_099_506,
+                updatedAt: updatedAt,
                 firmware: "1.0.0",
                 totalOutputW: powerW,
                 ports: [
@@ -91,7 +93,8 @@ struct ReportDecisionTests {
                         chargingInfo: "PD",
                         attachedDevice: AttachedDevicePayload(model: "iPhone", vendor: "Apple")
                     ),
-                ]
+                ],
+                cover: cover
             ),
         ])
     }
@@ -263,6 +266,72 @@ struct ReportDecisionTests {
         #expect(decision.chargingBurst.remaining == ReportDecision.chargingBurstCount)
     }
 
+    /// 每帧都会变的时间戳不是显示内容。安静连接靠心跳续期，不按发送间隔轮询。
+    @Test func chargingTimestampAloneDoesNotPost() {
+        var lastPosted = LastPostedState()
+        let first = decide(inputs(now: t0, charger: charger(updatedAt: 1)))
+        #expect(first.chargerToSend)
+        _ = lastPosted.commit(decision: first, response: ok, desktopPayloadHasObjectKey: false)
+
+        let later = t0.addingTimeInterval(1)
+        let decision = decide(
+            inputs(now: later, charger: charger(updatedAt: 2)),
+            lastPosted: lastPosted,
+            nextPostAt: t0.addingTimeInterval(30)
+        )
+        #expect(!decision.chargerToSend)
+        #expect(!decision.urgent)
+        #expect(!decision.shouldPost)
+        #expect(!decision.shouldSendHeartbeat)
+    }
+
+    /// 瓦数变了要发，但要等节流窗口，不走插拔那条紧急路径。
+    @Test func chargingPowerChangeWaitsForTheThrottle() {
+        var lastPosted = LastPostedState()
+        let first = decide(inputs(now: t0, charger: charger(powerW: 45)))
+        _ = lastPosted.commit(decision: first, response: ok, desktopPayloadHasObjectKey: false)
+
+        let decision = decide(
+            inputs(now: t0.addingTimeInterval(1), charger: charger(powerW: 12)),
+            lastPosted: lastPosted,
+            nextPostAt: t0.addingTimeInterval(30)
+        )
+        #expect(decision.chargerToSend)
+        #expect(!decision.urgent)
+        #expect(!decision.shouldPost)
+    }
+
+    /// 封面对象键从无到有要立刻补发，不必等功率那种节流窗口。
+    @Test func chargerCoverObjectKeyArrivingIsUrgent() {
+        var lastPosted = LastPostedState()
+        let bare = charger(cover: CoverPayload(name: "猫", iconHash: "abc", iconObjectKey: nil))
+        let keyed = charger(cover: CoverPayload(name: "猫", iconHash: "abc", iconObjectKey: "abc.jpg"))
+        let first = decide(inputs(now: t0, charger: bare))
+        _ = lastPosted.commit(decision: first, response: ok, desktopPayloadHasObjectKey: false)
+
+        let decision = decide(
+            inputs(now: t0.addingTimeInterval(1), charger: keyed),
+            lastPosted: lastPosted,
+            nextPostAt: t0.addingTimeInterval(30)
+        )
+        #expect(decision.chargerToSend)
+        #expect(decision.urgent)
+        #expect(decision.shouldPost)
+    }
+
+    /// 黑名单前台的手动上报和自动路径一样，发的是隐藏态，不是「没有数据」。
+    @Test func manualDesktopOnABlacklistedAppIsSatisfiable() {
+        let decision = decide(inputs(
+            now: t0,
+            capturedDesktop: desktop(name: "1Password"),
+            desktopBlocked: true,
+            manualModules: [.desktop]
+        ))
+        #expect(decision.desktopToSend)
+        #expect(decision.unsatisfiableManualModules.isEmpty)
+        #expect(decision.manualModules == [.desktop])
+    }
+
     /**
      * 退避期内一律不放行紧急上报。
      *
@@ -367,23 +436,13 @@ struct ReportDecisionTests {
      * 载荷在按下按钮之后才消失的，当场报「没有可上报的数据」而不是挂着。
      *
      * 按钮那侧的 canRequestImmediateReport 已经查过一遍，所以能走到这里的都是
-     * 那之后才变的：蓝牙断了、前台应用切进黑名单、采集器把载荷清了。
+     * 那之后才变的：蓝牙断了、采集器把载荷清了。切进黑名单不是这种消失 ——
+     * 那一格改发隐藏态，和自动路径同一封信。
      */
     @Test func manualRequestWithoutAPayloadIsReportedUnsatisfiable() {
-        // 充电设备全断了
-        var decision = decide(inputs(now: t0, manualModules: [.powerBank]))
+        let decision = decide(inputs(now: t0, manualModules: [.powerBank]))
         #expect(decision.unsatisfiableManualModules == [.powerBank])
         #expect(!decision.chargerToSend)
-        #expect(!decision.manualMode)
-
-        // 前台应用在这一圈之前切进了黑名单：desktop 那一格是空的
-        decision = decide(inputs(
-            now: t0,
-            capturedDesktop: desktop(name: "1Password"),
-            desktopBlocked: true,
-            manualModules: [.desktop]
-        ))
-        #expect(decision.unsatisfiableManualModules == [.desktop])
         #expect(!decision.manualMode)
     }
 
