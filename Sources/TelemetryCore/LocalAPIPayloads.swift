@@ -36,9 +36,25 @@ struct HealthPayload: Encodable {
         let resolving: Bool
     }
 
+    /**
+     * 当前前台窗口标题的判断状态。
+     *
+     * `title` 只有在这一档真的会上报时才有值 —— 本地接口可以绑到 0.0.0.0，
+     * 锁定和待确认的标题不该从这里漏出去。`status` 永远都在，排查
+     * 「网页上为什么没有标题」看它就够。
+     */
+    struct WindowTitle: Encodable {
+        let status: String
+        /** 会不会随前台应用一起上报 */
+        let reportable: Bool
+        /** 只有 reportable 为真时才有值 */
+        let title: String?
+    }
+
     let ok: Bool
     let reporter: Reporter
     let desktopIcon: DesktopIcon?
+    let windowTitle: WindowTitle
     let charger: Device
     let powerBank: Device
 }

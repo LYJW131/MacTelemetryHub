@@ -16,6 +16,17 @@ struct DesktopActivitySnapshot: Codable, Equatable, Sendable {
     let iconData: Data?
     /// 直传 R2 成功后的对象键（`<sha256>.png`），是那份字节的内容地址。
     let iconObjectKey: String?
+    /**
+     * 前台窗口的标题，已归一化（见 `WindowTitleNormalizer`）。
+     *
+     * 只有**判断放行**的标题才会落在这里。标题黑名单永不抓取；免判放行直接
+     * 进来；其余每一条都要先过 Jev，锁定 / 待确认 / 判断失败一律是 nil。
+     * 隐藏应用的快照永远为 nil —— 那份载荷里连真实应用身份都没有，更不该
+     * 带着它的标题。
+     *
+     * 缺省和 null 对站点是同一个意思：此刻没有可公开的标题。
+     */
+    let windowTitle: String?
     let observedAt: Int64
 }
 
@@ -31,6 +42,8 @@ extension DesktopActivitySnapshot {
             iconHash: nil,
             iconData: nil,
             iconObjectKey: nil,
+            // 隐藏态不带标题。它连真实应用叫什么都不说，标题更不该漏出去。
+            windowTitle: nil,
             observedAt: observedAt
         )
     }
@@ -42,6 +55,7 @@ extension DesktopActivitySnapshot {
             iconHash: iconHash,
             iconData: iconData,
             iconObjectKey: iconObjectKey,
+            windowTitle: windowTitle,
             observedAt: observedAt
         )
     }

@@ -23,7 +23,9 @@ final class AppSettings: ObservableObject {
         static let chargerModuleEnabled = "chargerModuleEnabled"
         static let desktopModuleEnabled = "desktopModuleEnabled"
         static let desktopReportingBlacklist = "desktopReportingBlacklist"
-        static let windowTitleApplicationWhitelist = "windowTitleApplicationWhitelist"
+        static let windowTitleBlacklist = "windowTitleBlacklist"
+        static let windowTitleTrustedApplications = "windowTitleTrustedApplications"
+        static let typesafeAPIKeyAccount = "typesafe-api-key"
         static let appleMusicModuleEnabled = "appleMusicModuleEnabled"
         static let timezoneModuleEnabled = "timezoneModuleEnabled"
         static let vibeCodingModuleEnabled = "vibeCodingModuleEnabled"
@@ -68,7 +70,12 @@ final class AppSettings: ObservableObject {
     @Published var powerBankIdleSleepEnabled = true
     @Published var desktopModuleEnabled = true
     @Published var desktopReportingBlacklist = ""
-    @Published var windowTitleApplicationWhitelist = ""
+    /// 标题黑名单：这些应用的窗口标题永不读取、永不判断、永不上报。
+    @Published var windowTitleBlacklist = ""
+    /// 免判放行：这些应用的标题直接上报，不问 Jev。
+    @Published var windowTitleTrustedApplications = ""
+    /// 判断窗口标题用的 TypeSafe API key。落钥匙串，不进 UserDefaults。
+    @Published var typesafeAPIKey = ""
     @Published var appleMusicModuleEnabled = true
     @Published var timezoneModuleEnabled = true
     @Published var vibeCodingModuleEnabled = false
@@ -164,9 +171,14 @@ final class AppSettings: ObservableObject {
         powerBankIdleSleepEnabled = defaults.object(forKey: Key.powerBankIdleSleepEnabled) as? Bool ?? true
         desktopModuleEnabled = defaults.object(forKey: Key.desktopModuleEnabled) as? Bool ?? true
         desktopReportingBlacklist = defaults.string(forKey: Key.desktopReportingBlacklist) ?? ""
-        windowTitleApplicationWhitelist = defaults.string(
-            forKey: Key.windowTitleApplicationWhitelist
+        windowTitleBlacklist = defaults.string(forKey: Key.windowTitleBlacklist) ?? ""
+        windowTitleTrustedApplications = defaults.string(
+            forKey: Key.windowTitleTrustedApplications
         ) ?? ""
+        // 和 telemetrySecret 同一套：环境变量优先，其次钥匙串。
+        typesafeAPIKey = environment["TYPESAFE_API_KEY"]
+            ?? keychain.read(account: Key.typesafeAPIKeyAccount)
+            ?? ""
         appleMusicModuleEnabled = defaults.object(forKey: Key.appleMusicModuleEnabled) as? Bool ?? true
         timezoneModuleEnabled = defaults.object(forKey: Key.timezoneModuleEnabled) as? Bool ?? true
         vibeCodingModuleEnabled = defaults.object(forKey: Key.vibeCodingModuleEnabled) as? Bool ?? false
@@ -254,8 +266,12 @@ final class AppSettings: ObservableObject {
         DesktopReportingBlacklist(rawValue: desktopReportingBlacklist)
     }
 
-    var normalizedWindowTitleApplicationWhitelist: BundleIdentifierList {
-        BundleIdentifierList(rawValue: windowTitleApplicationWhitelist)
+    var normalizedWindowTitleBlacklist: BundleIdentifierList {
+        BundleIdentifierList(rawValue: windowTitleBlacklist)
+    }
+
+    var normalizedWindowTitleTrustedApplications: BundleIdentifierList {
+        BundleIdentifierList(rawValue: windowTitleTrustedApplications)
     }
 
     var hasAnkerCloudCredentials: Bool {
@@ -279,10 +295,17 @@ final class AppSettings: ObservableObject {
         desktopReportingBlacklist = (current.bundleIdentifiers + [bundleIdentifier]).joined(separator: "\n")
     }
 
-    func addToWindowTitleApplicationWhitelist(bundleIdentifier: String) {
-        let current = normalizedWindowTitleApplicationWhitelist
+    func addToWindowTitleBlacklist(bundleIdentifier: String) {
+        let current = normalizedWindowTitleBlacklist
         guard !current.contains(bundleIdentifier: bundleIdentifier) else { return }
-        windowTitleApplicationWhitelist = (current.bundleIdentifiers + [bundleIdentifier])
+        windowTitleBlacklist = (current.bundleIdentifiers + [bundleIdentifier])
+            .joined(separator: "\n")
+    }
+
+    func addToWindowTitleTrustedApplications(bundleIdentifier: String) {
+        let current = normalizedWindowTitleTrustedApplications
+        guard !current.contains(bundleIdentifier: bundleIdentifier) else { return }
+        windowTitleTrustedApplications = (current.bundleIdentifiers + [bundleIdentifier])
             .joined(separator: "\n")
     }
 
@@ -360,11 +383,14 @@ final class AppSettings: ObservableObject {
         r2Endpoint = r2Endpoint.trimmingCharacters(in: .whitespacesAndNewlines)
         r2Bucket = r2Bucket.trimmingCharacters(in: .whitespacesAndNewlines)
         desktopReportingBlacklist = normalizedDesktopReportingBlacklist.normalizedRawValue
-        windowTitleApplicationWhitelist = normalizedWindowTitleApplicationWhitelist.normalizedRawValue
+        windowTitleBlacklist = normalizedWindowTitleBlacklist.normalizedRawValue
+        windowTitleTrustedApplications = normalizedWindowTitleTrustedApplications.normalizedRawValue
+        typesafeAPIKey = typesafeAPIKey.trimmingCharacters(in: .whitespacesAndNewlines)
         r2AccessKeyID = r2AccessKeyID.trimmingCharacters(in: .whitespacesAndNewlines)
         r2SecretAccessKey = r2SecretAccessKey.trimmingCharacters(in: .whitespacesAndNewlines)
         try persistAnkerAccount()
         try keychain.write(telemetrySecret, account: Key.telemetrySecretAccount)
+        try keychain.write(typesafeAPIKey, account: Key.typesafeAPIKeyAccount)
         try keychain.write(r2AccessKeyID, account: Key.r2AccessKeyAccount)
         try keychain.write(r2SecretAccessKey, account: Key.r2SecretAccessKeyAccount)
         defaults.set(peripheralID, forKey: Key.peripheralID)
@@ -383,7 +409,8 @@ final class AppSettings: ObservableObject {
         defaults.set(powerBankIdleSleepEnabled, forKey: Key.powerBankIdleSleepEnabled)
         defaults.set(desktopModuleEnabled, forKey: Key.desktopModuleEnabled)
         defaults.set(desktopReportingBlacklist, forKey: Key.desktopReportingBlacklist)
-        defaults.set(windowTitleApplicationWhitelist, forKey: Key.windowTitleApplicationWhitelist)
+        defaults.set(windowTitleBlacklist, forKey: Key.windowTitleBlacklist)
+        defaults.set(windowTitleTrustedApplications, forKey: Key.windowTitleTrustedApplications)
         defaults.set(appleMusicModuleEnabled, forKey: Key.appleMusicModuleEnabled)
         defaults.set(timezoneModuleEnabled, forKey: Key.timezoneModuleEnabled)
         defaults.set(vibeCodingModuleEnabled, forKey: Key.vibeCodingModuleEnabled)
@@ -446,7 +473,9 @@ final class AppSettings: ObservableObject {
             powerBankIdleSleepEnabled: powerBankIdleSleepEnabled,
             desktopModuleEnabled: desktopModuleEnabled,
             desktopReportingBlacklist: desktopReportingBlacklist,
-            windowTitleApplicationWhitelist: windowTitleApplicationWhitelist,
+            windowTitleBlacklist: windowTitleBlacklist,
+            windowTitleTrustedApplications: windowTitleTrustedApplications,
+            typesafeAPIKey: typesafeAPIKey,
             appleMusicModuleEnabled: appleMusicModuleEnabled,
             timezoneModuleEnabled: timezoneModuleEnabled,
             vibeCodingModuleEnabled: vibeCodingModuleEnabled,
@@ -495,7 +524,9 @@ struct SettingsDraftToken: Equatable {
     var powerBankIdleSleepEnabled: Bool
     var desktopModuleEnabled: Bool
     var desktopReportingBlacklist: String
-    var windowTitleApplicationWhitelist: String
+    var windowTitleBlacklist: String
+    var windowTitleTrustedApplications: String
+    var typesafeAPIKey: String
     var appleMusicModuleEnabled: Bool
     var timezoneModuleEnabled: Bool
     var vibeCodingModuleEnabled: Bool

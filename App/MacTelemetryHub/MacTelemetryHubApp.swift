@@ -155,6 +155,7 @@ private struct MenuBarView: View {
     private var foregroundActivityLabel: String {
         let appName = desktopActivity.snapshot?.applicationName ?? "等待活动"
         guard let title = desktopActivity.windowTitle else { return appName }
-        return "\(appName) — \(title)"
+        // 菜单里也要说出这条标题到底有没有公开出去。
+        return "\(appName) — \(title)（\(desktopActivity.windowTitleStatus.displayName)）"
     }
 }

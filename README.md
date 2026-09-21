@@ -17,8 +17,12 @@ usage, rather than the identity of the whole application.
 - a versioned telemetry envelope posted to one shared ingest endpoint
 - direct local Music.app state via Apple Events (separate from Apple Music Web API)
 - optional MusicKit library authorization and Apple Music token upload
-- foreground application reporting, limited to the app's name, bundle ID, and icon,
-  with an exact Bundle ID blacklist for remote reporting
+- foreground application reporting: the app's name, bundle ID, icon, and — when a
+  judgment clears it — the focused window title, with an exact Bundle ID blacklist
+  for remote reporting
+- window titles gated by a blacklist plus a TypeSafe Jev judgment: blacklisted apps
+  are never read, trusted apps are published directly, everything else is judged
+  per title and an uncertain verdict raises a notification with 公开 / 锁定 buttons
 - coding-usage aggregation that never uploads session IDs, project paths, prompts, or replies
 - charger cover name plus the original JPEG uploaded to R2 (no resize or transcode; the point is to leave Anker's signed URL)
 - coding agent usage aggregation in the envelope (subscription plan tiers and rate-limit windows are reported separately by `reporters/agent-limits-reporter` in the lyjwpage repo)
@@ -45,7 +49,8 @@ envelope and may contain only the modules that have fresh data:
       "applicationName": "Safari",
       "bundleIdentifier": "com.apple.Safari",
       "iconHash": "<sha256>",
-      "iconObjectKey": "<sha256>.png"
+      "iconObjectKey": "<sha256>.png",
+      "windowTitle": "ReportDecision.swift — MacTelemetryHub"
     },
     "appleMusic": {},
     "timezone": {},
@@ -65,6 +70,14 @@ comes from outside this process — a dropped link would otherwise keep the site
 renewing their heartbeat forever. Connected but idle still counts as active:
 a charger with nothing plugged in has no new readings to send, and that is
 exactly what heartbeat renewal is for.
+
+`modules.desktop.windowTitle` is a string or `null`; an absent key means the same as
+`null` — no publishable title right now. It is only ever present when the title
+cleared the judgment described under **Module permissions**, so the site can render
+it as-is. The Mac normalizes it before sending (spinners, `[n/m]` progress, `nn%`,
+unread badges stripped, whitespace collapsed), trims it, drops an empty string to
+`null`, and truncates at **200 Unicode scalars**; the Worker applies the same limit
+in the same unit. The `hidden` virtual application never carries a title.
 
 Version 4 is the only accepted contract; desktop icons are addressed by SHA-256.
 The Mac renders each icon at 96 px, encodes it once as PNG, signs an S3-compatible
@@ -288,13 +301,33 @@ pause land in 320–490 ms, application switches in 560–620 ms.
 
 - Foreground app names and icons use `NSWorkspace` and need no special
   permission. With explicit Accessibility permission, the app also reads the
-  focused window title for local menu-bar and dashboard display only. Title
-  detection uses an exact Bundle ID whitelist that defaults to empty. Apps
-  outside the whitelist never have their accessibility window or title read,
-  and switching to one detaches the previous observer and clears the local
-  title. Window titles are excluded from `DesktopActivitySnapshot`, local JSON
-  APIs, debug snapshots, and remote telemetry; window contents are never read.
-  Bundle IDs in the remote-reporting blacklist remain visible in the local UI
+  focused window title. Window contents are never read.
+- Window titles are gated in three tiers, all editable in **设置 › 数据源**:
+  1. **标题黑名单** — those Bundle IDs never have their accessibility window or
+     title read at all, and switching to one detaches the previous observer.
+  2. **免判放行** — those titles are reported as they are, with no judgment.
+  3. Everything else — each normalized title is sent to TypeSafe's `jev-latest`
+     model (`POST https://api.typesafe.ai/v1/systemone`) as one `choice` question
+     over `public` / `private` / `unsure`. `public ≥ 0.80` publishes,
+     `private ≥ 0.60` locks, anything else raises a user notification carrying
+     the app name, the title and 公开 / 锁定 buttons. Until the user answers, the
+     title is treated as locked. Verdicts are cached on disk by Bundle ID plus
+     normalized title (LRU, 500 entries, `~/Library/Application Support/
+     MacTelemetryHub/window-title-judgments.json`) and are reviewable, re-judgeable
+     and deletable in **设置 › 窗口标题**.
+
+  Only the title text and the application's name and Bundle ID leave the machine
+  for a judgment; the TypeSafe API key lives in Keychain (or `TYPESAFE_API_KEY`).
+  Apps in the remote-reporting blacklist are **never** sent to TypeSafe and never
+  report a title. A missing key, a timeout (10 s) or any other failure is treated
+  as locked and is not cached, so one network hiccup cannot permanently mark a
+  title private. Titles judged public are the only ones that reach the envelope;
+  the local UI still shows the current title together with its verdict, and
+  `GET /health` reports the verdict always but the title only when it is
+  publishable. Judgments are throttled: a title must stay stable for 2 s, each
+  application is asked at most once per 10 s, and only one request per cache key
+  is ever in flight.
+- Bundle IDs in the remote-reporting blacklist remain visible in the local UI
   and local APIs, but their application identity and icon are not uploaded.
   Entering a blacklisted app reports the dedicated virtual application
   `com.liangyangjunwei.MacTelemetryHub.hidden` with the fixed name
@@ -425,7 +458,10 @@ is temporarily occupied, the app retries every three seconds.
   `resolving`). Read this first when an app icon is missing on the site. Icon uploads
   back off 2s/4s/8s between failures and, after three failures, retry again ten minutes
   later instead of giving up until restart; failures also go to the unified log under
-  category `desktop-icon`.
+  category `desktop-icon`. `windowTitle` carries the focused title's judgment
+  `status` (`published`, `locked`, `needsConfirmation`, `judging`, `trusted`,
+  `blacklisted`, `hidden`, `noAccess`, `unavailable`, `none`), whether it is
+  `reportable`, and the `title` itself only when it is.
 - `GET /apple-music/authorization` — Apple Music authorization state, see above.
 - `GET /sse/charger` and `GET /sse/powerbank` — Server-Sent Events. The first
   event is the current snapshot; later events follow the device's BLE push
@@ -448,6 +484,12 @@ minimal JSON response. `CodingUsageKitTests` additionally covers source parsing,
 token/cache/reasoning invariants, Cursor pagination and CSV formats, price
 completeness, historical correction and retention, account isolation, process
 cancellation, and engine-to-ledger mapping without real credentials or network.
+`TelemetryCoreTests` covers the window-title pipeline: normalization (braille and
+geometric spinners, `[n/m]`, percentages, unread badges, the 200-scalar cap), the
+three verdict thresholds against measured Jev distributions, judgment-cache coding
+and LRU eviction, the Jev request body and a recorded live response, and the
+reporting rules — a title change posts immediately, an icon-only change does not,
+and the hidden virtual application carries no title.
 
 ## Pulse window usage
 

@@ -5,6 +5,7 @@ import UniformTypeIdentifiers
 private enum SettingsCategory: String, CaseIterable, Identifiable {
     case general
     case sources
+    case windowTitle
     case charger
     case local
     case reporting
@@ -15,6 +16,7 @@ private enum SettingsCategory: String, CaseIterable, Identifiable {
         switch self {
         case .general: "通用"
         case .sources: "数据源"
+        case .windowTitle: "窗口标题"
         case .charger: "充电设备"
         case .local: "本地服务"
         case .reporting: "远端上报"
@@ -25,6 +27,7 @@ private enum SettingsCategory: String, CaseIterable, Identifiable {
         switch self {
         case .general: "后台运行与应用标识"
         case .sources: "前台应用、音乐与用量统计"
+        case .windowTitle: "待确认的标题与判断结论缓存"
         case .charger: "Anker Prime 配对与端口遥测"
         case .local: "本机健康检查与充电设备 SSE"
         case .reporting: "版本化遥测入口与上报策略"
@@ -47,6 +50,7 @@ private enum SettingsCategory: String, CaseIterable, Identifiable {
         switch self {
         case .general: "slider.horizontal.3"
         case .sources: "square.stack.3d.up"
+        case .windowTitle: "text.word.spacing"
         case .charger: "bolt.horizontal"
         case .local: "network"
         case .reporting: "paperplane"
@@ -79,6 +83,7 @@ struct SettingsView: View {
     // 各自包在自己那一页里，否则切到上报页也会跟着重绘。
     private var covers: ChargerCoverController { service.covers }
     private var desktopActivity: DesktopActivityMonitor { service.desktopActivity }
+    private var judge: WindowTitleJudge { service.windowTitleJudge }
     private var appleMusicAuthorization: AppleMusicAuthorizationManager { service.appleMusicAuthorization }
     private var chargerLink: BluetoothService { service.chargerLink }
     private var powerBankLink: BluetoothService { service.powerBankLink }
@@ -188,6 +193,11 @@ struct SettingsView: View {
             ) {
                 sourceSettings
             }
+        case .windowTitle:
+            // 判断结论每回来一条这一页就要重绘，所以订阅只收在这里。
+            SettingsWindowTitleRefresh(judge: judge, desktopActivity: desktopActivity) {
+                windowTitleSettings
+            }
         case .charger:
             SettingsChargerRefresh(covers: covers) {
                 chargerSettings
@@ -262,26 +272,55 @@ struct SettingsView: View {
             Divider().padding(.vertical, 3)
 
             bundleIdentifierListEditor(
-                title: "窗口标题白名单",
-                detail: "只有列表中的 Bundle ID 才会读取标题；默认不检测任何应用",
-                text: $settings.windowTitleApplicationWhitelist,
-                configured: settings.normalizedWindowTitleApplicationWhitelist,
-                chooseTitle: "选择允许读取窗口标题的应用",
-                choosePrompt: "加入白名单",
-                add: { settings.addToWindowTitleApplicationWhitelist(bundleIdentifier: $0) }
+                title: "标题黑名单",
+                detail: "这些应用的窗口标题永不读取、永不判断、永不上报",
+                text: $settings.windowTitleBlacklist,
+                configured: settings.normalizedWindowTitleBlacklist,
+                chooseTitle: "选择不读取窗口标题的应用",
+                choosePrompt: "加入标题黑名单",
+                add: { settings.addToWindowTitleBlacklist(bundleIdentifier: $0) }
             )
 
-            LabeledContent("辅助功能权限") {
-                Text(windowTitleStatusText)
-                    .foregroundStyle(windowTitleStatusColor)
-            }
+            Divider().padding(.vertical, 3)
 
-            Text("未命中白名单时不会读取窗口元素或标题，并会立即停止旧观察。标题始终不会写入本地 API、调试快照或远端遥测。")
+            bundleIdentifierListEditor(
+                title: "免判放行",
+                detail: "这些应用的标题直接上报，不问 Jev",
+                text: $settings.windowTitleTrustedApplications,
+                configured: settings.normalizedWindowTitleTrustedApplications,
+                chooseTitle: "选择免判放行的应用",
+                choosePrompt: "加入免判放行",
+                add: { settings.addToWindowTitleTrustedApplications(bundleIdentifier: $0) }
+            )
+
+            Text("两份名单之外的每一条标题都要先过 Jev：判为公开才上报，判为私密直接锁定，把握不足时发一条通知等你拍板。远端上报黑名单里的应用永远不会把标题送去 TypeSafe。")
                 .font(.caption)
                 .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
 
-            if !settings.normalizedWindowTitleApplicationWhitelist.bundleIdentifiers.isEmpty,
-               !desktopActivity.windowTitleAccessGranted {
+            Divider().padding(.vertical, 3)
+
+            fieldTitle("TypeSafe API Key", detail: "保存在钥匙串；也可用环境变量 TYPESAFE_API_KEY")
+            SecureField("TypeSafe API Key", text: $settings.typesafeAPIKey)
+                .font(.body.monospaced())
+                .textFieldStyle(.roundedBorder)
+
+            LabeledContent("辅助功能权限") {
+                Text(windowTitleAccessText)
+                    .foregroundStyle(windowTitleAccessColor)
+            }
+
+            LabeledContent("通知权限") {
+                Text(notificationAuthorizationText)
+                    .foregroundStyle(.secondary)
+            }
+
+            Text("没有 API key 或判断失败时，标题一律按锁定处理，不会上报，也不会被永久记成私密。")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+
+            if !desktopActivity.windowTitleAccessGranted {
                 HStack(spacing: 10) {
                     Button("请求辅助功能权限") {
                         desktopActivity.requestWindowTitleAccess()
@@ -464,18 +503,140 @@ struct SettingsView: View {
         }
     }
 
-    private var windowTitleStatusText: String {
-        if settings.normalizedWindowTitleApplicationWhitelist.bundleIdentifiers.isEmpty {
-            return "白名单为空，不检测"
-        }
-        return desktopActivity.windowTitleAccessGranted
-            ? "已授权，仅对白名单应用检测"
-            : "需要辅助功能权限"
+    private var windowTitleAccessText: String {
+        desktopActivity.windowTitleAccessGranted ? "已授权" : "需要辅助功能权限"
     }
 
-    private var windowTitleStatusColor: Color {
-        settings.normalizedWindowTitleApplicationWhitelist.bundleIdentifiers.isEmpty ||
-            desktopActivity.windowTitleAccessGranted ? .secondary : .orange
+    private var windowTitleAccessColor: Color {
+        desktopActivity.windowTitleAccessGranted ? .secondary : .orange
+    }
+
+    private var notificationAuthorizationText: String {
+        guard judge.notificationAuthorizationRequested else { return "首次出现待确认时再请求" }
+        return judge.notificationAuthorizationGranted ? "已授权" : "已拒绝，改到本页确认"
+    }
+
+    private var windowTitleSettings: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            windowTitlePendingSection
+            windowTitleCacheSection
+        }
+    }
+
+    private var windowTitlePendingSection: some View {
+        settingSection(
+            "待确认",
+            detail: "Jev 把握不足的标题停在这里。未确认前一律按锁定处理，不会上报。",
+            icon: "questionmark.bubble"
+        ) {
+            LabeledContent("当前标题") {
+                Text(currentWindowTitleSummary)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(2)
+            }
+
+            if judge.awaitingConfirmation.isEmpty {
+                Label("没有待确认的标题。", systemImage: "checkmark.circle")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            } else {
+                ForEach(judge.awaitingConfirmation, id: \.key) { entry in
+                    windowTitleRow(entry) {
+                        Button("公开") { judge.decide(key: entry.key, verdict: .published) }
+                            .buttonStyle(.bordered)
+                        Button("锁定") { judge.decide(key: entry.key, verdict: .locked) }
+                            .buttonStyle(.bordered)
+                    }
+                }
+            }
+
+            if let error = judge.lastError {
+                Label(error, systemImage: "exclamationmark.triangle")
+                    .font(.caption)
+                    .foregroundStyle(.orange)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+    }
+
+    private var windowTitleCacheSection: some View {
+        settingSection(
+            "判断缓存",
+            detail: "键是 Bundle ID + 归一化标题，上限 \(WindowTitleJudgmentCache.capacity) 条，按最近使用淘汰。",
+            icon: "tray.full"
+        ) {
+            if judge.cache.entries.isEmpty {
+                Label("还没有判过任何标题。", systemImage: "tray")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            } else {
+                ForEach(judge.cache.entries.reversed(), id: \.key) { entry in
+                    windowTitleRow(entry) {
+                        Menu("改档") {
+                            Button("公开") { judge.decide(key: entry.key, verdict: .published) }
+                            Button("锁定") { judge.decide(key: entry.key, verdict: .locked) }
+                            Button("待确认") {
+                                judge.decide(key: entry.key, verdict: .needsConfirmation)
+                            }
+                        }
+                        Button("重新判断") { judge.rejudge(key: entry.key) }
+                            .buttonStyle(.bordered)
+                        Button("删除") { judge.forget(key: entry.key) }
+                            .buttonStyle(.bordered)
+                    }
+                }
+
+                Button("清空缓存", role: .destructive) { judge.forgetAll() }
+                    .buttonStyle(.bordered)
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func windowTitleRow<Actions: View>(
+        _ entry: WindowTitleJudgmentEntry,
+        @ViewBuilder actions: () -> Actions
+    ) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text(entry.title)
+                .font(.callout.weight(.medium))
+                .lineLimit(2)
+                .textSelection(.enabled)
+            Text(windowTitleEntryDetail(entry))
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .lineLimit(2)
+            HStack(spacing: 8) { actions() }
+        }
+        .padding(9)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(.primary.opacity(0.045))
+        .overlay(RoundedRectangle(cornerRadius: 8).stroke(.primary.opacity(0.07), lineWidth: 1))
+        .clipShape(RoundedRectangle(cornerRadius: 8))
+    }
+
+    private func windowTitleEntryDetail(_ entry: WindowTitleJudgmentEntry) -> String {
+        var parts = [entry.applicationName, windowTitleVerdictName(entry.verdict)]
+        parts.append(entry.source == .user ? "我拍的板" : "Jev")
+        if let probability = entry.probabilities["public"] {
+            parts.append(String(format: "public %.2f", probability))
+        }
+        parts.append(entry.judgedAt.formatted(date: .abbreviated, time: .shortened))
+        return parts.joined(separator: " · ")
+    }
+
+    private func windowTitleVerdictName(_ verdict: WindowTitleVerdict) -> String {
+        switch verdict {
+        case .published: "已公开"
+        case .locked: "已锁定"
+        case .needsConfirmation: "待确认"
+        }
+    }
+
+    private var currentWindowTitleSummary: String {
+        let status = desktopActivity.windowTitleStatus
+        guard let title = desktopActivity.windowTitle else { return status.displayName }
+        return "\(title) · \(status.displayName)"
     }
 
     private var chargerSettings: some View {
@@ -933,6 +1094,14 @@ struct SettingsView: View {
 private struct SettingsSourcesRefresh<Content: View>: View {
     @ObservedObject var desktopActivity: DesktopActivityMonitor
     @ObservedObject var authorization: AppleMusicAuthorizationManager
+    @ViewBuilder var content: () -> Content
+
+    var body: some View { content() }
+}
+
+private struct SettingsWindowTitleRefresh<Content: View>: View {
+    @ObservedObject var judge: WindowTitleJudge
+    @ObservedObject var desktopActivity: DesktopActivityMonitor
     @ViewBuilder var content: () -> Content
 
     var body: some View { content() }

@@ -51,6 +51,11 @@ extension ServiceController {
                         resolving: snapshot.iconHash.map { icons.isResolving($0) } ?? false
                     )
                 },
+                windowTitle: .init(
+                    status: desktopActivity.windowTitleStatus.rawValue,
+                    reportable: desktopActivity.windowTitleStatus.isReportable,
+                    title: desktopActivity.reportableWindowTitle
+                ),
                 charger: .init(
                     enabled: settings.chargerModuleEnabled,
                     connected: chargerLink.isConnected,

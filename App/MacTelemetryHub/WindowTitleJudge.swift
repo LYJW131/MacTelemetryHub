@@ -1,0 +1,535 @@
+import Foundation
+import UserNotifications
+
+/// 一条窗口标题此刻停在哪一步。仪表盘、菜单栏、设置页都按它显示。
+enum WindowTitleStatus: String, Equatable, Sendable {
+    /// 没有标题：窗口没标题、应用没窗口，或者前台应用采集关着。
+    case none
+    /// 应用在标题黑名单里：从头到尾不读、不判、不报。
+    case blacklisted
+    /// 命中远端隐藏黑名单。本机照旧显示，但绝不送去 TypeSafe，也不上报。
+    case hidden
+    /// 没有辅助功能权限，读不到标题。
+    case noAccess
+    /// 免判放行名单里的应用，标题直接上报。
+    case trusted
+    case published
+    case locked
+    case needsConfirmation
+    case judging
+    /// 没配 API key，或者判断失败。按锁定处理。
+    case unavailable
+
+    var displayName: String {
+        switch self {
+        case .none: "无标题"
+        case .blacklisted: "黑名单"
+        case .hidden: "远端已隐藏"
+        case .noAccess: "缺少辅助功能权限"
+        case .trusted: "免判"
+        case .published: "已公开"
+        case .locked: "已锁定"
+        case .needsConfirmation: "待确认"
+        case .judging: "判断中"
+        case .unavailable: "无法判断"
+        }
+    }
+
+    /// 这一档的标题能不能进信封。界面之外别再各自判一遍。
+    var isReportable: Bool {
+        self == .published || self == .trusted
+    }
+}
+
+/**
+ * 窗口标题的「能不能公开」判断。
+ *
+ * 规则是三档的：标题黑名单里的应用从头到尾不读；免判放行名单里的直接上报；
+ * 其余每一条**归一化后**的标题都问一次 Jev，按概率落成公开 / 锁定 / 待确认。
+ * 命中远端隐藏黑名单的应用一律不问 —— 那份载荷连真实应用叫什么都不说，
+ * 把它的标题送去第三方毫无道理。
+ *
+ * 为什么它不在 `DesktopActivityMonitor` 里：monitor 的职责是读辅助功能 API，
+ * 这里的职责是节流、缓存、落盘和通知，两件事的失败方式完全不同。monitor 只
+ * 调一个同步方法（`resolve`），拿到此刻能用的结论就继续；判断回来之后这边
+ * 调 `onVerdict`，monitor 重新采一次，走的还是原来那条
+ * 「快照变化 → 400ms 防抖 → 叫醒上报循环」，不另开路径。
+ *
+ * 节流有三层，缺一层都会变成每秒问一次：
+ *
+ * 1. 归一化（`WindowTitleNormalizer`）。转动的圆点、跑动的进度条被剥掉之后，
+ *    一个正在下载的窗口始终只有一个标题。
+ * 2. 稳定期 2 秒。终端里 `cd` 一路敲过去会连出好几个标题，只有停下来的那个
+ *    值得问。这个数配的是 monitor 那边 5 秒的兜底轮询和随叫随到的
+ *    `kAXTitleChangedNotification`：通知来得比轮询快，2 秒既盖得住连打，
+ *    又不会让用户盯着「判断中」太久。
+ * 3. 每个应用 10 秒最多问一次。期间的变动合并成最后那一条，不排队。
+ *
+ * 再加上「同一个缓存键只允许一次在途请求」——重复的问法在缓存回来之前不会
+ * 叠着发出去。
+ */
+@MainActor
+final class WindowTitleJudge: ObservableObject {
+    struct Rules: Equatable {
+        /// 永不抓取、永不判断、永不上报。
+        var blacklist = BundleIdentifierList(rawValue: "")
+        /// 免判放行：标题直接上报。
+        var trusted = BundleIdentifierList(rawValue: "")
+        /// 远端隐藏黑名单。本机照旧显示标题，但不问 Jev、不上报。
+        var hiddenApplications = BundleIdentifierList(rawValue: "")
+        var apiKey = ""
+    }
+
+    /// 归一化文本稳定多久才值得问。见类型注释里的三层节流。
+    static let settleDelay: TimeInterval = 2
+    /// 同一个应用两次提问的最小间隔。
+    static let perApplicationInterval: TimeInterval = 10
+    /// 单次请求超时。实测一次判断约 0.7 秒，10 秒是「网络出事了」的界线。
+    static let requestTimeout: TimeInterval = 10
+    /// 失败退避的首个间隔，之后翻倍。
+    static let retryBaseDelay: TimeInterval = 5
+    static let maximumRetryDelay: TimeInterval = 300
+    /// 连续失败多少次之后就不再自动重试，等标题再变或用户手动重判。
+    static let maximumRetries = 4
+
+    static let notificationCategoryIdentifier = "window-title-review"
+    static let publishActionIdentifier = "window-title-publish"
+    static let lockActionIdentifier = "window-title-lock"
+
+    @Published private(set) var cache = WindowTitleJudgmentCache()
+    @Published private(set) var lastError: String?
+    /// 第一次出现「待确认」时才去要通知权限，不在启动时打扰。
+    @Published private(set) var notificationAuthorizationRequested = false
+    @Published private(set) var notificationAuthorizationGranted = false
+
+    /// 判断有结果时叫一声。ServiceController 把它接到重新采集上。
+    var onVerdict: (() -> Void)?
+
+    /// 等用户拍板的那些。设置页按它列表。
+    var awaitingConfirmation: [WindowTitleJudgmentEntry] {
+        cache.entries
+            .filter { $0.verdict == .needsConfirmation }
+            .sorted { $0.judgedAt > $1.judgedAt }
+    }
+
+    /// 一个应用此刻等着判的那条标题。
+    private struct Pending {
+        let applicationName: String
+        let bundleIdentifier: String?
+        let title: String
+    }
+
+    private var rules = Rules()
+    /// 每个应用一个待判的最新标题。变动合并到这里，不排队。
+    private var pendingTitles: [String: Pending] = [:]
+    /// 每个应用一个定时器。同一条标题重复观察不会重排。
+    private var scheduled: [String: (title: String, task: Task<Void, Never>)] = [:]
+    private var lastAskedAt: [String: Date] = [:]
+    /// 在途的缓存键。同一条标题在结果回来之前不会被问第二次。
+    private var inFlight: Set<String> = []
+    private var failureCounts: [String: Int] = [:]
+    /// 429 / 529 是账号级的限额和过载，退避也该是账号级的。
+    private var globalBackoffUntil = Date.distantPast
+    /// 上一次真正解析过的缓存键。只有它变了才动 LRU 的 `lastSeenAt` ——
+    /// 兜底轮询每 5 秒问一次同一条标题，跟着写盘毫无意义。
+    private var lastResolvedKey: String?
+    private var notificationDelegate: WindowTitleNotificationDelegate?
+
+    init() {
+        cache = Self.loadCache()
+    }
+
+    // MARK: - 配置
+
+    func configure(_ rules: Rules) {
+        let keyAppeared = self.rules.apiKey.isEmpty && !rules.apiKey.isEmpty
+        let previous = self.rules
+        self.rules = rules
+        guard previous != rules else { return }
+        // 名单或 key 变了，之前因为没 key / 失败而卡住的那些值得再试一次。
+        if keyAppeared {
+            lastError = nil
+            failureCounts.removeAll()
+            globalBackoffUntil = .distantPast
+        }
+        lastResolvedKey = nil
+        onVerdict?()
+    }
+
+    func isBlacklisted(_ bundleIdentifier: String?) -> Bool {
+        rules.blacklist.contains(bundleIdentifier: bundleIdentifier)
+    }
+
+    // MARK: - 判断
+
+    /**
+     * 此刻这条标题算什么。
+     *
+     * 同步、只查缓存：应用名的上报一秒都不该等判断。没判过的在这里被排上队，
+     * 结论回来之后走 `onVerdict`。所以切到一个没判过的标签页时，标题会先消失
+     * 再出现 —— 宁可空着，也不能把还没判过的字先发出去。
+     */
+    func resolve(
+        applicationName: String,
+        bundleIdentifier: String?,
+        normalizedTitle: String?
+    ) -> WindowTitleStatus {
+        guard let title = normalizedTitle, !title.isEmpty else {
+            lastResolvedKey = nil
+            return .none
+        }
+        if rules.blacklist.contains(bundleIdentifier: bundleIdentifier) { return .blacklisted }
+        // 隐藏应用的标题绝不出本机：不问 Jev，也不进信封。
+        if rules.hiddenApplications.contains(bundleIdentifier: bundleIdentifier) { return .hidden }
+        if rules.trusted.contains(bundleIdentifier: bundleIdentifier) { return .trusted }
+
+        let key = WindowTitleJudgmentCache.key(bundleIdentifier: bundleIdentifier, title: title)
+        if let entry = cachedEntry(forKey: key) {
+            switch entry.verdict {
+            case .published: return .published
+            case .locked: return .locked
+            case .needsConfirmation: return .needsConfirmation
+            }
+        }
+        // 没 key 和「试了几次都失败」都按锁定处理，而且到此为止 —— 再排一次
+        // 只会让同一个必然失败的请求每 5 秒重来一遍。
+        guard !rules.apiKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+              failureCounts[key, default: 0] < Self.maximumRetries else {
+            return .unavailable
+        }
+        schedule(applicationName: applicationName, bundleIdentifier: bundleIdentifier, title: title)
+        return .judging
+    }
+
+    /// 查表。只有键真的变了才推进 LRU，免得兜底轮询把这份名单写成流水账。
+    private func cachedEntry(forKey key: String) -> WindowTitleJudgmentEntry? {
+        guard lastResolvedKey != key else { return cache.entry(forKey: key) }
+        lastResolvedKey = key
+        guard let entry = cache.lookup(key: key, at: Date()) else { return nil }
+        persist()
+        return entry
+    }
+
+    // MARK: - 用户拍板
+
+    /// 在通知或设置页里拍板。用户的结论压过模型，并且立刻刷新快照。
+    func decide(key: String, verdict: WindowTitleVerdict) {
+        guard var entry = cache.entry(forKey: key) else { return }
+        entry.verdict = verdict
+        entry.source = .user
+        entry.probabilities = [:]
+        entry.judgedAt = Date()
+        entry.lastSeenAt = Date()
+        cache.store(entry)
+        persist()
+        removeDeliveredNotification(for: key)
+        onVerdict?()
+    }
+
+    /// 丢掉这一条结论，下次再遇到这条标题重新问一次。
+    func rejudge(key: String) {
+        cache.remove(key: key)
+        failureCounts[key] = nil
+        lastResolvedKey = nil
+        persist()
+        removeDeliveredNotification(for: key)
+        onVerdict?()
+    }
+
+    func forget(key: String) {
+        cache.remove(key: key)
+        failureCounts[key] = nil
+        lastResolvedKey = nil
+        persist()
+        removeDeliveredNotification(for: key)
+        onVerdict?()
+    }
+
+    func forgetAll() {
+        cache.removeAll()
+        failureCounts.removeAll()
+        lastResolvedKey = nil
+        persist()
+        UNUserNotificationCenter.current().removeAllDeliveredNotifications()
+        onVerdict?()
+    }
+
+    // MARK: - 排期
+
+    private func schedule(
+        applicationName: String,
+        bundleIdentifier: String?,
+        title: String,
+        extraDelay: TimeInterval = 0
+    ) {
+        let app = bundleIdentifier ?? applicationName
+        pendingTitles[app] = Pending(
+            applicationName: applicationName,
+            bundleIdentifier: bundleIdentifier,
+            title: title
+        )
+        // 同一条标题已经在等了就别重排，否则 5 秒一次的兜底轮询会把稳定期
+        // 无限往后推，永远等不到「稳定 2 秒」。
+        if let existing = scheduled[app], existing.title == title, extraDelay == 0 { return }
+        scheduled[app]?.task.cancel()
+
+        let now = Date()
+        let readyAt = max(
+            now.addingTimeInterval(Self.settleDelay + extraDelay),
+            (lastAskedAt[app] ?? .distantPast).addingTimeInterval(Self.perApplicationInterval),
+            globalBackoffUntil
+        )
+        let delay = max(0, readyAt.timeIntervalSince(now))
+        let task = Task { [weak self] in
+            try? await Task.sleep(for: .seconds(delay))
+            guard !Task.isCancelled else { return }
+            await self?.fire(app: app)
+        }
+        scheduled[app] = (title, task)
+    }
+
+    private func fire(app: String) async {
+        scheduled[app] = nil
+        guard let pending = pendingTitles[app] else { return }
+        let bundleIdentifier = pending.bundleIdentifier
+        let key = WindowTitleJudgmentCache.key(
+            bundleIdentifier: bundleIdentifier,
+            title: pending.title
+        )
+        guard cache.entry(forKey: key) == nil, !inFlight.contains(key) else { return }
+        let apiKey = rules.apiKey.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !apiKey.isEmpty else { return }
+
+        inFlight.insert(key)
+        lastAskedAt[app] = Date()
+        do {
+            let outcome = try await JevClient.judgeWindowTitle(
+                applicationName: pending.applicationName,
+                bundleIdentifier: bundleIdentifier,
+                title: pending.title,
+                apiKey: apiKey,
+                timeout: Self.requestTimeout
+            )
+            inFlight.remove(key)
+            record(
+                outcome,
+                key: key,
+                applicationName: pending.applicationName,
+                bundleIdentifier: bundleIdentifier,
+                title: pending.title
+            )
+        } catch {
+            inFlight.remove(key)
+            handleFailure(
+                error,
+                key: key,
+                app: app,
+                applicationName: pending.applicationName,
+                bundleIdentifier: bundleIdentifier,
+                title: pending.title
+            )
+        }
+    }
+
+    private func record(
+        _ outcome: WindowTitleJudgmentOutcome,
+        key: String,
+        applicationName: String,
+        bundleIdentifier: String?,
+        title: String
+    ) {
+        failureCounts[key] = nil
+        lastError = nil
+        let now = Date()
+        cache.store(WindowTitleJudgmentEntry(
+            bundleIdentifier: bundleIdentifier,
+            applicationName: applicationName,
+            title: title,
+            verdict: outcome.verdict,
+            source: .jev,
+            probabilities: outcome.probabilities,
+            judgedAt: now,
+            lastSeenAt: now
+        ))
+        persist()
+        lastResolvedKey = nil
+        if outcome.verdict == .needsConfirmation {
+            Task { await askForConfirmation(key: key, applicationName: applicationName, title: title) }
+        }
+        onVerdict?()
+    }
+
+    /**
+     * 判断失败一律按锁定处理，而且**不写缓存**。
+     *
+     * 写进去的话一次网络抖动会把这条标题永久钉在「不可公开」上；不写的代价
+     * 只是下次再问一次。429 / 529 是账号级的，退避也做成账号级的。
+     */
+    private func handleFailure(
+        _ error: Error,
+        key: String,
+        app: String,
+        applicationName: String,
+        bundleIdentifier: String?,
+        title: String
+    ) {
+        let attempts = (failureCounts[key] ?? 0) + 1
+        failureCounts[key] = attempts
+        lastError = "窗口标题判断失败：\(error.localizedDescription)"
+        lastResolvedKey = nil
+
+        let retryable = (error as? JevError)?.isRetryable ?? true
+        let backoff = min(
+            Self.maximumRetryDelay,
+            Self.retryBaseDelay * pow(2, Double(attempts - 1))
+        )
+        if let jevError = error as? JevError,
+           case let .httpStatus(code, _) = jevError,
+           code == 429 || code >= 500 {
+            globalBackoffUntil = Date().addingTimeInterval(backoff)
+        }
+        guard retryable, attempts <= Self.maximumRetries else {
+            onVerdict?()
+            return
+        }
+        schedule(
+            applicationName: applicationName,
+            bundleIdentifier: bundleIdentifier,
+            title: title,
+            extraDelay: backoff
+        )
+        onVerdict?()
+    }
+
+    // MARK: - 通知
+
+    /// 启动时装好 delegate 和两个动作按钮。授权留到真的需要确认时再要。
+    func installNotificationHandling() {
+        guard notificationDelegate == nil else { return }
+        let delegate = WindowTitleNotificationDelegate(judge: self)
+        notificationDelegate = delegate
+        let center = UNUserNotificationCenter.current()
+        center.delegate = delegate
+        center.setNotificationCategories([
+            UNNotificationCategory(
+                identifier: Self.notificationCategoryIdentifier,
+                actions: [
+                    UNNotificationAction(
+                        identifier: Self.publishActionIdentifier,
+                        title: "公开",
+                        options: []
+                    ),
+                    UNNotificationAction(
+                        identifier: Self.lockActionIdentifier,
+                        title: "锁定",
+                        options: [.destructive]
+                    ),
+                ],
+                intentIdentifiers: [],
+                options: []
+            ),
+        ])
+        Task { await refreshNotificationAuthorization() }
+    }
+
+    func refreshNotificationAuthorization() async {
+        let settings = await UNUserNotificationCenter.current().notificationSettings()
+        notificationAuthorizationRequested = settings.authorizationStatus != .notDetermined
+        notificationAuthorizationGranted = settings.authorizationStatus == .authorized
+            || settings.authorizationStatus == .provisional
+    }
+
+    private func askForConfirmation(key: String, applicationName: String, title: String) async {
+        await refreshNotificationAuthorization()
+        if !notificationAuthorizationRequested {
+            // 第一条待确认才要权限。要不到也不算错：条目仍然留在设置页里等人看。
+            let granted = (try? await UNUserNotificationCenter.current()
+                .requestAuthorization(options: [.alert, .sound])) ?? false
+            notificationAuthorizationRequested = true
+            notificationAuthorizationGranted = granted
+        }
+        guard notificationAuthorizationGranted else { return }
+
+        let content = UNMutableNotificationContent()
+        content.title = "窗口标题待确认"
+        content.subtitle = applicationName
+        content.body = title
+        content.categoryIdentifier = Self.notificationCategoryIdentifier
+        content.userInfo = ["cacheKey": key]
+        try? await UNUserNotificationCenter.current().add(
+            UNNotificationRequest(identifier: key, content: content, trigger: nil)
+        )
+    }
+
+    fileprivate func handleNotificationAction(_ action: String, key: String) {
+        switch action {
+        case Self.publishActionIdentifier: decide(key: key, verdict: .published)
+        case Self.lockActionIdentifier: decide(key: key, verdict: .locked)
+        default: break
+        }
+    }
+
+    private func removeDeliveredNotification(for key: String) {
+        UNUserNotificationCenter.current().removeDeliveredNotifications(withIdentifiers: [key])
+        UNUserNotificationCenter.current().removePendingNotificationRequests(withIdentifiers: [key])
+    }
+
+    // MARK: - 落盘
+
+    private static var cacheURL: URL {
+        let base = FileManager.default
+            .urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent("MacTelemetryHub", isDirectory: true)
+        try? FileManager.default.createDirectory(at: base, withIntermediateDirectories: true)
+        return base.appendingPathComponent("window-title-judgments.json")
+    }
+
+    private static func loadCache() -> WindowTitleJudgmentCache {
+        guard let data = try? Data(contentsOf: cacheURL) else { return WindowTitleJudgmentCache() }
+        return WindowTitleJudgmentCache.decoded(from: data)
+    }
+
+    private func persist() {
+        guard let data = try? cache.encoded() else { return }
+        let url = Self.cacheURL
+        Task.detached(priority: .utility) {
+            try? data.write(to: url, options: .atomic)
+        }
+    }
+}
+
+/**
+ * 通知回调的落点。
+ *
+ * 单独一个 NSObject 而不是让 AppDelegate 兼任：delegate 方法是 nonisolated 的，
+ * 挂在 @MainActor 的类型上会一路报隔离错误。这里先把要用的两个字符串取出来，
+ * 再跳回主 actor —— `UNNotificationResponse` 本身不是 Sendable。
+ */
+private final class WindowTitleNotificationDelegate: NSObject, UNUserNotificationCenterDelegate {
+    private let judge: WindowTitleJudge
+
+    init(judge: WindowTitleJudge) {
+        self.judge = judge
+    }
+
+    nonisolated func userNotificationCenter(
+        _ center: UNUserNotificationCenter,
+        didReceive response: UNNotificationResponse,
+        withCompletionHandler completionHandler: @escaping () -> Void
+    ) {
+        let action = response.actionIdentifier
+        let key = response.notification.request.content.userInfo["cacheKey"] as? String
+        completionHandler()
+        guard let key else { return }
+        Task { @MainActor [judge] in judge.handleNotificationAction(action, key: key) }
+    }
+
+    /// Hub 自己在前台时也要弹出来 —— 待确认的标题正是用户此刻在看的那个窗口。
+    nonisolated func userNotificationCenter(
+        _ center: UNUserNotificationCenter,
+        willPresent notification: UNNotification,
+        withCompletionHandler completionHandler: @escaping (UNNotificationPresentationOptions) -> Void
+    ) {
+        completionHandler([.banner, .list])
+    }
+}

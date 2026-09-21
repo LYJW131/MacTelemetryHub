@@ -332,17 +332,31 @@ struct ReportDecision: Sendable {
             musicSignature?.queueIndex != lastPosted.appleMusic?.queueIndex ||
             musicSignature?.queueTrackIDs != lastPosted.appleMusic?.queueTrackIDs
         )
-        // 只认应用身份：图标变了（同一个 App 换了图标）也算 desktopChanged，
+        // 只认应用身份和标题：图标变了（同一个 App 换了图标）也算 desktopChanged，
         // 但不值得为它绕过节流窗口。
         // Cmd-Tab 路过的中间应用一般不会把循环叫醒 —— 激活通知那侧压了
         // 400ms 的 desktopSettleDelay，只有最后停下的那个才放行。
         // 但那只防住「叫醒」这条路：tick 恰好落在切换途中时照样会采到中间
         // 那个应用。真要根治得在这里再比一次，眼下不值当。
+        /**
+         * 标题也算即时。
+         *
+         * 应用名先发、标题后补是设计好的：判断要花几百毫秒到几秒，名字不该等它。
+         * 那条补发如果要等满节流窗口，网页上就会挂着一个「应用对了、标题空着」
+         * 的中间态 —— 判断本身的延迟已经花掉了，再叠一个窗口没有道理。
+         *
+         * 反方向同样紧急：标题从有变回 nil（切到未判过的标签页、用户在通知里
+         * 点了锁定）是一次撤回，更不能等。
+         *
+         * 这不会变吵：只有归一化后真的变了的标题才会走到判断，而判断本身压着
+         * 2 秒去抖和每应用 10 秒一次的闸门（见 WindowTitleJudge）。
+         */
         let desktopUrgent = !manualMode && desktopChanged && (
             inputs.desktopBlocked ||
             lastPosted.desktopWasHidden ||
             desktop?.bundleIdentifier != lastPosted.desktop?.bundleIdentifier ||
-            desktop?.applicationName != lastPosted.desktop?.applicationName
+            desktop?.applicationName != lastPosted.desktop?.applicationName ||
+            desktop?.windowTitle != lastPosted.desktop?.windowTitle
         )
         let timezoneUrgent = !manualMode && timezoneChanged
         // 插拔和换设备也是用户正盯着的事，跟播放/前台应用同一档。

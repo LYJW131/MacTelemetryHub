@@ -7,9 +7,16 @@ import Security
 @MainActor
 final class DesktopActivityMonitor: ObservableObject {
     @Published private(set) var snapshot: DesktopActivitySnapshot?
-    /// 只供本机 UI 展示。它不属于 DesktopActivitySnapshot，因此任何遥测或本地
-    /// JSON 端点都无法把窗口标题编码出去。
+    /**
+     * 此刻读到的窗口标题，已归一化。
+     *
+     * 这是**本机**那一份：锁定、待确认、判断中的标题在自己的屏幕上照样看得见，
+     * 只是进不了信封。能进信封的是 `reportableWindowTitle`，由 `windowTitleStatus`
+     * 一处决定 —— 界面和快照别各判一遍。
+     */
     @Published private(set) var windowTitle: String?
+    /// 这条标题停在判断流程的哪一步。仪表盘、菜单栏、设置页都读它。
+    @Published private(set) var windowTitleStatus: WindowTitleStatus = .none
     @Published private(set) var windowTitleAccessGranted = AXIsProcessTrusted()
     /// snapshot 变化时通知上报循环，让它别干等到下一个周期
     var onChange: (() -> Void)?
@@ -20,7 +27,25 @@ final class DesktopActivityMonitor: ObservableObject {
     private var observedApplicationElement: AXUIElement?
     private var observedWindowElement: AXUIElement?
     private var observedApplicationPID: pid_t?
-    private var windowTitleApplicationWhitelist = BundleIdentifierList(rawValue: "")
+    /**
+     * 标题的三档规则、缓存和通知都归它。
+     *
+     * monitor 只问一个同步问题「这条标题现在算什么」，不等判断 —— 应用名的
+     * 上报一秒都不该被它挡住。判断回来之后 judge 叫一声，
+     * ServiceController 让这里重采一次。
+     */
+    weak var judge: WindowTitleJudge?
+    /**
+     * 兜底轮询间隔：5 秒。
+     *
+     * 同一个窗口内的标题变化（终端 cd、浏览器切标签）主要靠
+     * `kAXTitleChangedNotification` —— 它挂在**焦点窗口元素**上，换窗口时由
+     * `kAXFocusedWindowChangedNotification` 重挂。不发 AX 通知的应用（部分
+     * Electron 壳）只能靠这条轮询，最坏迟 5 秒。
+     *
+     * 判断那侧的 2 秒稳定期是配着这个数定的：通知随叫随到，轮询最慢 5 秒，
+     * 2 秒既盖得住连续敲命令带出的一串中间标题，又不会让「判断中」挂太久。
+     */
     private static let fallbackPollInterval = Duration.seconds(5)
     /// 一个应用的图标：身份指纹 + 待上传的 PNG（编码失败时 png 为 nil）
     struct IconEntry {
@@ -67,13 +92,18 @@ final class DesktopActivityMonitor: ObservableObject {
         detachAccessibilityObserver()
         snapshot = nil
         windowTitle = nil
+        windowTitleStatus = .none
     }
 
-    func setWindowTitleApplicationWhitelist(_ whitelist: BundleIdentifierList) {
-        guard windowTitleApplicationWhitelist != whitelist else { return }
-        windowTitleApplicationWhitelist = whitelist
-        // 尚未 start 时留给 start() 的首次 capture；运行中则立刻停止旧观察或启用新观察。
-        if observer != nil || pollTask != nil { capture() }
+    /// 判断放行之后才允许进信封的那一份。判断中、锁定、待确认、失败一律为 nil。
+    var reportableWindowTitle: String? {
+        windowTitleStatus.isReportable ? windowTitle : nil
+    }
+
+    /// 规则或判断结论变了，重采一次让快照跟上。
+    func refreshAfterJudgment() {
+        guard observer != nil || pollTask != nil else { return }
+        capture()
     }
 
     /// 权限提示只允许由设置页上的明确操作触发；后台启动和轮询都只做无副作用检查。
@@ -133,21 +163,26 @@ final class DesktopActivityMonitor: ObservableObject {
             iconHash: entry?.identity,
             iconData: entry?.png,
             iconObjectKey: nil,
+            windowTitle: reportableWindowTitle,
             observedAt: Self.nowMilliseconds
         )
+        // 标题必须进这个比较：判断是异步的，放行的结论回来时应用身份和图标
+        // 一个都没变，不比标题的话这里直接 return，补发那一轮永远不会发生。
         let identityChanged =
             previous?.applicationName != next.applicationName ||
             previous?.bundleIdentifier != next.bundleIdentifier ||
-            previous?.iconHash != next.iconHash
+            previous?.iconHash != next.iconHash ||
+            previous?.windowTitle != next.windowTitle
         guard identityChanged else { return }
         snapshot = next
         onChange?()
     }
 
+    /// 黑名单命中就连辅助功能元素都不读 —— 不读也就没什么可泄漏的。
     private func updateWindowTitleMonitoring(for app: NSRunningApplication) {
-        guard windowTitleApplicationWhitelist.contains(bundleIdentifier: app.bundleIdentifier) else {
+        guard judge?.isBlacklisted(app.bundleIdentifier) != true else {
             detachAccessibilityObserver()
-            if windowTitle != nil { windowTitle = nil }
+            setWindowTitle(nil, status: .blacklisted)
             return
         }
         refreshWindowTitle(for: app)
@@ -155,23 +190,33 @@ final class DesktopActivityMonitor: ObservableObject {
     }
 
     private func refreshWindowTitle(for app: NSRunningApplication) {
-        guard windowTitleApplicationWhitelist.contains(bundleIdentifier: app.bundleIdentifier) else {
-            if windowTitle != nil { windowTitle = nil }
+        guard judge?.isBlacklisted(app.bundleIdentifier) != true else {
+            setWindowTitle(nil, status: .blacklisted)
             return
         }
         let granted = AXIsProcessTrusted()
         if windowTitleAccessGranted != granted { windowTitleAccessGranted = granted }
         guard granted else {
-            if windowTitle != nil { windowTitle = nil }
+            setWindowTitle(nil, status: .noAccess)
             return
         }
 
-        let next = Self.normalizedWindowTitle(Self.windowTitle(forPID: app.processIdentifier))
-        if windowTitle != next { windowTitle = next }
+        let next = WindowTitleNormalizer.normalize(Self.windowTitle(forPID: app.processIdentifier))
+        let status = judge?.resolve(
+            applicationName: app.localizedName ?? "Unknown",
+            bundleIdentifier: app.bundleIdentifier,
+            normalizedTitle: next
+        ) ?? .unavailable
+        setWindowTitle(next, status: status)
+    }
+
+    private func setWindowTitle(_ title: String?, status: WindowTitleStatus) {
+        if windowTitle != title { windowTitle = title }
+        if windowTitleStatus != status { windowTitleStatus = status }
     }
 
     private func attachAccessibilityObserver(to app: NSRunningApplication) {
-        guard windowTitleApplicationWhitelist.contains(bundleIdentifier: app.bundleIdentifier),
+        guard judge?.isBlacklisted(app.bundleIdentifier) != true,
               windowTitleAccessGranted else {
             detachAccessibilityObserver()
             return
@@ -284,15 +329,6 @@ final class DesktopActivityMonitor: ObservableObject {
         return titleValue as? String
     }
 
-    private static func normalizedWindowTitle(_ raw: String?) -> String? {
-        guard let raw else { return nil }
-        let collapsed = raw
-            .split(whereSeparator: { $0.isWhitespace })
-            .joined(separator: " ")
-        guard !collapsed.isEmpty else { return nil }
-        return String(collapsed.prefix(240))
-    }
-
     private static func identity(of observer: AXObserver) -> UInt {
         UInt(bitPattern: Unmanaged.passUnretained(observer).toOpaque())
     }
@@ -307,15 +343,14 @@ final class DesktopActivityMonitor: ObservableObject {
         Task { @MainActor in
             guard monitor.accessibilityObserverIdentity == observerIdentity else { return }
             guard let app = NSWorkspace.shared.frontmostApplication else { return }
-            guard monitor.windowTitleApplicationWhitelist.contains(
-                bundleIdentifier: app.bundleIdentifier
-            ) else {
+            guard monitor.judge?.isBlacklisted(app.bundleIdentifier) != true else {
                 monitor.detachAccessibilityObserver()
-                if monitor.windowTitle != nil { monitor.windowTitle = nil }
+                monitor.setWindowTitle(nil, status: .blacklisted)
                 return
             }
             if focusedWindowChanged { monitor.refreshObservedWindow() }
-            monitor.refreshWindowTitle(for: app)
+            // 走整条 capture：标题进了快照，光刷新本机那一份的话补发不会发生。
+            monitor.capture(app)
         }
     }
 

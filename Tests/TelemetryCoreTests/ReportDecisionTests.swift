@@ -22,7 +22,8 @@ struct ReportDecisionTests {
     private func desktop(
         name: String = "Xcode",
         bundle: String? = "com.apple.dt.Xcode",
-        iconHash: String? = nil
+        iconHash: String? = nil,
+        windowTitle: String? = nil
     ) -> DesktopActivitySnapshot {
         DesktopActivitySnapshot(
             applicationName: name,
@@ -30,6 +31,7 @@ struct ReportDecisionTests {
             iconHash: iconHash,
             iconData: nil,
             iconObjectKey: nil,
+            windowTitle: windowTitle,
             observedAt: 1_789_099_506_000
         )
     }
@@ -183,6 +185,64 @@ struct ReportDecisionTests {
             lastPosted: lastPosted
         )
         #expect(!decision.desktopToSend)
+    }
+
+    /**
+     * 标题补发是即时的，两个方向都算。
+     *
+     * 应用名先发、标题后补是设计好的：判断要花时间，名字不等它。那条补发要是
+     * 得等满节流窗口，网页上就挂着一个「应用对了、标题空着」的中间态。撤回
+     * 同理 —— 用户在通知里点了锁定，标题必须马上从网页上消失。
+     */
+    @Test func windowTitleChangeIsImmediate() {
+        var lastPosted = LastPostedState()
+
+        // 第一轮：只有应用名，判断还没回来
+        var decision = decide(inputs(now: t0, capturedDesktop: desktop()))
+        #expect(decision.desktopToSend)
+        _ = lastPosted.commit(decision: decision, response: ok, desktopPayloadHasObjectKey: false)
+
+        // 判断放行，标题补上来：同一个应用，只有标题变了，仍然要立刻发
+        let titled = inputs(
+            now: t0.addingTimeInterval(3),
+            capturedDesktop: desktop(windowTitle: "ReportDecision.swift — MacTelemetryHub")
+        )
+        decision = decide(titled, lastPosted: lastPosted)
+        #expect(decision.desktopToSend)
+        #expect(decision.urgent)
+        _ = lastPosted.commit(decision: decision, response: ok, desktopPayloadHasObjectKey: false)
+
+        // 没再变就不发
+        decision = decide(
+            inputs(
+                now: t0.addingTimeInterval(4),
+                capturedDesktop: desktop(windowTitle: "ReportDecision.swift — MacTelemetryHub")
+            ),
+            lastPosted: lastPosted
+        )
+        #expect(!decision.desktopToSend)
+
+        // 撤回：标题变回 nil 同样是紧急的
+        decision = decide(
+            inputs(now: t0.addingTimeInterval(5), capturedDesktop: desktop()),
+            lastPosted: lastPosted
+        )
+        #expect(decision.desktopToSend)
+        #expect(decision.urgent)
+    }
+
+    /// 图标换了仍然只算普通变化：它等节流窗口，不占即时上报的额度。
+    @Test func iconOnlyChangeStaysThrottled() {
+        var lastPosted = LastPostedState()
+        let first = decide(inputs(now: t0, capturedDesktop: desktop(iconHash: "a")))
+        _ = lastPosted.commit(decision: first, response: ok, desktopPayloadHasObjectKey: false)
+
+        let decision = decide(
+            inputs(now: t0.addingTimeInterval(1), capturedDesktop: desktop(iconHash: "b")),
+            lastPosted: lastPosted
+        )
+        #expect(decision.desktopToSend)
+        #expect(!decision.urgent)
     }
 
     /// 没有前台应用（模块关着或还没采到）时不发，也不会把隐藏态当成变化。

@@ -643,7 +643,12 @@ struct DashboardView: View {
 
     private var desktopActivityDetail: String? {
         var parts: [String] = []
-        if let title = desktopActivity.windowTitle, !title.isEmpty { parts.append(title) }
+        if let title = desktopActivity.windowTitle, !title.isEmpty {
+            // 标题后面一定跟着它的结论：本机看得见不等于已经公开出去了。
+            parts.append("\(title) · \(desktopActivity.windowTitleStatus.displayName)")
+        } else if desktopActivity.windowTitleStatus != .none {
+            parts.append(desktopActivity.windowTitleStatus.displayName)
+        }
         if let bundleIdentifier = desktopActivity.snapshot?.bundleIdentifier,
            !bundleIdentifier.isEmpty {
             parts.append(bundleIdentifier)

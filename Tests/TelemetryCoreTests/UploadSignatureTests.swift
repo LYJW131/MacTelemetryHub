@@ -86,13 +86,19 @@ struct ChargingDevicesStructuralSignatureTests {
 }
 
 struct DesktopAndTimeZoneSignatureTests {
-    private func snapshot(name: String, iconHash: String?, observedAt: Int64) -> DesktopActivitySnapshot {
+    private func snapshot(
+        name: String,
+        iconHash: String?,
+        observedAt: Int64,
+        windowTitle: String? = nil
+    ) -> DesktopActivitySnapshot {
         DesktopActivitySnapshot(
             applicationName: name,
             bundleIdentifier: "com.example.App",
             iconHash: iconHash,
             iconData: Data([1, 2, 3]),
             iconObjectKey: nil,
+            windowTitle: windowTitle,
             observedAt: observedAt
         )
     }
@@ -104,6 +110,19 @@ struct DesktopAndTimeZoneSignatureTests {
         #expect(first == second)
         #expect(first != DesktopUploadSignature(snapshot(name: "Safari", iconHash: "h", observedAt: 1)))
         #expect(first != DesktopUploadSignature(snapshot(name: "Xcode", iconHash: nil, observedAt: 1)))
+    }
+
+    /// 标题进签名：判断放行后要靠它触发补发，锁回 nil 也要靠它撤下旧标题。
+    @Test func desktopSignatureTracksWindowTitle() {
+        let untitled = DesktopUploadSignature(snapshot(name: "Xcode", iconHash: "h", observedAt: 1))
+        let titled = DesktopUploadSignature(
+            snapshot(name: "Xcode", iconHash: "h", observedAt: 1, windowTitle: "A.swift")
+        )
+        let other = DesktopUploadSignature(
+            snapshot(name: "Xcode", iconHash: "h", observedAt: 1, windowTitle: "B.swift")
+        )
+        #expect(untitled != titled)
+        #expect(titled != other)
     }
 
     @Test func timeZoneSignatureIgnoresObservedAt() {

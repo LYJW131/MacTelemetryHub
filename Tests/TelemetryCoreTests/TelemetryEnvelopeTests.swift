@@ -86,6 +86,7 @@ struct TelemetryEnvelopeTests {
             iconHash: "icon-hash",
             iconData: nil,
             iconObjectKey: "abc.png",
+            windowTitle: "ReportDecision.swift — MacTelemetryHub",
             observedAt: 1_789_099_506_000
         )
         let json = try object(envelope(
@@ -115,8 +116,10 @@ struct TelemetryEnvelopeTests {
         ])
         let desktopJSON = try #require(modules["desktop"] as? [String: Any])
         #expect(Set(desktopJSON.keys) == [
-            "applicationName", "bundleIdentifier", "iconHash", "iconObjectKey", "observedAt",
+            "applicationName", "bundleIdentifier", "iconHash", "iconObjectKey",
+            "windowTitle", "observedAt",
         ])
+        #expect(desktopJSON["windowTitle"] as? String == "ReportDecision.swift — MacTelemetryHub")
         // developer token 已经归后端，带上它的信封会被整封退回：这一格只能有 user token
         let credentialsJSON = try #require(modules["appleMusicCredentials"] as? [String: Any])
         #expect(Set(credentialsJSON.keys) == ["musicUserToken"])
@@ -130,17 +133,34 @@ struct TelemetryEnvelopeTests {
         #expect(hidden.applicationName == "Hidden Application")
         #expect(hidden.iconHash == nil)
         #expect(hidden.iconData == nil)
+        // 标题一个字都不带：连真实应用叫什么都没说，它更不该在这里。
+        #expect(hidden.windowTitle == nil)
         #expect(hidden.observedAt == 42)
+    }
+
+    /// nil 的标题整个不出现在 JSON 里。缺省和 null 对站点是同一个意思。
+    @Test func desktopPayloadOmitsAbsentWindowTitle() throws {
+        let json = try object(envelope(
+            desktop: DesktopActivitySnapshot.hidden(observedAt: 42),
+            includeDesktop: true,
+            activeModules: ["desktop"]
+        ))
+        let modules = try #require(json["modules"] as? [String: Any])
+        let desktopJSON = try #require(modules["desktop"] as? [String: Any])
+        #expect(desktopJSON["windowTitle"] == nil)
     }
 
     /// 待传字节只在本机流转，`withIconData(nil, …)` 是发出去之前那一步。
     @Test func withIconDataReplacesBytesAndKey() {
         let snapshot = DesktopActivitySnapshot(
             applicationName: "Xcode", bundleIdentifier: "com.apple.dt.Xcode",
-            iconHash: "h", iconData: Data([1, 2]), iconObjectKey: nil, observedAt: 7
+            iconHash: "h", iconData: Data([1, 2]), iconObjectKey: nil,
+            windowTitle: "已放行的标题", observedAt: 7
         )
         let stripped = snapshot.withIconData(nil, iconObjectKey: "h.png")
         #expect(stripped.iconData == nil)
+        // 图标那一步不该顺手把判断放行的标题抹掉
+        #expect(stripped.windowTitle == "已放行的标题")
         #expect(stripped.iconObjectKey == "h.png")
         #expect(stripped.iconHash == "h")
         #expect(stripped.observedAt == 7)

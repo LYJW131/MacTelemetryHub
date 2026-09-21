@@ -51,6 +51,11 @@
 		B1000000000000000000003D /* IconUploadCoordinator.swift in Sources */ = {isa = PBXBuildFile; fileRef = F1000000000000000000003C /* IconUploadCoordinator.swift */; };
 		B10000000000000000000037 /* A2687NotificationPipeline.swift in Sources */ = {isa = PBXBuildFile; fileRef = F10000000000000000000036 /* A2687NotificationPipeline.swift */; };
 		B1000000000000000000003E /* TelemetryPoster.swift in Sources */ = {isa = PBXBuildFile; fileRef = F1000000000000000000003D /* TelemetryPoster.swift */; };
+		B1000000000000000000003F /* WindowTitleNormalizer.swift in Sources */ = {isa = PBXBuildFile; fileRef = F1000000000000000000003E /* WindowTitleNormalizer.swift */; };
+		B10000000000000000000040 /* WindowTitleJudgment.swift in Sources */ = {isa = PBXBuildFile; fileRef = F1000000000000000000003F /* WindowTitleJudgment.swift */; };
+		B10000000000000000000041 /* WindowTitleJudgmentCache.swift in Sources */ = {isa = PBXBuildFile; fileRef = F10000000000000000000040 /* WindowTitleJudgmentCache.swift */; };
+		B10000000000000000000042 /* JevWindowTitleQuestion.swift in Sources */ = {isa = PBXBuildFile; fileRef = F10000000000000000000041 /* JevWindowTitleQuestion.swift */; };
+		B10000000000000000000043 /* WindowTitleJudge.swift in Sources */ = {isa = PBXBuildFile; fileRef = F10000000000000000000042 /* WindowTitleJudge.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -100,6 +105,11 @@
 		F1000000000000000000003C /* IconUploadCoordinator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = IconUploadCoordinator.swift; sourceTree = "<group>"; };
 		F10000000000000000000036 /* A2687NotificationPipeline.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = A2687NotificationPipeline.swift; sourceTree = "<group>"; };
 		F1000000000000000000003D /* TelemetryPoster.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TelemetryPoster.swift; sourceTree = "<group>"; };
+		F1000000000000000000003E /* WindowTitleNormalizer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WindowTitleNormalizer.swift; sourceTree = "<group>"; };
+		F1000000000000000000003F /* WindowTitleJudgment.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WindowTitleJudgment.swift; sourceTree = "<group>"; };
+		F10000000000000000000040 /* WindowTitleJudgmentCache.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WindowTitleJudgmentCache.swift; sourceTree = "<group>"; };
+		F10000000000000000000041 /* JevWindowTitleQuestion.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = JevWindowTitleQuestion.swift; sourceTree = "<group>"; };
+		F10000000000000000000042 /* WindowTitleJudge.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WindowTitleJudge.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -161,6 +171,7 @@
 				F10000000000000000000039 /* ServiceController+LocalAPI.swift */,
 				F1000000000000000000003C /* IconUploadCoordinator.swift */,
 				F1000000000000000000003D /* TelemetryPoster.swift */,
+				F10000000000000000000042 /* WindowTitleJudge.swift */,
 			);
 			path = App/MacTelemetryHub;
 			sourceTree = SOURCE_ROOT;
@@ -196,6 +207,10 @@
 				F10000000000000000000035 /* LocalAPIPayloads.swift */,
 				F1000000000000000000003A /* ReportDecision.swift */,
 				F1000000000000000000003B /* LastPostedState.swift */,
+				F1000000000000000000003E /* WindowTitleNormalizer.swift */,
+				F1000000000000000000003F /* WindowTitleJudgment.swift */,
+				F10000000000000000000040 /* WindowTitleJudgmentCache.swift */,
+				F10000000000000000000041 /* JevWindowTitleQuestion.swift */,
 			);
 			path = Sources/TelemetryCore;
 			sourceTree = SOURCE_ROOT;
@@ -309,6 +324,11 @@
 				B1000000000000000000003D /* IconUploadCoordinator.swift in Sources */,
 				B10000000000000000000037 /* A2687NotificationPipeline.swift in Sources */,
 				B1000000000000000000003E /* TelemetryPoster.swift in Sources */,
+				B1000000000000000000003F /* WindowTitleNormalizer.swift in Sources */,
+				B10000000000000000000040 /* WindowTitleJudgment.swift in Sources */,
+				B10000000000000000000041 /* WindowTitleJudgmentCache.swift in Sources */,
+				B10000000000000000000042 /* JevWindowTitleQuestion.swift in Sources */,
+				B10000000000000000000043 /* WindowTitleJudge.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

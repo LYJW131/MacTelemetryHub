@@ -166,11 +166,14 @@ struct DesktopUploadSignature: Equatable {
     let applicationName: String
     let bundleIdentifier: String?
     let iconHash: String?
+    /// 标题进签名：判断放行之后靠它触发补发，锁回 nil 也靠它把旧标题撤下来。
+    let windowTitle: String?
 
     init(_ snapshot: DesktopActivitySnapshot) {
         applicationName = snapshot.applicationName
         bundleIdentifier = snapshot.bundleIdentifier
         iconHash = snapshot.iconHash
+        windowTitle = snapshot.windowTitle
     }
 }
 

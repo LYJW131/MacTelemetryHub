@@ -14,6 +14,8 @@ final class ServiceController: ObservableObject {
     let chargingLinks: [BluetoothService]
     let covers: ChargerCoverController
     let desktopActivity = DesktopActivityMonitor()
+    /// 窗口标题的三档规则、Jev 判断、缓存和通知。设置页和仪表盘都直接订阅它。
+    let windowTitleJudge = WindowTitleJudge()
     let timeZone = TimeZoneMonitor()
     let appleMusic = AppleMusicMonitor()
     let appleMusicAuthorization = AppleMusicAuthorizationManager()
@@ -128,6 +130,9 @@ final class ServiceController: ObservableObject {
     func start() {
         guard !started else { return }
         started = true
+        // 通知的 delegate 和两个动作按钮必须在任何一条判断回来之前装好，
+        // 否则第一条「待确认」弹出来时点按钮没有落点。
+        windowTitleJudge.installNotificationHandling()
         configureModules()
         if settings.httpServerEnabled, let host = settings.normalizedHTTPBindAddress {
             httpServer.start(host: host, port: settings.httpPort)
@@ -228,8 +233,10 @@ final class ServiceController: ObservableObject {
             chargingSSE.closeAll()
             httpServer.stop()
         }
-        // 黑名单、窗口标题、HTTP 端口不重开上报会话：重开会把已确认的图标和
-        // 已经发出去的门闩一起擦掉，对端再收一整轮「首次」信封。
+        // 黑名单、窗口标题的三档规则和 TypeSafe key、HTTP 端口都**不**进
+        // ReporterRestartKey：重开会话会把已确认的图标和已经发出去的门闩一起
+        // 擦掉，对端再收一整轮「首次」信封。标题规则改了只要重判一次，
+        // 由 configureModules 里的 judge.configure 顺手完成。
         configureModules(restartCodingCollection: previousCoding != codingScheduleKey)
         if previousIcons != iconUploadKey {
             icons.reset()
@@ -630,10 +637,21 @@ final class ServiceController: ObservableObject {
         }
         covers.onChange = { [weak self] in self?.wakeReporter() }
 
+        desktopActivity.judge = windowTitleJudge
+        windowTitleJudge.onVerdict = { [weak self] in
+            // 判断回来之后重采一次：标题进了快照，走的还是原来那条
+            // 「快照变化 → 400ms 防抖 → 叫醒上报循环」。
+            self?.desktopActivity.refreshAfterJudgment()
+        }
+        windowTitleJudge.configure(WindowTitleJudge.Rules(
+            blacklist: settings.normalizedWindowTitleBlacklist,
+            trusted: settings.normalizedWindowTitleTrustedApplications,
+            // 远端隐藏的应用一条标题都不许送去 TypeSafe。
+            hiddenApplications: settings.normalizedDesktopReportingBlacklist,
+            apiKey: settings.typesafeAPIKey
+        ))
+
         if settings.desktopModuleEnabled {
-            desktopActivity.setWindowTitleApplicationWhitelist(
-                settings.normalizedWindowTitleApplicationWhitelist
-            )
             // 每次激活都重排，连续 Cmd-Tab 只在最后停下的那个应用上叫醒一次。
             // 开着远端上报时，图标在这 400ms 里先走后台 resolver；名称上报不等它。
             desktopActivity.onChange = { [weak self] in
@@ -656,9 +674,6 @@ final class ServiceController: ObservableObject {
             desktopSettleTask?.cancel()
             desktopSettleTask = nil
             desktopActivity.stop()
-            desktopActivity.setWindowTitleApplicationWhitelist(
-                settings.normalizedWindowTitleApplicationWhitelist
-            )
         }
 
         if settings.timezoneModuleEnabled {
