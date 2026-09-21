@@ -93,18 +93,20 @@ final class WindowTitleJudge: ObservableObject {
     /// 连续失败多少次之后就不再自动重试，等标题再变或用户手动重判。
     static let maximumRetries = 4
 
-    static let notificationCategoryIdentifier = "window-title-review"
-    static let publishActionIdentifier = "window-title-publish"
-    static let lockActionIdentifier = "window-title-lock"
-
     @Published private(set) var cache = WindowTitleJudgmentCache()
     @Published private(set) var lastError: String?
     /// 第一次出现「待确认」时才去要通知权限，不在启动时打扰。
     @Published private(set) var notificationAuthorizationRequested = false
     @Published private(set) var notificationAuthorizationGranted = false
+    /// 「去看看这一条」的一次性令牌。设置页收到就跳到窗口标题页再消费掉 ——
+    /// 存一个 UUID 而不是 Bool，是因为连点两次通知也该各跳一次。
+    @Published private(set) var reviewRequest: UUID?
 
     /// 判断有结果时叫一声。ServiceController 把它接到重新采集上。
     var onVerdict: (() -> Void)?
+    /// 点通知本体时叫一声。AppDelegate 把它接到「打开设置窗口」上 ——
+    /// 这里不 import AppKit，窗口归界面层管。
+    var onReviewRequested: (() -> Void)?
 
     /// 等用户拍板的那些。设置页按它列表。
     var awaitingConfirmation: [WindowTitleJudgmentEntry] {
@@ -404,7 +406,13 @@ final class WindowTitleJudge: ObservableObject {
 
     // MARK: - 通知
 
-    /// 启动时装好 delegate 和两个动作按钮。授权留到真的需要确认时再要。
+    /**
+     * 启动时装好 delegate 和那一个动作按钮。授权留到真的需要确认时再要。
+     *
+     * 只挂「公开」：实测挂两个动作时，无论临时还是持续样式，按钮都被收进
+     * 「选项」下拉，拍一次板要点两下。锁定改走 `.customDismissAction` ——
+     * 关掉通知就是锁定，一次点击。
+     */
     func installNotificationHandling() {
         guard notificationDelegate == nil else { return }
         let delegate = WindowTitleNotificationDelegate(judge: self)
@@ -413,24 +421,30 @@ final class WindowTitleJudge: ObservableObject {
         center.delegate = delegate
         center.setNotificationCategories([
             UNNotificationCategory(
-                identifier: Self.notificationCategoryIdentifier,
+                identifier: WindowTitleNotification.categoryIdentifier,
                 actions: [
                     UNNotificationAction(
-                        identifier: Self.publishActionIdentifier,
+                        identifier: WindowTitleNotification.publishActionIdentifier,
                         title: "公开",
                         options: []
                     ),
-                    UNNotificationAction(
-                        identifier: Self.lockActionIdentifier,
-                        title: "锁定",
-                        options: [.destructive]
-                    ),
                 ],
                 intentIdentifiers: [],
-                options: []
+                options: [.customDismissAction]
             ),
         ])
         Task { await refreshNotificationAuthorization() }
+    }
+
+    /// 去设置页的「窗口标题」看这些条目。点通知本体和菜单栏里那一项都走这里。
+    func requestReview() {
+        reviewRequest = UUID()
+        onReviewRequested?()
+    }
+
+    /// 设置页跳过去之后把令牌消费掉，免得下次打开窗口又自己跳一次。
+    func consumeReviewRequest() {
+        reviewRequest = nil
     }
 
     func refreshNotificationAuthorization() async {
@@ -454,8 +468,9 @@ final class WindowTitleJudge: ObservableObject {
         let content = UNMutableNotificationContent()
         content.title = "窗口标题待确认"
         content.subtitle = applicationName
-        content.body = title
-        content.categoryIdentifier = Self.notificationCategoryIdentifier
+        // 正文还是那条标题，末尾补一句去处：只有「公开」是按钮，别的都靠关闭。
+        content.body = "\(title)\n关闭这条通知即锁定。"
+        content.categoryIdentifier = WindowTitleNotification.categoryIdentifier
         content.userInfo = ["cacheKey": key]
         // 通知 ID 用键的哈希：键里有换行、还可能有两百个字符，直接当标识符不稳。
         try? await UNUserNotificationCenter.current().add(
@@ -467,11 +482,24 @@ final class WindowTitleJudge: ObservableObject {
         )
     }
 
+    /**
+     * 通知上的三种落点。
+     *
+     * 关闭即锁定，但只锁还停在「待确认」的那一条：通知中心里可能躺着一条早就
+     * 在设置页拍过板的旧通知，过几天一键清空不该把它从「已公开」翻回锁定。
+     * 点通知本体不改结论 —— 拿不准才点开看，看之前先别替他决定。
+     */
     fileprivate func handleNotificationAction(_ action: String, key: String) {
         switch action {
-        case Self.publishActionIdentifier: decide(key: key, verdict: .published)
-        case Self.lockActionIdentifier: decide(key: key, verdict: .locked)
-        default: break
+        case WindowTitleNotification.publishActionIdentifier:
+            decide(key: key, verdict: .published)
+        case UNNotificationDismissActionIdentifier:
+            guard cache.entry(forKey: key)?.verdict == .needsConfirmation else { return }
+            decide(key: key, verdict: .locked)
+        case UNNotificationDefaultActionIdentifier:
+            requestReview()
+        default:
+            break
         }
     }
 

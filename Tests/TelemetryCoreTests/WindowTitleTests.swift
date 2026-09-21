@@ -310,3 +310,18 @@ struct JevWindowTitleQuestionTests {
         }
     }
 }
+
+/**
+ * 通知上的那两个标识。
+ *
+ * 值得钉住是因为它们写进了每一条已经发出去的通知：分类标识一改，通知中心里
+ * 躺着的旧条目就再也找不到自己的动作，「公开」按钮当场消失。动作标识也不能
+ * 和分类撞名 —— 撞了的话 delegate 那个 switch 会把分类名当成动作。
+ */
+struct WindowTitleNotificationTests {
+    @Test func identifiersAreStable() {
+        #expect(WindowTitleNotification.categoryIdentifier == "window-title-review")
+        #expect(WindowTitleNotification.publishActionIdentifier == "window-title-publish")
+        #expect(WindowTitleNotification.categoryIdentifier != WindowTitleNotification.publishActionIdentifier)
+    }
+}

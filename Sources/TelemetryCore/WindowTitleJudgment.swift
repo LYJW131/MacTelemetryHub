@@ -68,6 +68,21 @@ enum WindowTitleJudgmentThresholds {
 }
 
 /**
+ * 「待确认」通知上的标识。
+ *
+ * 放在这里而不是 `WindowTitleJudge` 里，是为了能被单测钉住 —— App target 里
+ * 那个类是 `@MainActor`，还要一个真的通知中心才跑得起来。
+ *
+ * 只挂一个动作：macOS 上一旦挂两个，两个按钮都会被收进「选项」下拉，拍一次板
+ * 要点两下；只有单个动作才直接显示成按钮。所以「锁定」不再是一个动作，而是
+ * 「关掉这条通知」—— 分类带 `.customDismissAction`，关闭即锁定。
+ */
+enum WindowTitleNotification {
+    static let categoryIdentifier = "window-title-review"
+    static let publishActionIdentifier = "window-title-publish"
+}
+
+/**
  * 缓存里的一条。
  *
  * `title` 已经是归一化文本 —— 键、问题、上报三处用的是同一串字，所以这里

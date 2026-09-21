@@ -22,7 +22,9 @@ usage, rather than the identity of the whole application.
   for remote reporting
 - window titles gated by a blacklist plus a TypeSafe Jev judgment: blacklisted apps
   are never read, trusted apps are published directly, everything else is judged
-  per title and an uncertain verdict raises a notification with 公开 / 锁定 buttons
+  per title and an uncertain verdict raises a notification with a single 公开
+  button — closing the notification locks the title, and the same pending titles
+  can be settled from the menu bar
 - coding-usage aggregation that never uploads session IDs, project paths, prompts, or replies
 - charger cover name plus the original JPEG uploaded to R2 (no resize or transcode; the point is to leave Anker's signed URL)
 - coding agent usage aggregation in the envelope (subscription plan tiers and rate-limit windows are reported separately by `reporters/agent-limits-reporter` in the lyjwpage repo)
@@ -310,7 +312,15 @@ pause land in 320–490 ms, application switches in 560–620 ms.
      model (`POST https://api.typesafe.ai/v1/systemone`) as one `choice` question
      over `public` / `private` / `unsure`. `public ≥ 0.80` publishes,
      `private ≥ 0.60` locks, anything else raises a user notification carrying
-     the app name, the title and 公开 / 锁定 buttons. Until the user answers, the
+     the app name and the title. The notification has exactly one action, 公开:
+     macOS folds two or more actions into an 选项 submenu, so a second button
+     would cost two clicks. Closing the notification (X / Clear / Clear All)
+     locks the title instead, but only while that title is still pending, so
+     clearing a stale banner for an already-decided title changes nothing.
+     Clicking the notification body decides nothing — it just opens
+     **设置 › 窗口标题**. The menu-bar menu lists up to five pending titles at
+     the top, each a submenu with 公开 and 锁定, so a missed notification is still
+     two clicks from settled. Until the user answers, the
      title is treated as locked. Verdicts are cached on disk by Bundle ID plus
      normalized title (LRU, 500 entries, `~/Library/Application Support/
      MacTelemetryHub/window-title-judgments.json`) and are reviewable, re-judgeable

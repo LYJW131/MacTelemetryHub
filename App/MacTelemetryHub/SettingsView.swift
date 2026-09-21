@@ -137,6 +137,13 @@ struct SettingsView: View {
         }
         .navigationSplitViewStyle(.balanced)
         .frame(minWidth: 780, minHeight: 500)
+        // 从通知本体或菜单栏那一项点进来的时候跳到窗口标题页。@Published 在订阅
+        // 那一刻会把当前值再发一遍，所以窗口是这一下才新建的也接得住。
+        .onReceive(judge.$reviewRequest) { request in
+            guard request != nil else { return }
+            selection = .windowTitle
+            judge.consumeReviewRequest()
+        }
         .onDisappear {
             chargerLink.stopPairingScan()
             powerBankLink.stopPairingScan()

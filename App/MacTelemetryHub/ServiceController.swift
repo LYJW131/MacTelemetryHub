@@ -130,7 +130,7 @@ final class ServiceController: ObservableObject {
     func start() {
         guard !started else { return }
         started = true
-        // 通知的 delegate 和两个动作按钮必须在任何一条判断回来之前装好，
+        // 通知的 delegate 和那个「公开」动作必须在任何一条判断回来之前装好，
         // 否则第一条「待确认」弹出来时点按钮没有落点。
         windowTitleJudge.installNotificationHandling()
         configureModules()

@@ -19,11 +19,27 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     let service = ServiceController()
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        // 先接上再 start()：start() 里就把通知 delegate 装好了，晚一步的话
+        // 紧接着点进来的那一条没有落点。
+        service.windowTitleJudge.onReviewRequested = { Self.openSettings() }
         service.start()
     }
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
         false
+    }
+
+    /**
+     * 打开设置窗口。
+     *
+     * SwiftUI 到 macOS 15 都只给了 `SettingsLink` 这个视图，没有能在回调里调的
+     * 接口，所以只能发 AppKit 那个选择器。`Settings` 场景装的就是它，发不出去
+     * 也不算坏事 —— 前面已经把应用叫到前台了。跳到哪一页由
+     * `WindowTitleJudge.reviewRequest` 说了算，设置页自己收。
+     */
+    private static func openSettings() {
+        NSApp.activate(ignoringOtherApps: true)
+        NSApp.sendAction(Selector(("showSettingsWindow:")), to: nil, from: nil)
     }
 }
 
@@ -71,7 +87,14 @@ private struct MenuBarView: View {
     /// 单独订阅：ServiceController 是 ObservableObject，但它内部这个 monitor 的
     /// @Published 不会冒泡上来，挂在 service 下面读的话菜单里会是一份旧值。
     @ObservedObject private var desktopActivity: DesktopActivityMonitor
+    /// 同理单独订阅：待确认的那几条要在菜单里当场能拍板，不然只能进设置页。
+    @ObservedObject private var judge: WindowTitleJudge
     @Environment(\.openWindow) private var openWindow
+
+    /// 菜单里最多列几条待确认。再多就该去设置页一口气处理了。
+    private static let pendingLimit = 5
+    /// 菜单项不认 `lineLimit`，长标题会把整个菜单撑宽，只能自己截。
+    private static let pendingTitleLimit = 48
 
     init(service: ServiceController) {
         self.service = service
@@ -79,10 +102,12 @@ private struct MenuBarView: View {
         chargerLink = service.chargerLink
         powerBankLink = service.powerBankLink
         desktopActivity = service.desktopActivity
+        judge = service.windowTitleJudge
     }
 
     var body: some View {
         Text("Mac Telemetry Hub")
+        windowTitlePendingSection
         // 正在用的那个应用。菜单栏的菜单弹出来不会把本应用变成前台，所以这里
         // 读到的仍是用户真正在用的那个。
         if settings.desktopModuleEnabled {
@@ -116,6 +141,41 @@ private struct MenuBarView: View {
             NSApplication.shared.terminate(nil)
         }
         .keyboardShortcut("q")
+    }
+
+    /**
+     * 待确认的标题，摆在菜单最上面。
+     *
+     * 通知上只剩「公开」一个按钮，错过或者关掉之后总得有个地方补拍板；设置页
+     * 要开窗口、切页，菜单栏这里点开图标就是两次点击的事。一条一个子菜单，
+     * 平铺成「标题 + 两个按钮」的话五条就是十五行。
+     */
+    @ViewBuilder
+    private var windowTitlePendingSection: some View {
+        let pending = judge.awaitingConfirmation
+        if !pending.isEmpty {
+            Section("待确认标题") {
+                ForEach(pending.prefix(Self.pendingLimit), id: \.key) { entry in
+                    Menu(Self.pendingLabel(entry)) {
+                        Button("公开") { judge.decide(key: entry.key, verdict: .published) }
+                        Button("锁定") { judge.decide(key: entry.key, verdict: .locked) }
+                    }
+                }
+                if pending.count > Self.pendingLimit {
+                    Button("还有 \(pending.count - Self.pendingLimit) 条，去设置处理") {
+                        judge.requestReview()
+                    }
+                }
+            }
+            Divider()
+        }
+    }
+
+    private static func pendingLabel(_ entry: WindowTitleJudgmentEntry) -> String {
+        let title = entry.title.count > pendingTitleLimit
+            ? entry.title.prefix(pendingTitleLimit) + "…"
+            : entry.title[...]
+        return "\(entry.applicationName) — \(title)"
     }
 
     @ViewBuilder
