@@ -189,7 +189,8 @@ struct SettingsView: View {
             // 只有这一页订阅前台应用和 MusicKit 状态。
             SettingsSourcesRefresh(
                 desktopActivity: desktopActivity,
-                authorization: appleMusicAuthorization
+                authorization: appleMusicAuthorization,
+                judge: judge
             ) {
                 sourceSettings
             }
@@ -1094,6 +1095,8 @@ struct SettingsView: View {
 private struct SettingsSourcesRefresh<Content: View>: View {
     @ObservedObject var desktopActivity: DesktopActivityMonitor
     @ObservedObject var authorization: AppleMusicAuthorizationManager
+    /// 通知授权状态挂在 judge 上，不订阅它那一行不会跟着变。
+    @ObservedObject var judge: WindowTitleJudge
     @ViewBuilder var content: () -> Content
 
     var body: some View { content() }

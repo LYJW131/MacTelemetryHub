@@ -1,3 +1,4 @@
+import CryptoKit
 import Foundation
 import UserNotifications
 
@@ -142,12 +143,12 @@ final class WindowTitleJudge: ObservableObject {
     // MARK: - 配置
 
     func configure(_ rules: Rules) {
-        let keyAppeared = self.rules.apiKey.isEmpty && !rules.apiKey.isEmpty
         let previous = self.rules
         self.rules = rules
         guard previous != rules else { return }
-        // 名单或 key 变了，之前因为没 key / 失败而卡住的那些值得再试一次。
-        if keyAppeared {
+        // key 换了就把失败记录清空 —— 填错一次 key 会让每条标题连吃四个 401
+        // 然后永久停在「无法判断」，换上正确的 key 也醒不过来。
+        if previous.apiKey != rules.apiKey {
             lastError = nil
             failureCounts.removeAll()
             globalBackoffUntil = .distantPast
@@ -456,8 +457,13 @@ final class WindowTitleJudge: ObservableObject {
         content.body = title
         content.categoryIdentifier = Self.notificationCategoryIdentifier
         content.userInfo = ["cacheKey": key]
+        // 通知 ID 用键的哈希：键里有换行、还可能有两百个字符，直接当标识符不稳。
         try? await UNUserNotificationCenter.current().add(
-            UNNotificationRequest(identifier: key, content: content, trigger: nil)
+            UNNotificationRequest(
+                identifier: Self.notificationIdentifier(for: key),
+                content: content,
+                trigger: nil
+            )
         )
     }
 
@@ -469,9 +475,14 @@ final class WindowTitleJudge: ObservableObject {
         }
     }
 
+    private static func notificationIdentifier(for key: String) -> String {
+        SHA256.hash(data: Data(key.utf8)).map { String(format: "%02x", $0) }.joined()
+    }
+
     private func removeDeliveredNotification(for key: String) {
-        UNUserNotificationCenter.current().removeDeliveredNotifications(withIdentifiers: [key])
-        UNUserNotificationCenter.current().removePendingNotificationRequests(withIdentifiers: [key])
+        let identifier = Self.notificationIdentifier(for: key)
+        UNUserNotificationCenter.current().removeDeliveredNotifications(withIdentifiers: [identifier])
+        UNUserNotificationCenter.current().removePendingNotificationRequests(withIdentifiers: [identifier])
     }
 
     // MARK: - 落盘
@@ -489,12 +500,16 @@ final class WindowTitleJudge: ObservableObject {
         return WindowTitleJudgmentCache.decoded(from: data)
     }
 
+    /**
+     * 同步写。
+     *
+     * 这份文件最多五百条、不到一百 KB，主线程上写一次的代价可以忽略；而丢进
+     * 后台任务的话，「拍板」紧跟着「删除」的两次原子写可能反序落地，盘上留下
+     * 的是先写的那一份。缓存的正确性比这点耗时值钱。
+     */
     private func persist() {
         guard let data = try? cache.encoded() else { return }
-        let url = Self.cacheURL
-        Task.detached(priority: .utility) {
-            try? data.write(to: url, options: .atomic)
-        }
+        try? data.write(to: Self.cacheURL, options: .atomic)
     }
 }
 

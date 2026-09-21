@@ -125,6 +125,29 @@ struct DesktopAndTimeZoneSignatureTests {
         #expect(titled != other)
     }
 
+    /**
+     * 但 `identity` 不看标题。
+     *
+     * 图标直传的回调问的是「网页收到的还是这个应用吗」。标题在上传那几秒里
+     * 本来就会变（判断回来了、用户切了标签页），拿整份签名比的话那个补对象键
+     * 的回调会永远不触发，图标停在无图版本。
+     */
+    @Test func desktopIdentityIgnoresWindowTitle() {
+        let untitled = DesktopUploadSignature(snapshot(name: "Xcode", iconHash: "h", observedAt: 1))
+        let titled = DesktopUploadSignature(
+            snapshot(name: "Xcode", iconHash: "h", observedAt: 9, windowTitle: "A.swift")
+        )
+        #expect(untitled.identity == titled.identity)
+        // 应用真的换了或者图标换了，identity 仍然要变
+        let other = DesktopUploadSignature(
+            snapshot(name: "Safari", iconHash: "h", observedAt: 1, windowTitle: "A.swift")
+        )
+        #expect(untitled.identity != other.identity)
+        #expect(untitled.identity != DesktopUploadSignature(
+            snapshot(name: "Xcode", iconHash: "z", observedAt: 1)
+        ).identity)
+    }
+
     @Test func timeZoneSignatureIgnoresObservedAt() {
         let shanghai = TimeZoneSnapshot(
             identifier: "Asia/Shanghai", abbreviation: "GMT+8", secondsFromGMT: 28_800, observedAt: 1

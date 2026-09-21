@@ -175,6 +175,27 @@ struct DesktopUploadSignature: Equatable {
         iconHash = snapshot.iconHash
         windowTitle = snapshot.windowTitle
     }
+
+    /**
+     * 签名里「是哪个应用」的那一半。
+     *
+     * 图标直传的回调要问的是「网页收到的还是这个应用吗」，不是「一个字都没变
+     * 吗」—— 标题进签名之后，判断回来、切个标签页都会让整份签名对不上，
+     * 那个补对象键的回调就再也不触发了。
+     */
+    struct Identity: Equatable {
+        let applicationName: String
+        let bundleIdentifier: String?
+        let iconHash: String?
+    }
+
+    var identity: Identity {
+        Identity(
+            applicationName: applicationName,
+            bundleIdentifier: bundleIdentifier,
+            iconHash: iconHash
+        )
+    }
 }
 
 struct TimeZoneUploadSignature: Equatable {

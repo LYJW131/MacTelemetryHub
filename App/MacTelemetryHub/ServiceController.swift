@@ -1013,10 +1013,14 @@ final class ServiceController: ObservableObject {
     /**
      * 桌面图标的直传由 coordinator 跑，这里只提供成功之后那件跟桌面有关的事。
      *
-     * 两个条件缺一不可：`lastPosted.desktop == signature` 说明网页收到的正是
-     * 这份无图版本，而当前前台应用仍是它说明补发不会发出一个用户早就切走的
-     * 应用。少了后一个条件就是历史上那次热循环 —— 门闩清成 nil、循环被叫醒、
-     * 发出旧应用、resolver 再触发，来回打转。
+     * 两个条件缺一不可：门闩里那份说明网页收到的正是这个应用的无图版本，
+     * 而当前前台应用仍是它说明补发不会发出一个用户早就切走的应用。少了后一个
+     * 条件就是历史上那次热循环 —— 门闩清成 nil、循环被叫醒、发出旧应用、
+     * resolver 再触发，来回打转。
+     *
+     * 比的是 `identity` 而不是整份签名：窗口标题也在签名里，而它在这段上传
+     * 期间本来就会变（判断回来了、用户切了标签页）。拿整份比的话，补对象键
+     * 那一下会在恰好上传期间换了标题时永远不触发，图标停在无图版本。
      */
     private func startDesktopIconResolution(_ desktop: DesktopActivitySnapshot) {
         guard settings.postEnabled,
@@ -1026,7 +1030,7 @@ final class ServiceController: ObservableObject {
             return
         }
 
-        let signature = DesktopUploadSignature(desktop)
+        let identity = DesktopUploadSignature(desktop).identity
         icons.resolve(
             kind: .desktop,
             hash: iconHash,
@@ -1038,8 +1042,8 @@ final class ServiceController: ObservableObject {
             guard let self else { return }
             // resolver 早于首包完成时，400ms 防抖会自然把键带上，不额外叫醒。
             // 只有无图版本已经成功发过，才需要补发同一应用的对象键。
-            guard lastPosted.desktop == signature,
-                  desktopActivity.snapshot.map(DesktopUploadSignature.init) == signature else {
+            guard lastPosted.desktop?.identity == identity,
+                  desktopActivity.snapshot.map({ DesktopUploadSignature($0).identity }) == identity else {
                 return
             }
             desktopLatchGeneration += 1
