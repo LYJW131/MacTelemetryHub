@@ -1,0 +1,57 @@
+# 每次推送跑一遍 swift test，再不签名地编一遍 App。
+# 签名、安装还是本机 build-release.sh 的事：这里只回答「这个提交能不能编、测试过不过」。
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# 同一分支连推几次，只留最后一次
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - run: xcodebuild -version
+
+      # 先编好再跑，编译别和那几条掐秒表的进程测试抢 CPU
+      - run: swift build --build-tests
+
+      # CodingUsageKit 的测试拿 python 当假的采集器。runner 上 /usr/bin/python3 是 xcrun 的 shim，
+      # 真 python 由它另起、输出晚到，见 Tests/CodingUsageKitTests/TestPython.swift。换成 PATH 里的真解释器
+      - run: |
+          py="$(python3 -c 'import sys; print(sys.executable)')"
+          [ "$py" != /usr/bin/python3 ] || { echo "PATH 里只有 /usr/bin/python3 的 shim" >&2; exit 1; }
+          echo "TEST_PYTHON=$py" >> "$GITHUB_ENV"
+
+      # 串行跑：CcusageConcurrencyTests 里有条按 20ms / 150ms 睡眠卡先后的测试，三核上并行跑会抢不过
+      - run: swift test --skip-build --no-parallel
+
+  build:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      # App target 把 .build/ccusage/ccusage 拷进包里，没有它编不过；脚本按版本号和 sha256 取官方包
+      - run: Tools/install-ccusage.sh
+
+      - run: Tools/generate-icons.sh
+
+      - run: >
+          xcodebuild
+          -project MacTelemetryHub.xcodeproj
+          -scheme MacTelemetryHub
+          -configuration Release
+          -derivedDataPath "$RUNNER_TEMP/DerivedData"
+          CODE_SIGNING_ALLOWED=NO
+          build

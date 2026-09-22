@@ -391,13 +391,16 @@ public enum CodingUsageProcess {
             cancellation.attach(process.processIdentifier)
             let capturedOutput = Capture(), capturedErrors = Capture()
             let drain = DispatchGroup()
+            // Dedicated threads, not the global queue: several collectors block in semaphore waits
+            // at once, and on a few cores GCD can hold new utility workers back past the 2 s cap
+            // below, which then closes the pipes before anything was read.
             drain.enter()
-            DispatchQueue.global(qos: .utility).async {
+            Thread.detachNewThread {
                 capturedOutput.drain(output.fileHandleForReading, limit: 128 * 1024 * 1024)
                 drain.leave()
             }
             drain.enter()
-            DispatchQueue.global(qos: .utility).async {
+            Thread.detachNewThread {
                 capturedErrors.drain(errors.fileHandleForReading, limit: 1024 * 1024)
                 drain.leave()
             }

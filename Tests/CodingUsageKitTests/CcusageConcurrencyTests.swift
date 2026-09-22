@@ -62,7 +62,7 @@ struct CcusageConcurrencyTests {
         defer { try? FileManager.default.removeItem(at: directory) }
         let executable = directory.appendingPathComponent("ccusage")
         let script = """
-        #!/usr/bin/python3
+        #!\(testPython)
         import sys,json,time,fcntl,pathlib
         folder=pathlib.Path(__file__).parent
         args=sys.argv[1:]

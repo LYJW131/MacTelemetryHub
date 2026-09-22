@@ -105,14 +105,14 @@ struct CcusageParserTests {
 
     @Test func pipeDrainingCannotDeadlockOnLargeStderr() async throws {
         let output = try await CodingUsageProcess.run(
-            executableURL: URL(fileURLWithPath: "/usr/bin/python3"),
+            executableURL: URL(fileURLWithPath: testPython),
             arguments: ["-c", "import sys; sys.stderr.write('x' * 2000000); sys.stderr.flush(); print('{\"daily\":[]}')"], timeout: 10)
         #expect(String(decoding: output, as: UTF8.self).contains("daily"))
     }
     @Test func longRunningCollectorTimesOut() async throws {
         let began = Date()
         await #expect(throws: (any Error).self) {
-            try await CodingUsageProcess.run(executableURL: URL(fileURLWithPath: "/usr/bin/python3"),
+            try await CodingUsageProcess.run(executableURL: URL(fileURLWithPath: testPython),
                                              arguments: ["-c", "import time; time.sleep(10)"], timeout: 0.2)
         }
         #expect(Date().timeIntervalSince(began) < 4)
@@ -120,7 +120,7 @@ struct CcusageParserTests {
     @Test func cancellingCollectorTerminatesChildWithoutWaitingForTimeout() async throws {
         let began = Date()
         let task = Task {
-            try await CodingUsageProcess.run(executableURL: URL(fileURLWithPath: "/usr/bin/python3"),
+            try await CodingUsageProcess.run(executableURL: URL(fileURLWithPath: testPython),
                                              arguments: ["-c", "import time; time.sleep(10)"], timeout: 30)
         }
         try await Task.sleep(for: .milliseconds(200))
@@ -135,7 +135,7 @@ struct CcusageParserTests {
         let executable = directory.appendingPathComponent("ccusage")
         let sample = String(decoding: try data(rawDay()), as: UTF8.self)
         let script = """
-        #!/usr/bin/python3
+        #!\(testPython)
         import sys,json
         args=sys.argv[1:]
         if args==['--help']:
