@@ -202,9 +202,10 @@ struct SettingsView: View {
                 sourceSettings
             }
         case .windowTitle:
-            // 判断结论每回来一条这一页就要重绘；辅助功能和通知这两个权限状态
-            // 分别挂在 desktopActivity 和 judge 上，订阅都只收在这里。
-            SettingsWindowTitleRefresh(judge: judge, desktopActivity: desktopActivity) {
+            // 判断结论每回来一条这一页就要重绘，通知权限也挂在 judge 上。
+            // desktopActivity 不在这一层订阅：当前标题每切一次窗口就变，
+            // 它和辅助功能权限各自包成小视图，免得整页跟着标题一起重绘。
+            SettingsWindowTitleRefresh(judge: judge) {
                 windowTitleSettings
             }
         case .charger:
@@ -462,14 +463,6 @@ struct SettingsView: View {
         }
     }
 
-    private var windowTitleAccessText: String {
-        desktopActivity.windowTitleAccessGranted ? "已授权" : "需要辅助功能权限"
-    }
-
-    private var windowTitleAccessColor: Color {
-        desktopActivity.windowTitleAccessGranted ? .secondary : .orange
-    }
-
     private var notificationAuthorizationText: String {
         guard judge.notificationAuthorizationRequested else { return "首次出现待确认时再请求" }
         return judge.notificationAuthorizationGranted ? "已授权" : "已拒绝，改到本页确认"
@@ -525,10 +518,7 @@ struct SettingsView: View {
 
             Divider().padding(.vertical, 3)
 
-            LabeledContent("辅助功能权限") {
-                Text(windowTitleAccessText)
-                    .foregroundStyle(windowTitleAccessColor)
-            }
+            WindowTitleAccessRow(desktopActivity: desktopActivity)
 
             LabeledContent("通知权限") {
                 Text(notificationAuthorizationText)
@@ -540,16 +530,7 @@ struct SettingsView: View {
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
 
-            if !desktopActivity.windowTitleAccessGranted {
-                HStack(spacing: 10) {
-                    Button("请求辅助功能权限") {
-                        desktopActivity.requestWindowTitleAccess()
-                    }
-                    Button("打开系统设置") {
-                        desktopActivity.openWindowTitlePrivacySettings()
-                    }
-                }
-            }
+            WindowTitleAccessActions(desktopActivity: desktopActivity)
         }
     }
 
@@ -656,11 +637,7 @@ struct SettingsView: View {
             detail: "Jev 把握不足的标题停在这里。未确认前一律按锁定处理，不会上报。",
             icon: "questionmark.bubble"
         ) {
-            LabeledContent("当前标题") {
-                Text(currentWindowTitleSummary)
-                    .foregroundStyle(.secondary)
-                    .lineLimit(2)
-            }
+            CurrentWindowTitleRow(desktopActivity: desktopActivity)
 
             if judge.awaitingConfirmation.isEmpty {
                 Label("没有待确认的标题。", systemImage: "checkmark.circle")
@@ -668,7 +645,7 @@ struct SettingsView: View {
                     .foregroundStyle(.secondary)
             } else {
                 ForEach(judge.awaitingConfirmation, id: \.key) { entry in
-                    windowTitleRow(entry) {
+                    WindowTitleEntryCard(entry: entry, thresholds: judge.thresholds) {
                         Button("公开") { judge.decide(key: entry.key, verdict: .published) }
                             .buttonStyle(.bordered)
                         Button("锁定") { judge.decide(key: entry.key, verdict: .locked) }
@@ -692,140 +669,8 @@ struct SettingsView: View {
             detail: "键是 Bundle ID + 归一化标题，上限 \(WindowTitleJudgmentCache.capacity) 条，按最近使用淘汰。",
             icon: "tray.full"
         ) {
-            if judge.cache.entries.isEmpty {
-                Label("还没有判过任何标题。", systemImage: "tray")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-            } else {
-                ForEach(judge.cache.entriesByReviewOrder, id: \.key) { entry in
-                    windowTitleRow(entry) {
-                        Menu("改档") {
-                            Button("公开") { judge.decide(key: entry.key, verdict: .published) }
-                            Button("锁定") { judge.decide(key: entry.key, verdict: .locked) }
-                            Button("已省略") { judge.decide(key: entry.key, verdict: .omitted) }
-                            Button("待确认") {
-                                judge.decide(key: entry.key, verdict: .needsConfirmation)
-                            }
-                        }
-                        Button("重新判断") { judge.rejudge(key: entry.key) }
-                            .buttonStyle(.bordered)
-                        Button("删除") { judge.forget(key: entry.key) }
-                            .buttonStyle(.bordered)
-                    }
-                }
-
-                Button("清空缓存", role: .destructive) { judge.forgetAll() }
-                    .buttonStyle(.bordered)
-            }
+            WindowTitleCacheList(judge: judge)
         }
-    }
-
-    @ViewBuilder
-    private func windowTitleRow<Actions: View>(
-        _ entry: WindowTitleJudgmentEntry,
-        @ViewBuilder actions: () -> Actions
-    ) -> some View {
-        let tint = windowTitleVerdictColor(entry.verdict)
-        VStack(alignment: .leading, spacing: 6) {
-            Text(entry.title)
-                .font(.callout.weight(.medium))
-                .lineLimit(2)
-                .textSelection(.enabled)
-            // 结论做成彩色徽标打头，理由跟在旁边用同一个色；其余元数据照旧淡显。
-            // 四档四个色，和上面概率行的红（锁定线）、橙（灰区）是同一套语义。
-            HStack(spacing: 6) {
-                Text(windowTitleVerdictName(entry.verdict))
-                    .font(.caption.weight(.semibold))
-                    .foregroundStyle(tint)
-                    .padding(.horizontal, 6)
-                    .padding(.vertical, 1.5)
-                    .background(tint.opacity(0.14), in: Capsule())
-                if let reason = entry.reasonText(thresholds: judge.thresholds) {
-                    Text(reason)
-                        .font(.caption.weight(.medium))
-                        .foregroundStyle(tint)
-                }
-                Text(windowTitleEntryDetail(entry))
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
-            }
-            if let probabilities = windowTitleProbabilityDetail(entry) {
-                probabilities
-                    .font(.caption2.monospacedDigit())
-                    .foregroundStyle(.tertiary)
-                    .lineLimit(2)
-                    .textSelection(.enabled)
-            }
-            HStack(spacing: 8) { actions() }
-        }
-        .padding(9)
-        .padding(.leading, 3)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(.primary.opacity(0.045))
-        // 左侧一道同色细条，列表滚过去不用读字也能数出几红几橙。
-        .overlay(alignment: .leading) { Rectangle().fill(tint).frame(width: 3) }
-        .overlay(RoundedRectangle(cornerRadius: 8).stroke(.primary.opacity(0.07), lineWidth: 1))
-        .clipShape(RoundedRectangle(cornerRadius: 8))
-    }
-
-    /// 徽标后面那串：应用、谁拍的板、时间。结论和理由在徽标里，六个概率另起一行。
-    private func windowTitleEntryDetail(_ entry: WindowTitleJudgmentEntry) -> String {
-        var parts = [entry.applicationName]
-        parts.append(entry.source == .user ? "我拍的板" : "Jev")
-        parts.append(entry.judgedAt.formatted(date: .abbreviated, time: .shortened))
-        return parts.joined(separator: " · ")
-    }
-
-    /// 四档四个色：过绿、锁红、等橙、省灰。
-    private func windowTitleVerdictColor(_ verdict: WindowTitleVerdict) -> Color {
-        switch verdict {
-        case .published: .green
-        case .locked: .red
-        case .needsConfirmation: .orange
-        case .omitted: .gray
-        }
-    }
-
-    /**
-     * 六个概率排成一行，越线的那几个加重点。
-     *
-     * 全列出来而不是只列越线的那几个：调题面时要看的正是那些没越线的数
-     * 离线有多远，只印理由的话这张表就没法对账。但一行六个灰字扫一眼分不出
-     * 是哪道题把标题拦下来的，所以越过锁定线的标红、卡在灰区的标橙、信息量
-     * 没到线的加深，其余照旧淡显。
-     */
-    private func windowTitleProbabilityDetail(_ entry: WindowTitleJudgmentEntry) -> Text? {
-        let probabilities = entry.dimensionProbabilities
-        let pieces = WindowTitleDimension.allCases.compactMap { dimension -> Text? in
-            guard let probability = probabilities[dimension] else { return nil }
-            let label = Text(String(format: "%@ %.2f", dimension.displayName, probability))
-            switch judge.thresholds.emphasis(for: dimension, in: probabilities) {
-            case .locking: return label.fontWeight(.semibold).foregroundStyle(.red)
-            case .unsettled: return label.fontWeight(.semibold).foregroundStyle(.orange)
-            case .uninformative: return label.fontWeight(.semibold).foregroundStyle(.secondary)
-            case .none: return label
-            }
-        }
-        guard let first = pieces.first else { return nil }
-        return pieces.dropFirst().reduce(first) { $0 + Text(" · ") + $1 }
-    }
-
-    private func windowTitleVerdictName(_ verdict: WindowTitleVerdict) -> String {
-        switch verdict {
-        case .published: "已公开"
-        case .locked: "已锁定"
-        case .needsConfirmation: "待确认"
-        case .omitted: "已省略"
-        }
-    }
-
-    private var currentWindowTitleSummary: String {
-        let status = desktopActivity.windowTitleStatus
-        var verdict = status.displayName
-        if let reason = desktopActivity.windowTitleReason { verdict += " · \(reason)" }
-        guard let title = desktopActivity.windowTitle else { return verdict }
-        return "\(title) · \(verdict)"
     }
 
     private var chargerSettings: some View {
@@ -1289,10 +1134,224 @@ private struct SettingsSourcesRefresh<Content: View>: View {
 
 private struct SettingsWindowTitleRefresh<Content: View>: View {
     @ObservedObject var judge: WindowTitleJudge
-    @ObservedObject var desktopActivity: DesktopActivityMonitor
     @ViewBuilder var content: () -> Content
 
     var body: some View { content() }
+}
+
+/// 辅助功能权限那一行。只有它和下面两个小视图订阅 desktopActivity。
+private struct WindowTitleAccessRow: View {
+    @ObservedObject var desktopActivity: DesktopActivityMonitor
+
+    var body: some View {
+        let granted = desktopActivity.windowTitleAccessGranted
+        LabeledContent("辅助功能权限") {
+            Text(granted ? "已授权" : "需要辅助功能权限")
+                .foregroundStyle(granted ? Color.secondary : Color.orange)
+        }
+    }
+}
+
+private struct WindowTitleAccessActions: View {
+    @ObservedObject var desktopActivity: DesktopActivityMonitor
+
+    var body: some View {
+        if !desktopActivity.windowTitleAccessGranted {
+            HStack(spacing: 10) {
+                Button("请求辅助功能权限") {
+                    desktopActivity.requestWindowTitleAccess()
+                }
+                Button("打开系统设置") {
+                    desktopActivity.openWindowTitlePrivacySettings()
+                }
+            }
+        }
+    }
+}
+
+/// 「待确认」那一节顶上的当前标题。切窗口时每 0.5 秒就可能变一次，只重绘这一行。
+private struct CurrentWindowTitleRow: View {
+    @ObservedObject var desktopActivity: DesktopActivityMonitor
+
+    var body: some View {
+        LabeledContent("当前标题") {
+            Text(summary)
+                .foregroundStyle(.secondary)
+                .lineLimit(2)
+        }
+    }
+
+    private var summary: String {
+        var verdict = desktopActivity.windowTitleStatus.displayName
+        if let reason = desktopActivity.windowTitleReason { verdict += " · \(reason)" }
+        guard let title = desktopActivity.windowTitle else { return verdict }
+        return "\(title) · \(verdict)"
+    }
+}
+
+/**
+ * 判断缓存那份列表。
+ *
+ * 缓存上限五百条，每条带一个「改档」菜单和几个按钮，外加可选中的文字 ——
+ * 一次全摆出来，几百行在每次重绘时都要重新实例化和排版，列表又在页面最底下，
+ * 大半根本不在屏幕上。所以用 LazyVStack 只建滚到眼前的那几行；外层
+ * ScrollView 是祖先，中间隔着普通 VStack 不影响懒加载。
+ *
+ * 单独成一个视图、只订阅 judge：设置页草稿每敲一个字、上报每成功一次，父视图
+ * 都会重算 body，这里的输入没变就整块跳过。
+ */
+private struct WindowTitleCacheList: View {
+    @ObservedObject var judge: WindowTitleJudge
+
+    var body: some View {
+        if judge.cache.entries.isEmpty {
+            Label("还没有判过任何标题。", systemImage: "tray")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        } else {
+            let thresholds = judge.thresholds
+            // 13 和 settingSection 里各项的间距一致。
+            LazyVStack(alignment: .leading, spacing: 13) {
+                ForEach(judge.cache.entriesByReviewOrder, id: \.key) { entry in
+                    WindowTitleEntryCard(entry: entry, thresholds: thresholds) {
+                        Menu("改档") {
+                            Button("公开") { judge.decide(key: entry.key, verdict: .published) }
+                            Button("锁定") { judge.decide(key: entry.key, verdict: .locked) }
+                            Button("已省略") { judge.decide(key: entry.key, verdict: .omitted) }
+                            Button("待确认") {
+                                judge.decide(key: entry.key, verdict: .needsConfirmation)
+                            }
+                        }
+                        Button("重新判断") { judge.rejudge(key: entry.key) }
+                            .buttonStyle(.bordered)
+                        Button("删除") { judge.forget(key: entry.key) }
+                            .buttonStyle(.bordered)
+                    }
+                }
+            }
+
+            Button("清空缓存", role: .destructive) { judge.forgetAll() }
+                .buttonStyle(.bordered)
+        }
+    }
+}
+
+/// 一条判断：标题、结论徽标、六个概率，最后一排是调用方给的按钮。
+private struct WindowTitleEntryCard<Actions: View>: View {
+    let entry: WindowTitleJudgmentEntry
+    let thresholds: WindowTitleJudgmentThresholds
+    @ViewBuilder var actions: () -> Actions
+
+    var body: some View {
+        let tint = WindowTitleEntrySummary.color(entry.verdict)
+        VStack(alignment: .leading, spacing: 6) {
+            // 按钮的闭包每次都是新的，比不出相等；文字那部分单独 equatable，
+            // 条目和三条线都没变就不重排，Date 也不必再格式化一遍。
+            WindowTitleEntrySummary(entry: entry, thresholds: thresholds)
+                .equatable()
+            HStack(spacing: 8) { actions() }
+        }
+        .padding(9)
+        .padding(.leading, 3)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(.primary.opacity(0.045))
+        // 左侧一道同色细条，列表滚过去不用读字也能数出几红几橙。
+        .overlay(alignment: .leading) { Rectangle().fill(tint).frame(width: 3) }
+        .overlay(RoundedRectangle(cornerRadius: 8).stroke(.primary.opacity(0.07), lineWidth: 1))
+        .clipShape(RoundedRectangle(cornerRadius: 8))
+    }
+}
+
+private struct WindowTitleEntrySummary: View, Equatable {
+    let entry: WindowTitleJudgmentEntry
+    let thresholds: WindowTitleJudgmentThresholds
+
+    var body: some View {
+        let tint = Self.color(entry.verdict)
+        VStack(alignment: .leading, spacing: 6) {
+            Text(entry.title)
+                .font(.callout.weight(.medium))
+                .lineLimit(2)
+                .textSelection(.enabled)
+            // 结论做成彩色徽标打头，理由跟在旁边用同一个色；其余元数据照旧淡显。
+            // 四档四个色，和下面概率行的红（锁定线）、橙（灰区）是同一套语义。
+            HStack(spacing: 6) {
+                Text(Self.name(entry.verdict))
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(tint)
+                    .padding(.horizontal, 6)
+                    .padding(.vertical, 1.5)
+                    .background(tint.opacity(0.14), in: Capsule())
+                if let reason = entry.reasonText(thresholds: thresholds) {
+                    Text(reason)
+                        .font(.caption.weight(.medium))
+                        .foregroundStyle(tint)
+                }
+                Text(detail)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+            }
+            if let probabilities {
+                probabilities
+                    .font(.caption2.monospacedDigit())
+                    .foregroundStyle(.tertiary)
+                    .lineLimit(2)
+                    .textSelection(.enabled)
+            }
+        }
+    }
+
+    /// 徽标后面那串：应用、谁拍的板、时间。结论和理由在徽标里，六个概率另起一行。
+    private var detail: String {
+        var parts = [entry.applicationName]
+        parts.append(entry.source == .user ? "我拍的板" : "Jev")
+        parts.append(entry.judgedAt.formatted(date: .abbreviated, time: .shortened))
+        return parts.joined(separator: " · ")
+    }
+
+    /**
+     * 六个概率排成一行，越线的那几个加重点。
+     *
+     * 全列出来而不是只列越线的那几个：调题面时要看的正是那些没越线的数
+     * 离线有多远，只印理由的话这张表就没法对账。但一行六个灰字扫一眼分不出
+     * 是哪道题把标题拦下来的，所以越过锁定线的标红、卡在灰区的标橙、信息量
+     * 没到线的加深，其余照旧淡显。
+     */
+    private var probabilities: Text? {
+        let probabilities = entry.dimensionProbabilities
+        let pieces = WindowTitleDimension.allCases.compactMap { dimension -> Text? in
+            guard let probability = probabilities[dimension] else { return nil }
+            let label = Text(String(format: "%@ %.2f", dimension.displayName, probability))
+            switch thresholds.emphasis(for: dimension, in: probabilities) {
+            case .locking: return label.fontWeight(.semibold).foregroundStyle(.red)
+            case .unsettled: return label.fontWeight(.semibold).foregroundStyle(.orange)
+            case .uninformative: return label.fontWeight(.semibold).foregroundStyle(.secondary)
+            case .none: return label
+            }
+        }
+        guard let first = pieces.first else { return nil }
+        return pieces.dropFirst().reduce(first) { $0 + Text(" · ") + $1 }
+    }
+
+    /// 四档四个色：过绿、锁红、等橙、省灰。
+    static func color(_ verdict: WindowTitleVerdict) -> Color {
+        switch verdict {
+        case .published: .green
+        case .locked: .red
+        case .needsConfirmation: .orange
+        case .omitted: .gray
+        }
+    }
+
+    static func name(_ verdict: WindowTitleVerdict) -> String {
+        switch verdict {
+        case .published: "已公开"
+        case .locked: "已锁定"
+        case .needsConfirmation: "待确认"
+        case .omitted: "已省略"
+        }
+    }
 }
 
 private struct SettingsChargerRefresh<Content: View>: View {
