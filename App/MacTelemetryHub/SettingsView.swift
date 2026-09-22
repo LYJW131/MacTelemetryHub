@@ -606,15 +606,31 @@ struct SettingsView: View {
         _ entry: WindowTitleJudgmentEntry,
         @ViewBuilder actions: () -> Actions
     ) -> some View {
+        let tint = windowTitleVerdictColor(entry.verdict)
         VStack(alignment: .leading, spacing: 6) {
             Text(entry.title)
                 .font(.callout.weight(.medium))
                 .lineLimit(2)
                 .textSelection(.enabled)
-            Text(windowTitleEntryDetail(entry))
-                .font(.caption)
-                .foregroundStyle(.secondary)
-                .lineLimit(2)
+            // 结论做成彩色徽标打头，理由跟在旁边用同一个色；其余元数据照旧淡显。
+            // 四档四个色，和上面概率行的红（锁定线）、橙（灰区）是同一套语义。
+            HStack(spacing: 6) {
+                Text(windowTitleVerdictName(entry.verdict))
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(tint)
+                    .padding(.horizontal, 6)
+                    .padding(.vertical, 1.5)
+                    .background(tint.opacity(0.14), in: Capsule())
+                if let reason = entry.reasonText {
+                    Text(reason)
+                        .font(.caption.weight(.medium))
+                        .foregroundStyle(tint)
+                }
+                Text(windowTitleEntryDetail(entry))
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+            }
             if let probabilities = windowTitleProbabilityDetail(entry) {
                 probabilities
                     .font(.caption2.monospacedDigit())
@@ -625,18 +641,31 @@ struct SettingsView: View {
             HStack(spacing: 8) { actions() }
         }
         .padding(9)
+        .padding(.leading, 3)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(.primary.opacity(0.045))
+        // 左侧一道同色细条，列表滚过去不用读字也能数出几红几橙。
+        .overlay(alignment: .leading) { Rectangle().fill(tint).frame(width: 3) }
         .overlay(RoundedRectangle(cornerRadius: 8).stroke(.primary.opacity(0.07), lineWidth: 1))
         .clipShape(RoundedRectangle(cornerRadius: 8))
     }
 
-    /// 第一行：应用、结论加理由、谁拍的板、时间。六个概率另起一行。
+    /// 徽标后面那串：应用、谁拍的板、时间。结论和理由在徽标里，六个概率另起一行。
     private func windowTitleEntryDetail(_ entry: WindowTitleJudgmentEntry) -> String {
-        var parts = [entry.applicationName, windowTitleVerdictText(entry)]
+        var parts = [entry.applicationName]
         parts.append(entry.source == .user ? "我拍的板" : "Jev")
         parts.append(entry.judgedAt.formatted(date: .abbreviated, time: .shortened))
         return parts.joined(separator: " · ")
+    }
+
+    /// 四档四个色：过绿、锁红、等橙、省灰。
+    private func windowTitleVerdictColor(_ verdict: WindowTitleVerdict) -> Color {
+        switch verdict {
+        case .published: .green
+        case .locked: .red
+        case .needsConfirmation: .orange
+        case .omitted: .gray
+        }
     }
 
     /**
@@ -661,13 +690,6 @@ struct SettingsView: View {
         }
         guard let first = pieces.first else { return nil }
         return pieces.dropFirst().reduce(first) { $0 + Text(" · ") + $1 }
-    }
-
-    /// 「已锁定 · 政治敏感」。待确认的理由是此刻卡在两条线中间的那几道。
-    private func windowTitleVerdictText(_ entry: WindowTitleJudgmentEntry) -> String {
-        let name = windowTitleVerdictName(entry.verdict)
-        guard let reason = entry.reasonText else { return name }
-        return "\(name) · \(reason)"
     }
 
     private func windowTitleVerdictName(_ verdict: WindowTitleVerdict) -> String {
