@@ -341,7 +341,7 @@ pause land in 320–490 ms, application switches in 560–620 ms.
      | --- | --- |
      | `exposesSecret` | a password, key, token, secret or account number |
      | `exposesPrivateMatter` | money, health, legal, romantic or family matters; a named private individual; a personal message subject |
-     | `exposesConfidentialWork` | an employer's or client's internal material — the owner's own repositories and hobby projects are not |
+     | `exposesConfidentialWork` | an employer's or client's internal material — the owner's own repositories, hobby projects and coding-agent sessions are not, nor are public vendors and platforms the work merely uses |
      | `isAdultContent` | pornographic or sexually explicit |
      | `isPoliticallySensitive` | political leaders, regimes, movements or contested events, including coded references (homophones, nicknames, memes) |
      | `isInformative` | the title says something beyond the application's own name |

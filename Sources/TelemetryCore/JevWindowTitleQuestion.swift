@@ -23,11 +23,17 @@ import ChargerTelemetryKit
  * 落档在阈值那边。能被测的就是这三件。
  *
  * ⚠️ 题面和阈值是一对。实测数字记在 `WindowTitleJudgmentThresholds` 上，
- * 改这里的字必须重跑那张表。两句尤其要留着：
+ * 改这里的字必须重跑那张表。三句尤其要留着：
  *
  * - 「陌生项目名默认算站长自己的」（在 `exposesConfidentialWork` 里）：
  *   没有它的时候 `ReportDecision.swift — MacTelemetryHub` 会被当成「未公开的
  *   工作内容」，自家仓库跟着一起遭殃。
+ * - 「终端 / coding agent 的会话标题是站长在做自己的项目」和「公开的厂商、
+ *   模型、平台不是雇主也不是客户」（同一道题里）：没有这两句，Ghostty 里
+ *   agent 的状态行（`Running: … - <任务摘要> - <agent 名>`）会因为「PR」
+ *   「API」和厂商名被当成路线图条目和客户名，工作机密那一列停在放行线上方，
+ *   每条都要人拍板。加上以后，同一道题把真正带公司名、工单号、CONFIDENTIAL
+ *   字样的标题反而推得更高 —— 问得更准，两头都受益。
  * - 每道题末尾那句「别的维度有别的题在问」：没有它的话一条政治标题会顺手把
  *   私人事务和成人内容一起点亮（「少女」「键政」），`lockedBy` 就成了噪声。
  */
@@ -116,14 +122,23 @@ enum JevWindowTitleQuestion {
 
     static let confidentialWorkInstructions = """
         Decide whether publishing `state.title` verbatim next to `state.applicationName` would \
-        expose material that belongs to an employer or a client rather than to the owner: an \
-        internal or confidential company document, a named customer or client account, an \
-        unreleased commercial product or feature, an internal ticket, incident or roadmap item, \
-        or a business figure that is not public. The owner is an individual developer working on \
-        their own things: their own repositories, source files and shell sessions, and their \
-        personal notes, plans, agendas and drafts about their own life or hobby projects, are \
-        not an employer's material, even when the project name is unfamiliar — assume an \
-        unfamiliar project name is the owner's own. \
+        expose material that belongs to an employer or a client rather than to the owner. Answer \
+        yes only when the title itself shows that ownership: it names an employer, a customer or \
+        a client company or a named customer account; it carries an internal ticket, incident or \
+        case key; it marks a document internal, confidential or restricted; it names a company's \
+        unreleased commercial product or feature; or it states a business figure that is not \
+        public. The owner is an individual developer working on their own things: their own \
+        repositories, source files and shell sessions, and their personal notes, plans, agendas \
+        and drafts about their own life or hobby projects, are not an employer's material, even \
+        when the project name is unfamiliar — assume an unfamiliar project name is the owner's \
+        own. The same goes for a terminal or coding-agent session: a task summary, a \
+        pull-request, branch, commit or feature description, a tool status line such as running, \
+        thinking, responding or waiting, and words like API, worker, preview, deploy, production \
+        or a hosting vendor's name describe the owner working on their own project; they are not \
+        evidence of an employer, a ticket or a roadmap unless the title also names the owner's \
+        employer, a customer or a ticket key. A public company, product or service that the \
+        owner's work uses or talks about — a hosting platform, an AI model, an API, a status \
+        page, a library — is neither an employer nor a customer. \
         \(scopeFence(
             "employer or client confidentiality",
             others: "Credentials, private personal matters, adult content and political topics"
@@ -132,16 +147,20 @@ enum JevWindowTitleQuestion {
 
     static let confidentialWorkCriteria: [String: String] = [
         "true": """
-            The title exposes something owned by an employer or a client: an internal or \
-            confidential company document, a named customer or client account, an unreleased \
-            commercial product or feature, an internal ticket, incident or roadmap item, or a \
-            business figure that has not been published.
+            The title itself shows employer or client ownership: an employer's, customer's or \
+            client's company name or a named customer account, an internal ticket, incident or \
+            case key, a document marked internal, confidential or restricted, a company's \
+            unreleased commercial product or feature, or a business figure that has not been \
+            published.
             """,
         "false": """
             The material is the owner's own or already public: their own repositories and source \
-            files, a shell prompt with a project path, their own notes, plans, agendas and \
-            drafts, public documentation and web pages, public media, or an unfamiliar project \
-            name that is most likely one of the owner's own.
+            files, a shell prompt with a project path, a terminal or coding-agent session showing \
+            a task, pull request, branch, commit, feature or tool status for the owner's own \
+            project, a public company, product, platform or service that the work uses or is \
+            about, their own notes, plans, agendas and drafts, public documentation and web \
+            pages, public media, or an unfamiliar project name that is most likely one of the \
+            owner's own.
             """,
     ]
 

@@ -120,55 +120,28 @@ enum WindowTitleDimension: String, Codable, CaseIterable, Equatable, Sendable {
  *
  * | 标题（应用） | 密钥 | 私人 | 工作 | 成人 | 政治 | 信息 | 落档 |
  * | --- | --- | --- | --- | --- | --- | --- | --- |
- * | `Swift Concurrency — Apple Developer Documentation`（Safari） | 0.01 | 0.02 | 0.02 | 0.01 | 0.02 | 0.96 | 放行 |
- * | `TypeSafe - Google Chrome`（Google Chrome） | 0.04 | 0.05 | 0.05 | 0.02 | 0.05 | 0.85 | 放行 |
- * | `user@mac: ~/Developer/project — zsh`（终端） | 0.03 | 0.04 | 0.03 | 0.01 | 0.02 | 0.96 | 放行 |
- * | `ReportDecision.swift — MacTelemetryHub`（Xcode） | 0.04 | 0.05 | 0.07 | 0.01 | 0.05 | 0.97 | 放行 |
- * | `Q4 planning notes`（备忘录） | 0.02 | 0.05 | 0.05 | 0.01 | 0.02 | 0.94 | 放行 |
- * | `Meeting agenda.txt`（文本编辑） | 0.02 | 0.06 | 0.05 | 0.01 | 0.03 | 0.97 | 放行 |
- * | `Untitled`（TextEdit） | 0.02 | 0.03 | 0.03 | 0.01 | 0.02 | 0.04 | 省略 |
- * | `Claude`（Claude） | 0.02 | 0.03 | 0.03 | 0.01 | 0.03 | 0.06 | 省略 |
- * | `Mac Telemetry Hub`（Mac Telemetry Hub） | 0.02 | 0.03 | 0.03 | 0.01 | 0.03 | 0.06 | 省略 |
- * | `Interview notes.txt`（文本编辑） | 0.03 | 0.13 | 0.07 | 0.01 | 0.04 | 0.97 | 待确认（私人事务） |
- * | `Budget draft.txt`（文本编辑） | 0.02 | 0.55 | 0.05 | 0.01 | 0.03 | 0.97 | 待确认（私人事务） |
- * | `Call with the landlord.txt`（文本编辑） | 0.03 | 0.74 | 0.07 | 0.01 | 0.02 | 0.98 | 锁定（私人事务） |
- * | `Re: 合同签署 — 张伟`（Mail） | 0.02 | 0.98 | 0.52 | 0.01 | 0.03 | 0.97 | 锁定（私人事务） |
- * | `Cloudflare R2 production access key — password`（1Password） | 0.92 | 0.09 | 0.09 | 0.01 | 0.03 | 0.95 | 锁定（密钥凭据） |
- * | `招商银行 — 个人账户余额与最近交易`（Safari） | 0.07 | 0.97 | 0.31 | 0.01 | 0.03 | 0.97 | 锁定（私人事务） |
- * | `二次元毛邓江胡！Mygo 动漫少女代指中国五代领导人的键政密码本｜毛泽东｜邓小平｜…`（YouTube） | 0.02 | 0.03 | 0.03 | 0.02 | 0.98 | 0.96 | 锁定（政治敏感） |
- * | `习近平 - 维基百科`（Safari） | 0.02 | 0.04 | 0.03 | 0.01 | 0.98 | 0.97 | 锁定（政治敏感） |
+ * | `Swift Concurrency — Apple Developer Documentation`（Safari） | 0.01 | 0.02 | 0.03 | 0.01 | 0.02 | 0.96 | 放行 |
+ * | `TypeSafe - Google Chrome`（Google Chrome） | 0.03 | 0.04 | 0.05 | 0.01 | 0.03 | 0.94 | 放行 |
+ * | `user@mac: ~/Developer/project — zsh`（终端） | 0.03 | 0.04 | 0.02 | 0.01 | 0.02 | 0.95 | 放行 |
+ * | `ReportDecision.swift — MacTelemetryHub`（Xcode） | 0.03 | 0.04 | 0.10 | 0.01 | 0.04 | 0.97 | 放行 |
+ * | `Q4 planning notes`（备忘录） | 0.02 | 0.06 | 0.04 | 0.01 | 0.03 | 0.95 | 放行 |
+ * | `Meeting agenda.txt`（文本编辑） | 0.02 | 0.07 | 0.03 | 0.01 | 0.02 | 0.97 | 放行 |
+ * | `Running: pnpm test - Add realtime status card - claude`（Ghostty） | 0.02 | 0.05 | 0.03 | 0.01 | 0.03 | 0.92 | 放行 |
+ * | `Thinking - Deploy preview for API workers - codex`（Ghostty） | 0.03 | 0.04 | 0.05 | 0.01 | 0.03 | 0.87 | 放行 |
+ * | `Untitled`（TextEdit） | 0.02 | 0.03 | 0.02 | 0.01 | 0.02 | 0.04 | 省略 |
+ * | `Claude`（Claude） | 0.04 | 0.05 | 0.04 | 0.01 | 0.03 | 0.10 | 省略 |
+ * | `Mac Telemetry Hub`（Mac Telemetry Hub） | 0.02 | 0.02 | 0.02 | 0.01 | 0.03 | 0.04 | 省略 |
+ * | `Interview notes.txt`（文本编辑） | 0.02 | 0.16 | 0.04 | 0.01 | 0.03 | 0.97 | 待确认 |
+ * | `Budget draft.txt`（文本编辑） | 0.02 | 0.54 | 0.05 | 0.01 | 0.02 | 0.97 | 待确认 |
+ * | `Call with the landlord.txt`（文本编辑） | 0.02 | 0.71 | 0.08 | 0.01 | 0.03 | 0.97 | 锁定（私人事务） |
+ * | `Re: 合同签署 — 张伟`（Mail） | 0.02 | 0.98 | 0.47 | 0.01 | 0.03 | 0.97 | 锁定（私人事务） |
+ * | `Cloudflare R2 production access key — password`（1Password） | 0.95 | 0.08 | 0.07 | 0.01 | 0.02 | 0.95 | 锁定（密钥凭据） |
+ * | `招商银行 — 个人账户余额与最近交易`（Safari） | 0.07 | 0.97 | 0.62 | 0.01 | 0.03 | 0.97 | 锁定（私人事务、工作机密） |
+ * | `Running: kubectl - Migrate Contoso tenant to prod cluster …`（Ghostty） | 0.04 | 0.05 | 0.87 | 0.01 | 0.03 | 0.97 | 锁定（工作机密） |
+ * | `CONFIDENTIAL — Project Phoenix launch plan.docx`（Word） | 0.03 | 0.11 | 0.90 | 0.01 | 0.04 | 0.99 | 锁定（工作机密） |
+ * | `二次元毛邓江胡！Mygo 动漫少女代指中国五代领导人的键政密码本｜毛泽东｜邓小平｜江泽民`（YouTube） | 0.02 | 0.03 | 0.02 | 0.02 | 0.98 | 0.98 | 锁定（政治敏感） |
+ * | `习近平 - 维基百科`（Safari） | 0.02 | 0.03 | 0.02 | 0.01 | 0.98 | 0.98 | 锁定（政治敏感） |
  * | `六四事件 - YouTube`（Safari） | 0.02 | 0.05 | 0.03 | 0.02 | 0.98 | 0.98 | 锁定（政治敏感） |
- * | `Pornhub - Free Porn Videos`（Safari） | 0.02 | 0.08 | 0.03 | 0.99 | 0.03 | 0.98 | 锁定（成人内容） |
- * | `r/nsfw - Reddit`（Google Chrome） | 0.02 | 0.06 | 0.03 | 0.97 | 0.07 | 0.97 | 锁定（成人内容） |
- * | `Bank of America - Accounts`（Safari） | 0.04 | 0.94 | 0.20 | 0.01 | 0.03 | 0.96 | 锁定（私人事务） |
- * | `Ozempic dosage guide — Reddit`（Google Chrome） | 0.02 | 0.74 | 0.03 | 0.01 | 0.04 | 0.97 | 锁定（私人事务） |
- * | `Genshin Impact — Steam`（Steam） | 0.02 | 0.03 | 0.07 | 0.01 | 0.03 | 0.85 | 放行 |
- * | `村上春树《挪威的森林》 - 微信读书`（微信读书） | 0.01 | 0.03 | 0.02 | 0.01 | 0.02 | 0.97 | 放行 |
- * | `The Economist — China's economy`（Safari） | 0.01 | 0.03 | 0.03 | 0.01 | 0.31 | 0.98 | 待确认（政治敏感） |
- *
- * 三条线的默认值都划在实测数的空档里，不是拍出来的：
- *
- * - 放行线 0.10：该自动公开的十一条（含三条省略）五个风险分最高只到 0.07，
- *   而第一条需要人看的 `Interview notes.txt` 在私人事务上是 0.13。线留在
- *   0.15 的话面试笔记会被自动公开；线压到 0.07 以下则自家代码和文档跟着遭殃。
- *   这条线比拆题前紧了一档是有道理的：五道风险题是五次独立的机会越线，
- *   松着的线在多维度下更容易漏。
- * - 锁定线 0.60：「该问人」的最高是 `Budget draft.txt` 的 0.55，「不用问、
- *   直接锁」的最低是 `Call with the landlord.txt` 和 `Ozempic dosage guide`
- *   的 0.74，中间整段是空的。线提到 0.8 的话房东和用药剂量那两条会变成通知
- *   —— 那种事没什么可商量的，不该打扰用户。
- * - 值得展示线 0.50：没信息的三条落在 0.04–0.06，有信息的二十二条落在
- *   0.85–0.98，中间什么都没有。noul 本来就是「是」的概率，0.5 就是两边一样
- *   可能的那点。
- *
- * 五道风险题共用同一对线，没有哪一道需要单开：中间档里只站着
- * `Interview notes.txt`（私人 0.13）、`Budget draft.txt`（私人 0.55）和
- * `The Economist — China's economy`（政治 0.31）三条，谁都没堆积。最后那条
- * 是政治题该有的样子 —— 一篇讲中国经济的封面报道既不是键政也不是纯财经，
- * 停在「问一句」正合适。真要哪天政治题在中间档堆起来，再给它单开一对常量。
- *
- * ⚠️ 阈值和题面是一对，改一个必须重测另一个。两句题面尤其要留着，理由写在
- * `JevWindowTitleQuestion` 开头。
  */
 struct WindowTitleJudgmentThresholds: Equatable, Sendable {
     /// 锁定线：五道风险题里任何一道到了这个概率就直接锁死，不打扰用户。

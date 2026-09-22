@@ -771,6 +771,17 @@ struct JevWindowTitleQuestionTests {
         )
     }
 
+    /// coding agent 的会话标题（任务摘要、PR 描述、`Running: …` 状态行）和
+    /// 提到的公开厂商必须明说是站长自己的活 —— 漏了这两句，Ghostty 里 agent
+    /// 的每条状态行都会在工作机密那一列停在放行线上方。
+    @Test func confidentialWorkTreatsAgentSessionsAndVendorsAsTheOwnersOwn() {
+        let instructions = JevWindowTitleQuestion
+            .question(for: .exposesConfidentialWork).instructions
+        #expect(instructions.contains("coding-agent session"))
+        #expect(instructions.contains("pull-request, branch, commit or feature description"))
+        #expect(instructions.contains("is neither an employer nor a customer"))
+    }
+
     /// 政治那道必须明说「谐音、代号、梗」也算 —— 漏了它，那条把领导人写成
     /// 二次元梗的 YouTube 标题就还是挡不住。
     @Test func politicalQuestionCoversCodedReferences() {
