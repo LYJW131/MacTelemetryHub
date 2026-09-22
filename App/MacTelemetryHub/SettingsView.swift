@@ -42,6 +42,8 @@ private enum SettingsCategory: String, CaseIterable, Identifiable {
         case .invalidTiming, .invalidPostURL, .invalidR2Configuration: .reporting
         case .invalidCcusagePath, .invalidCodingSessionInterval,
              .invalidVibeCodingUsageInterval, .invalidVibeCodingYearInterval: .sources
+        case .invalidWindowTitleRiskThresholds,
+             .invalidWindowTitleInformativeMinimum: .windowTitle
         case nil: nil
         }
     }
@@ -527,7 +529,56 @@ struct SettingsView: View {
     private var windowTitleSettings: some View {
         VStack(alignment: .leading, spacing: 0) {
             windowTitlePendingSection
+            windowTitleThresholdSection
             windowTitleCacheSection
+        }
+    }
+
+    /**
+     * 三条线。
+     *
+     * 放在待确认之后、判断缓存之前：等人拍板的条目要第一眼看见，而这三个数
+     * 管的正是下面那份列表怎么分档，改完就能对着列表看新线落在哪里。
+     */
+    private var windowTitleThresholdSection: some View {
+        settingSection(
+            "判断线",
+            detail: "Jev 给的概率落在哪一档由这三条线决定。保存后生效。",
+            icon: "slider.horizontal.below.rectangle"
+        ) {
+            HStack(alignment: .top, spacing: 14) {
+                NumericField(
+                    title: "锁定线",
+                    unit: "概率",
+                    placeholder: "0.6",
+                    value: $settings.windowTitleRiskLockMinimum
+                )
+                NumericField(
+                    title: "放行线",
+                    unit: "概率",
+                    placeholder: "0.1",
+                    value: $settings.windowTitleRiskClearMaximum
+                )
+                NumericField(
+                    title: "值得展示线",
+                    unit: "概率",
+                    placeholder: "0.5",
+                    value: $settings.windowTitleInformativeMinimum
+                )
+            }
+
+            Text("五道风险题里任何一道到了锁定线就直接锁定，不打扰你；全都低到放行线才自动公开；卡在两条线之间的发一条通知等你拍板。信息量低于值得展示线的标题当作没什么可公开的，省略掉、也不通知。放行线必须小于锁定线，否则中间那档没了，模型拿不准的标题会被直接归到某一边。")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+
+            Text("保存后，下面这份缓存里由 Jev 判的条目会按新线重算一遍，你自己拍过板的那些不动。重算成待确认不会补发通知 —— 它们排在上面那份列表的最前面。")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+
+            Button("恢复默认") { settings.resetWindowTitleThresholds() }
+                .buttonStyle(.bordered)
         }
     }
 
@@ -621,7 +672,7 @@ struct SettingsView: View {
                     .padding(.horizontal, 6)
                     .padding(.vertical, 1.5)
                     .background(tint.opacity(0.14), in: Capsule())
-                if let reason = entry.reasonText {
+                if let reason = entry.reasonText(thresholds: judge.thresholds) {
                     Text(reason)
                         .font(.caption.weight(.medium))
                         .foregroundStyle(tint)
@@ -681,7 +732,7 @@ struct SettingsView: View {
         let pieces = WindowTitleDimension.allCases.compactMap { dimension -> Text? in
             guard let probability = probabilities[dimension] else { return nil }
             let label = Text(String(format: "%@ %.2f", dimension.displayName, probability))
-            switch WindowTitleJudgmentThresholds.emphasis(for: dimension, in: probabilities) {
+            switch judge.thresholds.emphasis(for: dimension, in: probabilities) {
             case .locking: return label.fontWeight(.semibold).foregroundStyle(.red)
             case .unsettled: return label.fontWeight(.semibold).foregroundStyle(.orange)
             case .uninformative: return label.fontWeight(.semibold).foregroundStyle(.secondary)

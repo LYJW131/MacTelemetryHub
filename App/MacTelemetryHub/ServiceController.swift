@@ -648,7 +648,8 @@ final class ServiceController: ObservableObject {
             trusted: settings.normalizedWindowTitleTrustedApplications,
             // 远端隐藏的应用一条标题都不许送去 TypeSafe。
             hiddenApplications: settings.normalizedDesktopReportingBlacklist,
-            apiKey: settings.typesafeAPIKey
+            apiKey: settings.typesafeAPIKey,
+            thresholds: settings.windowTitleJudgmentThresholds
         ))
 
         if settings.desktopModuleEnabled {

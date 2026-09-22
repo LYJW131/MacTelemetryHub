@@ -43,7 +43,12 @@ final class WindowTitleJudge: ObservableObject {
         /// 远端隐藏黑名单。本机照旧显示标题，但不问 Jev、不上报。
         var hiddenApplications = BundleIdentifierList(rawValue: "")
         var apiKey = ""
+        /// 概率落成哪一档的三条线。站长在设置页里调，默认是实测那一组。
+        var thresholds = WindowTitleJudgmentThresholds.standard
     }
+
+    /// 此刻生效的三条线。设置页说理由和标重点都要用它，而不是还没保存的草稿。
+    var thresholds: WindowTitleJudgmentThresholds { rules.thresholds }
 
     /// 归一化文本稳定多久才值得问。见类型注释里的三层节流。
     static let settleDelay: TimeInterval = 0.5
@@ -119,6 +124,24 @@ final class WindowTitleJudge: ObservableObject {
             failureCounts.removeAll()
             globalBackoffUntil = .distantPast
         }
+        // 线挪了就把名单按新线重算。不重算的话收紧的线只管以后 —— 缓存里
+        // 那些按旧线放行过的标题会一直照旧上报，直到各自被淘汰。
+        if previous.thresholds != rules.thresholds {
+            let changed = cache.rejudge(with: rules.thresholds)
+            if !changed.isEmpty {
+                persist()
+                // 翻出「待确认」的那些，通知中心里的旧横幅已经不成立了：上面
+                // 那个「公开」按钮点下去照样会把一条刚被锁上的标题放出去。
+                // 翻进「待确认」的不补发通知 —— 线是站长自己挪的，设置页那份
+                // 列表本来就把待确认排在最前面。
+                for item in changed where item.previous == .needsConfirmation {
+                    guard cache.entry(forKey: item.key)?.verdict != .needsConfirmation else {
+                        continue
+                    }
+                    removeDeliveredNotification(for: item.key)
+                }
+            }
+        }
         lastResolvedKey = nil
         onVerdict?()
     }
@@ -179,7 +202,7 @@ final class WindowTitleJudge: ObservableObject {
     func reason(bundleIdentifier: String?, normalizedTitle: String?) -> String? {
         guard let title = normalizedTitle, !title.isEmpty else { return nil }
         let key = WindowTitleJudgmentCache.key(bundleIdentifier: bundleIdentifier, title: title)
-        return cache.entry(forKey: key)?.reasonText
+        return cache.entry(forKey: key)?.reasonText(thresholds: rules.thresholds)
     }
 
     /// 查表。只有键真的变了才推进 LRU，免得兜底轮询把这份名单写成流水账。
@@ -291,6 +314,7 @@ final class WindowTitleJudge: ObservableObject {
                 bundleIdentifier: bundleIdentifier,
                 title: pending.title,
                 apiKey: apiKey,
+                thresholds: rules.thresholds,
                 timeout: Self.requestTimeout
             )
             inFlight.remove(key)
@@ -340,7 +364,7 @@ final class WindowTitleJudge: ObservableObject {
         lastResolvedKey = nil
         if outcome.verdict == .needsConfirmation {
             // 理由从条目上取，和设置页那行概率同一份算法 —— 通知里说的和点进去看到的对得上。
-            let reason = entry.reasonDetailText
+            let reason = entry.reasonDetailText(thresholds: rules.thresholds)
             Task {
                 await askForConfirmation(
                     key: key,

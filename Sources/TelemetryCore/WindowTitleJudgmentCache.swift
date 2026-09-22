@@ -81,6 +81,43 @@ struct WindowTitleJudgmentCache: Equatable, Sendable {
         }
     }
 
+    /**
+     * 三条线挪动之后，把 Jev 判过的条目按新线重算一遍。
+     *
+     * 不重算就得等每条标题各自被淘汰或手动重判，而缓存本来就是「同一条标题
+     * 只问一次」—— 收紧了线却留着一屋子按旧线放行的标题，等于新线只管以后。
+     * 概率是当初那次回答的事实，重算不用再问 Jev。
+     *
+     * 两条边界：
+     * - `source == .user` 一律不动。用户拍板压过模型，也压过线的挪动；那些
+     *   条目的 `probabilities` 本来就是空的，重算无从下手。
+     * - 概率为空的 Jev 条目也不动 —— 没有数就算不出结论，保留原样比按缺答案
+     *   一律锁掉诚实。
+     *
+     * 原地改而不走 `store()`：那会把条目挪到 LRU 尾部，一次重算就把整份名单的
+     * 淘汰顺序按数组下标重排了。`judgedAt` 也不动 —— Jev 回答的时间没变，变的
+     * 只是我们怎么读那组数。返回动过的键和它原来那一档，调用方拿去收尾（落盘，
+     * 以及撤掉通知中心里那条已经不成立的横幅）。
+     */
+    @discardableResult
+    mutating func rejudge(
+        with thresholds: WindowTitleJudgmentThresholds
+    ) -> [(key: String, previous: WindowTitleVerdict)] {
+        var changed: [(key: String, previous: WindowTitleVerdict)] = []
+        for index in entries.indices {
+            let entry = entries[index]
+            guard entry.source == .jev, !entry.probabilities.isEmpty else { continue }
+            let judged = thresholds.judge(entry.dimensionProbabilities)
+            guard judged.verdict != entry.verdict || judged.lockedBy != entry.lockedBy else {
+                continue
+            }
+            changed.append((key: entry.key, previous: entry.verdict))
+            entries[index].verdict = judged.verdict
+            entries[index].lockedBy = judged.lockedBy
+        }
+        return changed
+    }
+
     @discardableResult
     mutating func remove(key: String) -> Bool {
         let before = entries.count

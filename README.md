@@ -344,10 +344,11 @@ pause land in 320–490 ms, application switches in 560–620 ms.
      Each answer is a probability. The five risk questions share one pair of
      measured thresholds and are combined in code by an **any-serious-violation**
      rule, never a weighted average; the four verdicts follow in this order:
-     any risk `≥ 0.60` locks, and every triggered dimension is recorded so the
-     UI can say *已锁定 · 政治敏感*; `isInformative < 0.50` omits the title (not
-     reported, no notification, but listed in **设置 › 窗口标题** where it can
-     be published by hand); all five risks `≤ 0.10` publishes; anything left — a
+     a risk at or above the lock line locks, and every triggered dimension is
+     recorded so the UI can say *已锁定 · 政治敏感*; an `isInformative` below
+     the informative line omits the title (not reported, no notification, but
+     listed in **设置 › 窗口标题** where it can be published by hand); all five
+     risks at or below the clear line publishes; anything left — a
      title the model is genuinely unsure about — raises a user notification
      titled *<app> 窗口标题公开确认* whose body is the title itself, and the UI
      names the dimensions that are still in the middle band. The notification
@@ -366,7 +367,9 @@ pause land in 320–490 ms, application switches in 560–620 ms.
      file is discarded and re-judged rather than migrated, because a version-2
      list was never asked about politics or adult content at all) and are
      reviewable, re-judgeable and deletable in **设置 › 窗口标题**, which also
-     shows all six probabilities per entry.
+     shows all six probabilities per entry. All three lines are adjustable in
+     **设置 › 窗口标题**; saving new ones re-applies them to the cached
+     Jev verdicts, leaving the ones decided by hand untouched.
 
   Only the title text and the application's name and Bundle ID leave the machine
   for a judgment; the TypeSafe API key lives in Keychain (or `TYPESAFE_API_KEY`).

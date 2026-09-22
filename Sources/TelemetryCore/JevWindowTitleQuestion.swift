@@ -395,6 +395,7 @@ enum JevClient {
         bundleIdentifier: String?,
         title: String,
         apiKey: String,
+        thresholds: WindowTitleJudgmentThresholds = .standard,
         timeout: TimeInterval = JevWindowTitleQuestion.defaultTimeout
     ) async throws -> WindowTitleJudgmentOutcome {
         let key = apiKey.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -415,7 +416,7 @@ enum JevClient {
         guard (200..<300).contains(http.statusCode) else {
             throw JevError.httpStatus(http.statusCode, detail: errorDetail(data))
         }
-        return try outcome(from: data)
+        return try outcome(from: data, thresholds: thresholds)
     }
 
     /**
@@ -426,7 +427,10 @@ enum JevClient {
      * 而不是拿残缺的答案把它钉死在某一档上 —— 缺的偏偏是政治那道的话，一条
      * 键政标题会以「风险题全干净」的名义直接公开出去。
      */
-    static func outcome(from data: Data) throws -> WindowTitleJudgmentOutcome {
+    static func outcome(
+        from data: Data,
+        thresholds: WindowTitleJudgmentThresholds = .standard
+    ) throws -> WindowTitleJudgmentOutcome {
         let decoded = try JSONDecoder().decode(JevSystemOneResponse.self, from: data)
         var probabilities: [WindowTitleDimension: Double] = [:]
         for dimension in WindowTitleDimension.allCases {
@@ -435,7 +439,7 @@ enum JevClient {
             }
             probabilities[dimension] = noul
         }
-        let judged = WindowTitleJudgmentThresholds.judge(probabilities)
+        let judged = thresholds.judge(probabilities)
         return WindowTitleJudgmentOutcome(
             verdict: judged.verdict,
             probabilities: Dictionary(

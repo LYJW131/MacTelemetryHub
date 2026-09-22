@@ -25,6 +25,9 @@ final class AppSettings: ObservableObject {
         static let desktopReportingBlacklist = "desktopReportingBlacklist"
         static let windowTitleBlacklist = "windowTitleBlacklist"
         static let windowTitleTrustedApplications = "windowTitleTrustedApplications"
+        static let windowTitleRiskLockMinimum = "windowTitleRiskLockMinimum"
+        static let windowTitleRiskClearMaximum = "windowTitleRiskClearMaximum"
+        static let windowTitleInformativeMinimum = "windowTitleInformativeMinimum"
         static let typesafeAPIKeyAccount = "typesafe-api-key"
         static let appleMusicModuleEnabled = "appleMusicModuleEnabled"
         static let timezoneModuleEnabled = "timezoneModuleEnabled"
@@ -74,6 +77,12 @@ final class AppSettings: ObservableObject {
     @Published var windowTitleBlacklist = ""
     /// 免判放行：这些应用的标题直接上报，不问 Jev。
     @Published var windowTitleTrustedApplications = ""
+    /// 锁定线：五道风险题任何一道到了这个概率就直接锁定。
+    @Published var windowTitleRiskLockMinimum = WindowTitleJudgmentThresholds.standard.riskLockMinimum
+    /// 放行线：五道风险题全都低到这个数才自动公开。
+    @Published var windowTitleRiskClearMaximum = WindowTitleJudgmentThresholds.standard.riskClearMaximum
+    /// 值得展示线：信息量低于它就当这条标题没什么可公开的。
+    @Published var windowTitleInformativeMinimum = WindowTitleJudgmentThresholds.standard.informativeMinimum
     /// 判断窗口标题用的 TypeSafe API key。落钥匙串，不进 UserDefaults。
     @Published var typesafeAPIKey = ""
     @Published var appleMusicModuleEnabled = true
@@ -175,6 +184,15 @@ final class AppSettings: ObservableObject {
         windowTitleTrustedApplications = defaults.string(
             forKey: Key.windowTitleTrustedApplications
         ) ?? ""
+        // 三条线用 object(forKey:) 而不是 double(forKey:)：值得展示线取 0 是
+        // 合法的「一律当有信息」，而 double 会把没设置过和 0 说成同一件事。
+        let standardThresholds = WindowTitleJudgmentThresholds.standard
+        windowTitleRiskLockMinimum = defaults.object(forKey: Key.windowTitleRiskLockMinimum)
+            as? Double ?? standardThresholds.riskLockMinimum
+        windowTitleRiskClearMaximum = defaults.object(forKey: Key.windowTitleRiskClearMaximum)
+            as? Double ?? standardThresholds.riskClearMaximum
+        windowTitleInformativeMinimum = defaults.object(forKey: Key.windowTitleInformativeMinimum)
+            as? Double ?? standardThresholds.informativeMinimum
         // 和 telemetrySecret 同一套：环境变量优先，其次钥匙串。
         typesafeAPIKey = environment["TYPESAFE_API_KEY"]
             ?? keychain.read(account: Key.typesafeAPIKeyAccount)
@@ -274,6 +292,23 @@ final class AppSettings: ObservableObject {
         BundleIdentifierList(rawValue: windowTitleTrustedApplications)
     }
 
+    /// 三条线打成一份给判断用。校验在 `validate()`，这里只搬数。
+    var windowTitleJudgmentThresholds: WindowTitleJudgmentThresholds {
+        WindowTitleJudgmentThresholds(
+            riskLockMinimum: windowTitleRiskLockMinimum,
+            riskClearMaximum: windowTitleRiskClearMaximum,
+            informativeMinimum: windowTitleInformativeMinimum
+        )
+    }
+
+    /// 三条线回到实测那一组。只改内存里的草稿，落盘仍然走「保存」。
+    func resetWindowTitleThresholds() {
+        let standard = WindowTitleJudgmentThresholds.standard
+        windowTitleRiskLockMinimum = standard.riskLockMinimum
+        windowTitleRiskClearMaximum = standard.riskClearMaximum
+        windowTitleInformativeMinimum = standard.informativeMinimum
+    }
+
     var hasAnkerCloudCredentials: Bool {
         !ankerAccount.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && !ankerPassword.isEmpty
     }
@@ -340,6 +375,16 @@ final class AppSettings: ObservableObject {
             }
         }
         guard postInterval > 0, postTimeout > 0 else { throw SettingsError.invalidTiming }
+        // 放行线严格低于锁定线：两条线相等的话中间那档没了，「问一句」这条路
+        // 就此消失，一条模型也拿不准的标题会被直接归进公开或锁定。
+        guard windowTitleRiskClearMaximum > 0,
+              windowTitleRiskClearMaximum < windowTitleRiskLockMinimum,
+              windowTitleRiskLockMinimum <= 1 else {
+            throw SettingsError.invalidWindowTitleRiskThresholds
+        }
+        guard (0...1).contains(windowTitleInformativeMinimum) else {
+            throw SettingsError.invalidWindowTitleInformativeMinimum
+        }
         if postEnabled {
             guard let url = URL(string: postURL), ["http", "https"].contains(url.scheme?.lowercased() ?? ""), url.host != nil else {
                 throw SettingsError.invalidPostURL
@@ -411,6 +456,9 @@ final class AppSettings: ObservableObject {
         defaults.set(desktopReportingBlacklist, forKey: Key.desktopReportingBlacklist)
         defaults.set(windowTitleBlacklist, forKey: Key.windowTitleBlacklist)
         defaults.set(windowTitleTrustedApplications, forKey: Key.windowTitleTrustedApplications)
+        defaults.set(windowTitleRiskLockMinimum, forKey: Key.windowTitleRiskLockMinimum)
+        defaults.set(windowTitleRiskClearMaximum, forKey: Key.windowTitleRiskClearMaximum)
+        defaults.set(windowTitleInformativeMinimum, forKey: Key.windowTitleInformativeMinimum)
         defaults.set(appleMusicModuleEnabled, forKey: Key.appleMusicModuleEnabled)
         defaults.set(timezoneModuleEnabled, forKey: Key.timezoneModuleEnabled)
         defaults.set(vibeCodingModuleEnabled, forKey: Key.vibeCodingModuleEnabled)
@@ -475,6 +523,9 @@ final class AppSettings: ObservableObject {
             desktopReportingBlacklist: desktopReportingBlacklist,
             windowTitleBlacklist: windowTitleBlacklist,
             windowTitleTrustedApplications: windowTitleTrustedApplications,
+            windowTitleRiskLockMinimum: windowTitleRiskLockMinimum,
+            windowTitleRiskClearMaximum: windowTitleRiskClearMaximum,
+            windowTitleInformativeMinimum: windowTitleInformativeMinimum,
             typesafeAPIKey: typesafeAPIKey,
             appleMusicModuleEnabled: appleMusicModuleEnabled,
             timezoneModuleEnabled: timezoneModuleEnabled,
@@ -526,6 +577,9 @@ struct SettingsDraftToken: Equatable {
     var desktopReportingBlacklist: String
     var windowTitleBlacklist: String
     var windowTitleTrustedApplications: String
+    var windowTitleRiskLockMinimum: Double
+    var windowTitleRiskClearMaximum: Double
+    var windowTitleInformativeMinimum: Double
     var typesafeAPIKey: String
     var appleMusicModuleEnabled: Bool
     var timezoneModuleEnabled: Bool
@@ -546,6 +600,8 @@ enum SettingsError: LocalizedError {
     case invalidVibeCodingUsageInterval
     case invalidVibeCodingYearInterval
     case invalidR2Configuration
+    case invalidWindowTitleRiskThresholds
+    case invalidWindowTitleInformativeMinimum
 
     var errorDescription: String? {
         switch self {
@@ -561,6 +617,8 @@ enum SettingsError: LocalizedError {
         case .invalidVibeCodingUsageInterval: "用量刷新间隔不能低于 60 秒。"
         case .invalidVibeCodingYearInterval: "年度热力图刷新间隔不能低于 60 秒。"
         case .invalidR2Configuration: "R2 直传配置必须同时填写 HTTPS Endpoint、Bucket、Access Key ID 和 Secret Access Key。"
+        case .invalidWindowTitleRiskThresholds: "放行线必须大于 0 且小于锁定线，锁定线不能超过 1。"
+        case .invalidWindowTitleInformativeMinimum: "值得展示线必须在 0 到 1 之间。"
         }
     }
 }

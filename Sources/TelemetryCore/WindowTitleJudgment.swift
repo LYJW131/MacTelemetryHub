@@ -111,8 +111,9 @@ enum WindowTitleDimension: String, Codable, CaseIterable, Equatable, Sendable {
  * 哪怕信息量满格也先锁掉；反过来把「省略」排在风险前面的话，一条敏感又没信息
  * 的标题会以「已省略」的名义留在界面上，说不清它到底被挡在哪一层。
  *
- * 这三个常量就是这个功能全部的策略，所以它们必须是有名字的、可以被单测钉住
- * 的数，而不是散在判断流程里的字面量。
+ * 这三条线就是这个功能全部的策略，所以它们必须是有名字的、可以被单测钉住
+ * 的数，而不是散在判断流程里的字面量。站长能在设置页里挪动它们，`standard`
+ * 是下面实测出来的那一组默认值。
  *
  * 实测（jev-1.13.0，2026-09-22，题面见 `JevWindowTitleQuestion`，六题同问；
  * 请求体由本仓库的 `request(...)` 编码出字节后原样发出，代码和实测是同一串字）：
@@ -145,7 +146,7 @@ enum WindowTitleDimension: String, Codable, CaseIterable, Equatable, Sendable {
  * | `村上春树《挪威的森林》 - 微信读书`（微信读书） | 0.01 | 0.03 | 0.02 | 0.01 | 0.02 | 0.97 | 放行 |
  * | `The Economist — China's economy`（Safari） | 0.01 | 0.03 | 0.03 | 0.01 | 0.31 | 0.98 | 待确认（政治敏感） |
  *
- * 三条线都划在实测数的空档里，不是拍出来的：
+ * 三条线的默认值都划在实测数的空档里，不是拍出来的：
  *
  * - 放行线 0.10：该自动公开的十一条（含三条省略）五个风险分最高只到 0.07，
  *   而第一条需要人看的 `Interview notes.txt` 在私人事务上是 0.13。线留在
@@ -169,16 +170,23 @@ enum WindowTitleDimension: String, Codable, CaseIterable, Equatable, Sendable {
  * ⚠️ 阈值和题面是一对，改一个必须重测另一个。两句题面尤其要留着，理由写在
  * `JevWindowTitleQuestion` 开头。
  */
-enum WindowTitleJudgmentThresholds {
+struct WindowTitleJudgmentThresholds: Equatable, Sendable {
     /// 锁定线：五道风险题里任何一道到了这个概率就直接锁死，不打扰用户。
-    static let riskLockMinimum = 0.6
+    var riskLockMinimum: Double
     /// 放行线：五道风险题全都低到这个数才算干净，可以自动公开。
-    static let riskClearMaximum = 0.10
+    var riskClearMaximum: Double
     /// 值得展示线：`isInformative` 低于这个数就当没信息，省略掉。
-    static let informativeMinimum = 0.5
+    var informativeMinimum: Double
+
+    /// 上面那张实测表跑出来的一组。设置页里没动过就是它。
+    static let standard = WindowTitleJudgmentThresholds(
+        riskLockMinimum: 0.6,
+        riskClearMaximum: 0.10,
+        informativeMinimum: 0.5
+    )
 
     /// 缺答案按最坏算。解析那侧六道缺一即失败，所以这里的兜底只是防御。
-    private static func risk(
+    private func risk(
         _ probabilities: [WindowTitleDimension: Double],
         _ dimension: WindowTitleDimension
     ) -> Double {
@@ -186,7 +194,7 @@ enum WindowTitleJudgmentThresholds {
     }
 
     /// 越过锁定线的维度。界面上「已锁定 · 政治敏感」的后半截。
-    static func lockingDimensions(
+    func lockingDimensions(
         _ probabilities: [WindowTitleDimension: Double]
     ) -> [WindowTitleDimension] {
         WindowTitleDimension.risks.filter { risk(probabilities, $0) >= riskLockMinimum }
@@ -198,7 +206,7 @@ enum WindowTitleJudgmentThresholds {
      * 只有它非空才需要人拍板，所以「待确认」的理由也是它 —— 不落盘，随时从
      * `probabilities` 算得回来，阈值改了旧条目的理由跟着改。
      */
-    static func unsettledDimensions(
+    func unsettledDimensions(
         _ probabilities: [WindowTitleDimension: Double]
     ) -> [WindowTitleDimension] {
         WindowTitleDimension.risks.filter {
@@ -214,7 +222,7 @@ enum WindowTitleJudgmentThresholds {
      * 哪道题把标题拦下来的。规则和 `judge` 同一套：风险题越过锁定线是
      * `locking`，卡在两线之间是 `unsettled`，信息量没到线是 `uninformative`。
      */
-    static func emphasis(
+    func emphasis(
         for dimension: WindowTitleDimension,
         in probabilities: [WindowTitleDimension: Double]
     ) -> WindowTitleDimensionEmphasis {
@@ -227,7 +235,7 @@ enum WindowTitleJudgmentThresholds {
         return value < informativeMinimum ? .uninformative : .none
     }
 
-    static func judge(
+    func judge(
         _ probabilities: [WindowTitleDimension: Double]
     ) -> (verdict: WindowTitleVerdict, lockedBy: [WindowTitleDimension]) {
         let locking = lockingDimensions(probabilities)
@@ -285,9 +293,10 @@ struct WindowTitleJudgmentEntry: Codable, Equatable, Sendable {
     /**
      * 触发锁定的维度。
      *
-     * 落盘而不是每次现算：界面要说「已锁定 · 政治敏感」，而阈值日后挪一位时，
-     * 一条旧条目当初是被哪道题挡下来的仍然是事实。用户自己拍板锁的条目这里
-     * 是空的 —— 那条没有模型理由可言。
+     * 落盘而不是每次现算：界面要说「已锁定 · 政治敏感」，而用户自己拍板锁的
+     * 条目这里是空的 —— 那条没有模型理由可言，现算只会凭空替它编一个。
+     * 站长在设置页里挪动三条线时，Jev 判的条目连 `verdict` 一起按新线重算
+     * （见 `WindowTitleJudgmentCache.rejudge(with:)`），拍过板的那些一律不动。
      */
     var lockedBy: [WindowTitleDimension]
     var judgedAt: Date
@@ -313,18 +322,18 @@ struct WindowTitleJudgmentEntry: Codable, Equatable, Sendable {
      * 放行和省略没有理由可说 —— 前者哪道都没越线，后者的理由就是「已省略」
      * 这三个字本身。
      */
-    var reasonDimensions: [WindowTitleDimension] {
+    func reasonDimensions(thresholds: WindowTitleJudgmentThresholds) -> [WindowTitleDimension] {
         switch verdict {
         case .locked: return lockedBy
         case .needsConfirmation:
-            return WindowTitleJudgmentThresholds.unsettledDimensions(dimensionProbabilities)
+            return thresholds.unsettledDimensions(dimensionProbabilities)
         case .published, .omitted: return []
         }
     }
 
     /// 这一档的理由，给界面用。概率表就在同一行里，这里只报维度名。
-    var reasonText: String? {
-        let dimensions = reasonDimensions
+    func reasonText(thresholds: WindowTitleJudgmentThresholds) -> String? {
+        let dimensions = reasonDimensions(thresholds: thresholds)
         guard !dimensions.isEmpty else { return nil }
         return dimensions.map(\.displayName).joined(separator: "、")
     }
@@ -335,8 +344,8 @@ struct WindowTitleJudgmentEntry: Codable, Equatable, Sendable {
      * 通知里没有那张六个数的概率表，光说「政治敏感」看不出是 0.11 还是 0.58 ——
      * 前者随手点公开，后者得先把标题看清楚。数字必须跟着理由一起进通知。
      */
-    var reasonDetailText: String? {
-        let dimensions = reasonDimensions
+    func reasonDetailText(thresholds: WindowTitleJudgmentThresholds) -> String? {
+        let dimensions = reasonDimensions(thresholds: thresholds)
         guard !dimensions.isEmpty else { return nil }
         let probabilities = dimensionProbabilities
         return dimensions.map { dimension in

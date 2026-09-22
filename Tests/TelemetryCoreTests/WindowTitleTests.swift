@@ -113,20 +113,20 @@ struct WindowTitleThresholdTests {
     @Test func emphasisMarksOnlyTheDimensionsThatCrossedALine() {
         // 实测：Claude Status - Incident History - Google Chrome，只有工作机密 0.20 卡在灰区
         let grey = probabilities(secret: 0.03, privateMatter: 0.04, work: 0.20, adult: 0.01, political: 0.04, informative: 0.96)
-        #expect(WindowTitleJudgmentThresholds.emphasis(for: .exposesConfidentialWork, in: grey) == .unsettled)
-        #expect(WindowTitleJudgmentThresholds.emphasis(for: .exposesSecret, in: grey) == .none)
-        #expect(WindowTitleJudgmentThresholds.emphasis(for: .isInformative, in: grey) == .none)
+        #expect(WindowTitleJudgmentThresholds.standard.emphasis(for: .exposesConfidentialWork, in: grey) == .unsettled)
+        #expect(WindowTitleJudgmentThresholds.standard.emphasis(for: .exposesSecret, in: grey) == .none)
+        #expect(WindowTitleJudgmentThresholds.standard.emphasis(for: .isInformative, in: grey) == .none)
 
         // 锁定线以上标 locking；信息量没到线标 uninformative；缺答案不标
         let locked = probabilities(political: 0.98, informative: 0.3)
-        #expect(WindowTitleJudgmentThresholds.emphasis(for: .isPoliticallySensitive, in: locked) == .locking)
-        #expect(WindowTitleJudgmentThresholds.emphasis(for: .isInformative, in: locked) == .uninformative)
-        #expect(WindowTitleJudgmentThresholds.emphasis(for: .exposesSecret, in: [:]) == .none)
+        #expect(WindowTitleJudgmentThresholds.standard.emphasis(for: .isPoliticallySensitive, in: locked) == .locking)
+        #expect(WindowTitleJudgmentThresholds.standard.emphasis(for: .isInformative, in: locked) == .uninformative)
+        #expect(WindowTitleJudgmentThresholds.standard.emphasis(for: .exposesSecret, in: [:]) == .none)
     }
 
     @Test func cleanAndInformativeIsPublished() {
         // 实测：ReportDecision.swift — MacTelemetryHub（Xcode）
-        let judged = WindowTitleJudgmentThresholds.judge(
+        let judged = WindowTitleJudgmentThresholds.standard.judge(
             probabilities(secret: 0.04, privateMatter: 0.05, work: 0.07, political: 0.05)
         )
         #expect(judged.verdict == .published)
@@ -140,14 +140,14 @@ struct WindowTitleThresholdTests {
      * 拆开之后政治那道是 0.98，另外四道照旧干净 —— 挡下它的是被问到的那一道。
      */
     @Test func politicalTitleIsLockedEvenWhenEveryOtherRiskIsClean() {
-        let judged = WindowTitleJudgmentThresholds.judge(probabilities(political: 0.98))
+        let judged = WindowTitleJudgmentThresholds.standard.judge(probabilities(political: 0.98))
         #expect(judged.verdict == .locked)
         #expect(judged.lockedBy == [.isPoliticallySensitive])
     }
 
     @Test func adultContentIsLocked() {
         // 实测：Pornhub - Free Porn Videos（Safari）
-        let judged = WindowTitleJudgmentThresholds.judge(
+        let judged = WindowTitleJudgmentThresholds.standard.judge(
             probabilities(privateMatter: 0.08, adult: 0.99, political: 0.03, informative: 0.98)
         )
         #expect(judged.verdict == .locked)
@@ -156,7 +156,7 @@ struct WindowTitleThresholdTests {
 
     @Test func bankTitleIsLocked() {
         // 实测：招商银行 — 个人账户余额与最近交易（Safari）。信息量满格也先锁掉。
-        let judged = WindowTitleJudgmentThresholds.judge(
+        let judged = WindowTitleJudgmentThresholds.standard.judge(
             probabilities(secret: 0.07, privateMatter: 0.97, work: 0.31, political: 0.03)
         )
         #expect(judged.verdict == .locked)
@@ -166,7 +166,7 @@ struct WindowTitleThresholdTests {
     /// 多道同时越线时 `lockedBy` 要全记下来，顺序跟着 `allCases`。
     /// 只记第一个的话，界面会把一条「密码 + 工作机密」说成单一理由。
     @Test func everyTriggeredDimensionIsRecorded() {
-        let judged = WindowTitleJudgmentThresholds.judge(
+        let judged = WindowTitleJudgmentThresholds.standard.judge(
             probabilities(secret: 0.92, work: 0.71, political: 0.88)
         )
         #expect(judged.verdict == .locked)
@@ -179,7 +179,7 @@ struct WindowTitleThresholdTests {
 
     @Test func uninformativeTitleIsOmitted() {
         // 实测：Claude（Claude）。公开它毫无风险，也毫无意义。
-        let judged = WindowTitleJudgmentThresholds.judge(
+        let judged = WindowTitleJudgmentThresholds.standard.judge(
             probabilities(privateMatter: 0.03, work: 0.03, political: 0.03, informative: 0.06)
         )
         #expect(judged.verdict == .omitted)
@@ -189,7 +189,7 @@ struct WindowTitleThresholdTests {
     /// 顺序是策略的一部分：风险先于信息量。两条都不满足时必须落在锁定上，
     /// 否则一条敏感又没信息的标题会以「已省略」的名义留在界面上。
     @Test func riskOutranksOmission() {
-        let judged = WindowTitleJudgmentThresholds.judge(
+        let judged = WindowTitleJudgmentThresholds.standard.judge(
             probabilities(privateMatter: 0.9, informative: 0.04)
         )
         #expect(judged.verdict == .locked)
@@ -200,7 +200,7 @@ struct WindowTitleThresholdTests {
         // 实测：Interview notes.txt 私人 0.13、Budget draft.txt 私人 0.55。
         // 既不够干净也不够危险，只能让人看一眼 —— 这正是中间地带存在的理由。
         for value in [0.13, 0.55] {
-            let judged = WindowTitleJudgmentThresholds.judge(probabilities(privateMatter: value))
+            let judged = WindowTitleJudgmentThresholds.standard.judge(probabilities(privateMatter: value))
             #expect(judged.verdict == .needsConfirmation)
             // 待确认不写 lockedBy：没有任何一道越过锁定线。
             #expect(judged.lockedBy.isEmpty)
@@ -209,7 +209,7 @@ struct WindowTitleThresholdTests {
 
     /// 待确认的理由不落盘，从概率现算 —— 阈值挪一位，旧条目的理由跟着改。
     @Test func unsettledDimensionsExplainTheConfirmation() {
-        let unsettled = WindowTitleJudgmentThresholds.unsettledDimensions(
+        let unsettled = WindowTitleJudgmentThresholds.standard.unsettledDimensions(
             probabilities(privateMatter: 0.55, political: 0.31)
         )
         #expect(unsettled == [.exposesPrivateMatter, .isPoliticallySensitive])
@@ -218,29 +218,68 @@ struct WindowTitleThresholdTests {
     @Test func thresholdsAreExactBoundaries() {
         // 三条线都取到等号那一侧：0.6 就锁，0.10 就放行，0.5 就算有信息。
         #expect(
-            WindowTitleJudgmentThresholds.judge(
-                probabilities(political: WindowTitleJudgmentThresholds.riskLockMinimum)
+            WindowTitleJudgmentThresholds.standard.judge(
+                probabilities(political: WindowTitleJudgmentThresholds.standard.riskLockMinimum)
             ).verdict == .locked
         )
         #expect(
-            WindowTitleJudgmentThresholds.judge(
-                probabilities(privateMatter: WindowTitleJudgmentThresholds.riskClearMaximum)
+            WindowTitleJudgmentThresholds.standard.judge(
+                probabilities(privateMatter: WindowTitleJudgmentThresholds.standard.riskClearMaximum)
             ).verdict == .published
         )
         // 刚过放行线一点点就该问人了
         #expect(
-            WindowTitleJudgmentThresholds.judge(probabilities(privateMatter: 0.11)).verdict
+            WindowTitleJudgmentThresholds.standard.judge(probabilities(privateMatter: 0.11)).verdict
                 == .needsConfirmation
         )
         #expect(
-            WindowTitleJudgmentThresholds.judge(
-                probabilities(informative: WindowTitleJudgmentThresholds.informativeMinimum)
+            WindowTitleJudgmentThresholds.standard.judge(
+                probabilities(informative: WindowTitleJudgmentThresholds.standard.informativeMinimum)
             ).verdict == .published
         )
         #expect(
-            WindowTitleJudgmentThresholds.judge(probabilities(informative: 0.49)).verdict
+            WindowTitleJudgmentThresholds.standard.judge(probabilities(informative: 0.49)).verdict
                 == .omitted
         )
+    }
+
+    /// 默认那一组就是实测表里划出来的三个数。站长在设置页里改的是副本，
+    /// 这三个默认值不该被顺手挪走。
+    @Test func standardThresholdsAreTheMeasuredNumbers() {
+        #expect(WindowTitleJudgmentThresholds.standard.riskLockMinimum == 0.6)
+        #expect(WindowTitleJudgmentThresholds.standard.riskClearMaximum == 0.10)
+        #expect(WindowTitleJudgmentThresholds.standard.informativeMinimum == 0.5)
+    }
+
+    /**
+     * 三条线是数据不是常量：同一组概率换一组线就该落到另一档。
+     *
+     * `Interview notes.txt` 的私人事务 0.13 按默认线是「问一句」；放行线松到
+     * 0.2 它就干净了，锁定线压到 0.12 它就直接锁死。信息量那条同理 —— 一条
+     * 0.85 的标题在值得展示线抬到 0.9 之后就没什么可公开的了。
+     */
+    @Test func nonStandardThresholdsMoveTheVerdict() {
+        let interview = probabilities(privateMatter: 0.13)
+        #expect(WindowTitleJudgmentThresholds.standard.judge(interview).verdict == .needsConfirmation)
+
+        var loose = WindowTitleJudgmentThresholds.standard
+        loose.riskClearMaximum = 0.2
+        #expect(loose.judge(interview).verdict == .published)
+
+        var strict = WindowTitleJudgmentThresholds.standard
+        strict.riskLockMinimum = 0.12
+        strict.riskClearMaximum = 0.05
+        let judged = strict.judge(interview)
+        #expect(judged.verdict == .locked)
+        #expect(judged.lockedBy == [.exposesPrivateMatter])
+        // 灰区的重点标记跟着同一组线走
+        #expect(strict.emphasis(for: .exposesPrivateMatter, in: interview) == .locking)
+        #expect(loose.emphasis(for: .exposesPrivateMatter, in: interview) == .none)
+
+        var demanding = WindowTitleJudgmentThresholds.standard
+        demanding.informativeMinimum = 0.9
+        #expect(demanding.judge(probabilities(informative: 0.85)).verdict == .omitted)
+        #expect(WindowTitleJudgmentThresholds.standard.judge(probabilities(informative: 0.85)).verdict == .published)
     }
 
     /**
@@ -303,7 +342,7 @@ struct WindowTitleThresholdTests {
              [0.01, 0.03, 0.03, 0.01, 0.31, 0.98], .needsConfirmation, []),
         ]
         for (title, values, expectedVerdict, expectedLockedBy) in measured {
-            let judged = WindowTitleJudgmentThresholds.judge(
+            let judged = WindowTitleJudgmentThresholds.standard.judge(
                 Dictionary(uniqueKeysWithValues: zip(WindowTitleDimension.allCases, values))
             )
             #expect(judged.verdict == expectedVerdict, "\(title)")
@@ -461,8 +500,8 @@ struct WindowTitleJudgmentCacheTests {
         let restored = WindowTitleJudgmentCache.decoded(from: try cache.encoded())
         #expect(restored == cache)
         #expect(restored.entries.first?.lockedBy == [.isPoliticallySensitive])
-        #expect(restored.entries.first?.reasonText == "政治敏感")
-        #expect(restored.entries.last?.reasonText == "密钥凭据、工作机密")
+        #expect(restored.entries.first?.reasonText(thresholds: .standard) == "政治敏感")
+        #expect(restored.entries.last?.reasonText(thresholds: .standard) == "密钥凭据、工作机密")
     }
 
     /// 待确认的理由不落盘，从概率现算：卡在两条线中间的那几道就是理由。
@@ -479,13 +518,13 @@ struct WindowTitleJudgmentCacheTests {
                 "isInformative": 0.97,
             ]
         )
-        #expect(pending.reasonText == "私人事务")
+        #expect(pending.reasonText(thresholds: .standard) == "私人事务")
         // 放行和省略没有理由可说
-        #expect(entry(title: "A").reasonText == nil)
-        #expect(entry(title: "Claude", verdict: .omitted).reasonText == nil)
+        #expect(entry(title: "A").reasonText(thresholds: .standard) == nil)
+        #expect(entry(title: "Claude", verdict: .omitted).reasonText(thresholds: .standard) == nil)
         // 用户拍板锁的那条没有模型理由：probabilities 和 lockedBy 都是空的
         #expect(
-            entry(title: "B", verdict: .locked, source: .user, probabilities: [:]).reasonText == nil
+            entry(title: "B", verdict: .locked, source: .user, probabilities: [:]).reasonText(thresholds: .standard) == nil
         )
     }
 
@@ -504,7 +543,7 @@ struct WindowTitleJudgmentCacheTests {
             ]
         )
         // 顺序跟着 allCases，和设置页那行概率对得上
-        #expect(pending.reasonDetailText == "私人事务 0.13、政治敏感 0.22")
+        #expect(pending.reasonDetailText(thresholds: .standard) == "私人事务 0.13、政治敏感 0.22")
         // 锁定的理由是落盘的 lockedBy，数字照样带上
         let locked = entry(
             title: "secret",
@@ -519,14 +558,95 @@ struct WindowTitleJudgmentCacheTests {
             ],
             lockedBy: [.exposesSecret]
         )
-        #expect(locked.reasonDetailText == "密钥凭据 0.81")
-        #expect(entry(title: "A").reasonDetailText == nil)
-        #expect(entry(title: "Claude", verdict: .omitted).reasonDetailText == nil)
+        #expect(locked.reasonDetailText(thresholds: .standard) == "密钥凭据 0.81")
+        #expect(entry(title: "A").reasonDetailText(thresholds: .standard) == nil)
+        #expect(entry(title: "Claude", verdict: .omitted).reasonDetailText(thresholds: .standard) == nil)
         // 用户拍板那条没有概率：退回只报维度名，不印 0.00
         #expect(
             entry(title: "B", verdict: .locked, source: .user, probabilities: [:], lockedBy: [.isAdultContent])
-                .reasonDetailText == "成人内容"
+                .reasonDetailText(thresholds: .standard) == "成人内容"
         )
+    }
+
+    /**
+     * 挪动三条线之后，Jev 判过的条目按新线重算，用户拍板的一律不动。
+     *
+     * 不重算的话收紧的线只管以后：缓存里按旧线放行过的标题会一直照旧上报，
+     * 直到各自被淘汰。而用户拍板压过模型，也压过线的挪动。
+     */
+    @Test func rejudgeReappliesTheLinesToJevEntriesOnly() {
+        let greyProbabilities: [String: Double] = [
+            "exposesSecret": 0.03,
+            "exposesPrivateMatter": 0.13,
+            "exposesConfidentialWork": 0.07,
+            "isAdultContent": 0.01,
+            "isPoliticallySensitive": 0.04,
+            "isInformative": 0.97,
+        ]
+        var cache = WindowTitleJudgmentCache(entries: [
+            // 默认线下这条是待确认；放行线松到 0.2 之后它就干净了
+            entry(title: "Interview notes.txt", verdict: .needsConfirmation,
+                  probabilities: greyProbabilities, at: 0),
+            // 同一组概率，但用户已经拍板锁了：probabilities 空，重算无从下手也不该动
+            entry(title: "我锁的", verdict: .locked, source: .user, probabilities: [:], at: 10),
+            // 用户拍板公开的一条，概率还留着 —— 照样不许动
+            entry(title: "我放的", verdict: .published, source: .user,
+                  probabilities: greyProbabilities, at: 20),
+            entry(title: "干净", verdict: .published, at: 30),
+        ])
+        let order = cache.entries.map(\.title)
+
+        var loose = WindowTitleJudgmentThresholds.standard
+        loose.riskClearMaximum = 0.2
+        let changed = cache.rejudge(with: loose)
+
+        #expect(changed.map(\.key) == [cache.entries[0].key])
+        #expect(changed.first?.previous == .needsConfirmation)
+        #expect(cache.entries[0].verdict == .published)
+        #expect(cache.entries[1].verdict == .locked)
+        #expect(cache.entries[2].verdict == .published)
+        // LRU 顺序和时间戳都不许被重算搅动：淘汰要用前者，界面要用后者。
+        #expect(cache.entries.map(\.title) == order)
+        #expect(cache.entries[0].judgedAt == t0)
+
+        // 收紧到 0.12 就该锁死，并且把越线的那道题记进 lockedBy
+        var strict = WindowTitleJudgmentThresholds.standard
+        strict.riskLockMinimum = 0.12
+        strict.riskClearMaximum = 0.05
+        // 两条都动：面试笔记锁死，那条「干净」的工作机密 0.07 也进了新的灰区
+        #expect(Set(cache.rejudge(with: strict).map(\.key))
+            == Set([cache.entries[0].key, cache.entries[3].key]))
+        #expect(cache.entries[0].verdict == .locked)
+        #expect(cache.entries[0].lockedBy == [.exposesPrivateMatter])
+        #expect(cache.entries[3].verdict == .needsConfirmation)
+        // 用户拍板那两条从头到尾没被碰过
+        #expect(cache.entries[1].lockedBy.isEmpty)
+        #expect(cache.entries[2].verdict == .published)
+
+        // 线没变就什么都不动，调用方靠这个决定要不要写盘
+        #expect(cache.rejudge(with: strict).isEmpty)
+    }
+
+    /// 理由说的是传进来那组线，不是某个写死的常量。
+    @Test func reasonTextFollowsTheGivenThresholds() {
+        let pending = entry(
+            title: "Interview notes.txt",
+            verdict: .needsConfirmation,
+            probabilities: [
+                "exposesSecret": 0.03,
+                "exposesPrivateMatter": 0.13,
+                "exposesConfidentialWork": 0.07,
+                "isAdultContent": 0.01,
+                "isPoliticallySensitive": 0.04,
+                "isInformative": 0.97,
+            ]
+        )
+        #expect(pending.reasonText(thresholds: .standard) == "私人事务")
+        var loose = WindowTitleJudgmentThresholds.standard
+        loose.riskClearMaximum = 0.2
+        // 放行线松过 0.13 之后这条已经不在灰区里，说不出理由
+        #expect(pending.reasonText(thresholds: loose) == nil)
+        #expect(pending.reasonDetailText(thresholds: loose) == nil)
     }
 
     /// 列表按四档排：锁定、待确认、已省略、已公开；同一档里新的在前。
