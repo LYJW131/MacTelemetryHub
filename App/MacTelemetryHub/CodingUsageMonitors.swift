@@ -1,5 +1,6 @@
 import Foundation
 import Combine
+import CoreServices
 import Darwin
 import CodingUsageKit
 
@@ -139,6 +140,7 @@ final class VibeCodingUsageMonitor: CodingUsageMonitor {
 @MainActor
 final class CodingSessionMonitor: CodingUsageMonitor {
     private var watcher: DirectoryWatch?
+    private var transcripts: TreeWatch?
     private var model: String?
     private var lastActivity: Date?
     private var lastPublished: Date?
@@ -164,7 +166,41 @@ final class CodingSessionMonitor: CodingUsageMonitor {
         watcher = try? DirectoryWatch(directory: directory) { [weak self] in
             Task { @MainActor in self?.readLatest() }
         }
+        // Sessions that started before the hook was registered never call it.
+        // A transcript write is enough to keep the light on; the file itself is not read.
+        let projects = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".claude/projects")
+        transcripts?.cancel()
+        if FileManager.default.fileExists(atPath: projects.path) {
+            transcripts = TreeWatch(path: projects.path) { [weak self] in
+                Task { @MainActor in self?.noteTranscript() }
+            }
+        }
+        seedFromTranscripts()
         readLatest(force: true)
+    }
+
+    /// Newest session file's modification time. Does not open the file.
+    private func seedFromTranscripts() {
+        let root = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".claude/projects")
+        guard let enumerator = FileManager.default.enumerator(
+            at: root, includingPropertiesForKeys: [.contentModificationDateKey], options: [.skipsHiddenFiles]
+        ) else { return }
+        var newest: Date?
+        for case let url as URL in enumerator where url.pathExtension == "jsonl" {
+            guard let date = try? url.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate else { continue }
+            if newest == nil || date > newest! { newest = date }
+        }
+        if let newest, lastActivity == nil || newest > (lastActivity ?? .distantPast) {
+            lastActivity = newest
+        }
+    }
+
+    private func noteTranscript() {
+        let now = Date()
+        let due = lastPublished.map { now.timeIntervalSince($0) >= ClaudeActivityHook.publishInterval } ?? true
+        lastActivity = now
+        guard due else { return }
+        publishCurrent()
     }
 
     private func readLatest(force: Bool = false) {
@@ -201,6 +237,8 @@ final class CodingSessionMonitor: CodingUsageMonitor {
     override func stop() {
         watcher?.cancel()
         watcher = nil
+        transcripts?.cancel()
+        transcripts = nil
         model = nil
         lastActivity = nil
         lastPublished = nil
@@ -231,6 +269,49 @@ private final class DirectoryWatch: @unchecked Sendable {
     }
 
     func cancel() { source.cancel() }
+}
+
+/// Recursive file events for `~/.claude/projects`. Only the fact of a write is used.
+private final class TreeWatch: @unchecked Sendable {
+    private final class HandlerBox: @unchecked Sendable {
+        let handler: @Sendable () -> Void
+        init(_ handler: @escaping @Sendable () -> Void) { self.handler = handler }
+    }
+
+    private var stream: FSEventStreamRef?
+    private let box: HandlerBox
+
+    init(path: String, handler: @escaping @Sendable () -> Void) {
+        box = HandlerBox(handler)
+        var context = FSEventStreamContext(
+            version: 0, info: Unmanaged.passUnretained(box).toOpaque(),
+            retain: nil, release: nil, copyDescription: nil
+        )
+        stream = FSEventStreamCreate(
+            nil,
+            { _, info, _, _, _, _ in
+                guard let info else { return }
+                Unmanaged<HandlerBox>.fromOpaque(info).takeUnretainedValue().handler()
+            },
+            &context,
+            [path] as CFArray,
+            FSEventStreamEventId(kFSEventStreamEventIdSinceNow),
+            0.3,
+            FSEventStreamCreateFlags(kFSEventStreamCreateFlagFileEvents | kFSEventStreamCreateFlagNoDefer)
+        )
+        if let stream {
+            FSEventStreamSetDispatchQueue(stream, DispatchQueue.global())
+            FSEventStreamStart(stream)
+        }
+    }
+
+    func cancel() {
+        guard let stream else { return }
+        FSEventStreamStop(stream)
+        FSEventStreamInvalidate(stream)
+        FSEventStreamRelease(stream)
+        self.stream = nil
+    }
 }
 
 @MainActor

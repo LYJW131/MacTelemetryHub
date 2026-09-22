@@ -64,7 +64,7 @@ public enum ClaudeActivityHook {
         for event in events {
             guard let groups = hooks[event] as? [[String: Any]] else { return false }
             let handlers = groups.flatMap { $0["hooks"] as? [[String: Any]] ?? [] }
-            guard handlers.contains(where: { isOurs($0) && ($0["command"] as? String) == command && ($0["async"] as? Bool) == true }) else {
+            guard handlers.contains(where: { isInstalled($0, command: command) }) else {
                 return false
             }
         }
@@ -179,8 +179,16 @@ public enum ClaudeActivityHook {
         return command.contains(helperExecutableName)
     }
 
+    /// `args` forces exec form. Without it Claude Code runs the command through a shell,
+    /// and the space in `Mac Telemetry Hub.app` splits the path so the hook never starts.
     private static func ownedHandler(command: String) -> [String: Any] {
-        ["type": "command", "command": command, "async": true, "timeout": 5]
+        ["type": "command", "command": command, "args": [String](), "async": true, "timeout": 5]
+    }
+
+    private static func isInstalled(_ hook: [String: Any], command: String) -> Bool {
+        guard isOurs(hook), (hook["command"] as? String) == command, (hook["async"] as? Bool) == true else { return false }
+        guard let args = hook["args"] as? [Any], args.isEmpty else { return false }
+        return true
     }
 
     private static func mutableRoot(_ existing: Data?) throws -> NSMutableDictionary {

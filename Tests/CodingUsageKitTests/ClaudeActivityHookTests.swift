@@ -46,6 +46,8 @@ struct ClaudeActivityHookTests {
         let commands = stop.flatMap { $0["hooks"] as? [[String: Any]] ?? [] }.compactMap { $0["command"] as? String }
         #expect(commands.contains("/usr/bin/say done"))
         #expect(commands.filter { $0.contains("claude-activity-hook") } == ["/tmp/new/claude-activity-hook"])
+        let ours = stop.flatMap { $0["hooks"] as? [[String: Any]] ?? [] }.filter { ($0["command"] as? String)?.contains("claude-activity-hook") == true }
+        #expect(ours.first?["args"] as? [String] == [])
         #expect(ClaudeActivityHook.events.allSatisfy { hooks[$0] != nil })
         let removed = try ClaudeActivityHook.settingsRemoving(existing: again)
         let after = try JSONSerialization.jsonObject(with: removed) as! [String: Any]
