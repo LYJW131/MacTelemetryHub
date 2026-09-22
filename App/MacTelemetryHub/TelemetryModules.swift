@@ -53,8 +53,8 @@ final class DesktopActivityMonitor: ObservableObject {
      * `kAXFocusedWindowChangedNotification` 重挂。不发 AX 通知的应用（部分
      * Electron 壳）只能靠这条轮询，最坏迟 5 秒。
      *
-     * 判断那侧的 2 秒稳定期是配着这个数定的：通知随叫随到，轮询最慢 5 秒，
-     * 2 秒既盖得住连续敲命令带出的一串中间标题，又不会让「判断中」挂太久。
+     * 判断那侧的稳定期是 0.5 秒：连打期间每来一条新标题就重排计时，所以停下来
+     * 之前只会问最后那条，这条轮询顶多让一个活过 5 秒的中间标题也挨一次判断。
      */
     private static let fallbackPollInterval = Duration.seconds(5)
     /// 一个应用的图标：身份指纹 + 待上传的 PNG（编码失败时 png 为 nil）

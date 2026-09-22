@@ -21,11 +21,14 @@ import UserNotifications
  *
  * 1. 归一化（`WindowTitleNormalizer`）。转动的圆点、跑动的进度条被剥掉之后，
  *    一个正在下载的窗口始终只有一个标题。
- * 2. 稳定期 2 秒。终端里 `cd` 一路敲过去会连出好几个标题，只有停下来的那个
- *    值得问。这个数配的是 monitor 那边 5 秒的兜底轮询和随叫随到的
- *    `kAXTitleChangedNotification`：通知来得比轮询快，2 秒既盖得住连打，
- *    又不会让用户盯着「判断中」太久。
- * 3. 每个应用 10 秒最多问一次。期间的变动合并成最后那一条，不排队。
+ * 2. 稳定期 0.5 秒。终端里 `cd` 一路敲过去会连出好几个标题，只有停下来的那个
+ *    值得问 —— 每来一条新标题就把上一条的计时取消重排，所以连打期间只会问
+ *    最后停下的那个，稳定期长短不影响这件事，只决定停下之后还要等多久。
+ *    从 2 秒降到 0.5 秒是因为「切一下标签页要等两秒多才出字」的账主要记在
+ *    这里；代价是中间那些活过 0.5 秒的标题会各花一次判断和一个缓存位。
+ * 3. 每个应用 1.5 秒最多问一次。期间的变动合并成最后那一条，不排队。
+ *    这一层原先是 10 秒，连切几个标签页时后面那次要干等，等待时间和
+ *    Jev 本身的 0.7 秒完全不成比例。账号级的 429 退避另算，不靠这个数兜。
  *
  * 再加上「同一个缓存键只允许一次在途请求」——重复的问法在缓存回来之前不会
  * 叠着发出去。
@@ -43,9 +46,9 @@ final class WindowTitleJudge: ObservableObject {
     }
 
     /// 归一化文本稳定多久才值得问。见类型注释里的三层节流。
-    static let settleDelay: TimeInterval = 2
+    static let settleDelay: TimeInterval = 0.5
     /// 同一个应用两次提问的最小间隔。
-    static let perApplicationInterval: TimeInterval = 10
+    static let perApplicationInterval: TimeInterval = 1.5
     /// 单次请求超时。实测一次判断约 0.7 秒，10 秒是「网络出事了」的界线。
     static let requestTimeout: TimeInterval = 10
     /// 失败退避的首个间隔，之后翻倍。
@@ -249,7 +252,7 @@ final class WindowTitleJudge: ObservableObject {
             title: title
         )
         // 同一条标题已经在等了就别重排，否则 5 秒一次的兜底轮询会把稳定期
-        // 无限往后推，永远等不到「稳定 2 秒」。
+        // 无限往后推，永远等不到稳定。
         if let existing = scheduled[app], existing.title == title, extraDelay == 0 { return }
         scheduled[app]?.task.cancel()
 
