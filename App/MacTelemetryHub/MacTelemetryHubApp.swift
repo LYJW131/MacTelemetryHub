@@ -118,6 +118,7 @@ private struct MenuBarView: View {
                 foregroundAppIcon
             }
         }
+        windowTitleReportingToggle
         chargingMenuStatus(chargerLink)
         chargingMenuStatus(powerBankLink)
         // 上报断了要在菜单里看得见。菜单栏图标只换了个符号，说不出坏在哪。
@@ -176,6 +177,23 @@ private struct MenuBarView: View {
             ? entry.title.prefix(pendingTitleLimit) + "…"
             : entry.title[...]
         return "\(entry.applicationName) — \(title)"
+    }
+
+    /**
+     * 窗口标题的总开关，就摆在菜单里。
+     *
+     * 一键的意思是不开设置窗口：这里拨一下当场落盘、当场生效。绑定走
+     * `service.setWindowTitleReporting` 而不是 `$settings.…` —— 后者会先改
+     * @Published 再想办法补落盘，多出一个只存在半拍的状态源。
+     */
+    @ViewBuilder
+    private var windowTitleReportingToggle: some View {
+        if settings.desktopModuleEnabled {
+            Toggle("上报窗口标题", isOn: Binding(
+                get: { settings.windowTitleReportingEnabled },
+                set: { service.setWindowTitleReporting($0) }
+            ))
+        }
     }
 
     @ViewBuilder

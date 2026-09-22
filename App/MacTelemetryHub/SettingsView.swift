@@ -528,9 +528,36 @@ struct SettingsView: View {
 
     private var windowTitleSettings: some View {
         VStack(alignment: .leading, spacing: 0) {
+            windowTitleReportingSection
             windowTitlePendingSection
             windowTitleThresholdSection
             windowTitleCacheSection
+        }
+    }
+
+    /**
+     * 总开关。
+     *
+     * 摆在这一页最上面：下面几节说的全是「标题怎么判、判成了什么」，这一个
+     * 决定那些事要不要发生。绑定不走 `$settings` —— 它当场落盘并生效，多一个
+     * 「改了还没保存」的中间态只会让菜单栏上那一下和这里对不上。
+     */
+    private var windowTitleReportingSection: some View {
+        settingSection(
+            "窗口标题上报",
+            detail: "关掉之后标题既不判也不报。这一项当场生效，不用点保存。",
+            icon: "text.word.spacing"
+        ) {
+            Toggle("启用窗口标题上报", isOn: Binding(
+                get: { settings.windowTitleReportingEnabled },
+                set: { service.setWindowTitleReporting($0) }
+            ))
+            .toggleStyle(.switch)
+
+            Text("关掉之后本机不读窗口标题、不问 Jev、信封里的标题为空，菜单栏和面板上都显示「已关闭」。下面那份判断缓存原样留着，拨回来的标题不用重新问一次。菜单栏菜单里有同一个开关。")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
         }
     }
 

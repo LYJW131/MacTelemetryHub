@@ -5,7 +5,9 @@ import UserNotifications
 /**
  * 窗口标题的「能不能公开」判断。
  *
- * 名单是三档的：标题黑名单里的应用从头到尾不读；免判放行名单里的直接上报；
+ * 最外面先有个总开关（`Rules.reportingEnabled`）：拨掉就整条链不读、不判、
+ * 不报，缓存原样留着，拨回来接着用。开着的话名单是三档的：
+ * 标题黑名单里的应用从头到尾不读；免判放行名单里的直接上报；
  * 其余每一条**归一化后**的标题都问一次 Jev，按六道题的概率落成公开 /
  * 锁定 / 已省略 / 待确认（顺序和阈值见 `WindowTitleJudgmentThresholds`）。
  * 命中远端隐藏黑名单的应用一律不问 —— 那份载荷连真实应用叫什么都不说，
@@ -36,6 +38,8 @@ import UserNotifications
 @MainActor
 final class WindowTitleJudge: ObservableObject {
     struct Rules: Equatable {
+        /// 窗口标题这件事的总开关。关着就整条链不读、不判、不报。
+        var reportingEnabled = true
         /// 永不抓取、永不判断、永不上报。
         var blacklist = BundleIdentifierList(rawValue: "")
         /// 免判放行：标题直接上报。
@@ -146,8 +150,31 @@ final class WindowTitleJudge: ObservableObject {
         onVerdict?()
     }
 
-    func isBlacklisted(_ bundleIdentifier: String?) -> Bool {
-        rules.blacklist.contains(bundleIdentifier: bundleIdentifier)
+    /**
+     * 这条标题还没被读出来就已经定下来了吗。
+     *
+     * 总开关关着或者应用在黑名单里，`DesktopActivityMonitor` 连辅助功能元素
+     * 都不读 —— 不读也就没什么可泄漏的。返回 nil 才表示照常读、照常判。
+     * 优先级由 `WindowTitleStatus.suppressed` 一处说定，这里只喂参数。
+     */
+    func suppressedStatus(for bundleIdentifier: String?) -> WindowTitleStatus? {
+        WindowTitleStatus.suppressed(
+            reportingEnabled: rules.reportingEnabled,
+            blacklisted: rules.blacklist.contains(bundleIdentifier: bundleIdentifier)
+        )
+    }
+
+    /**
+     * 只拨总开关，其余规则一概不动。
+     *
+     * 菜单栏那个开关要「一键」生效，不能顺手把设置页里还没保存的草稿（黑名单、
+     * 三条线）一起推生效 —— `rules` 里装的是上一次真正应用过的那份，从它身上
+     * 改一个字段再走 `configure`，立刻生效的只有这一件事。
+     */
+    func setReportingEnabled(_ enabled: Bool) {
+        var updated = rules
+        updated.reportingEnabled = enabled
+        configure(updated)
     }
 
     // MARK: - 判断
@@ -164,11 +191,16 @@ final class WindowTitleJudge: ObservableObject {
         bundleIdentifier: String?,
         normalizedTitle: String?
     ) -> WindowTitleStatus {
+        // 总开关和黑名单排在空标题之前：关掉之后一个没有标题的窗口该说「已关闭」，
+        // 而不是「无标题」—— 后者会让 /health 看起来像开关没生效。
+        if let suppressed = suppressedStatus(for: bundleIdentifier) {
+            lastResolvedKey = nil
+            return suppressed
+        }
         guard let title = normalizedTitle, !title.isEmpty else {
             lastResolvedKey = nil
             return .none
         }
-        if rules.blacklist.contains(bundleIdentifier: bundleIdentifier) { return .blacklisted }
         // 隐藏应用的标题绝不出本机：不问 Jev，也不进信封。
         if rules.hiddenApplications.contains(bundleIdentifier: bundleIdentifier) { return .hidden }
         if rules.trusted.contains(bundleIdentifier: bundleIdentifier) { return .trusted }

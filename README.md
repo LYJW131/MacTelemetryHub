@@ -369,7 +369,11 @@ pause land in 320–490 ms, application switches in 560–620 ms.
      reviewable, re-judgeable and deletable in **设置 › 窗口标题**, which also
      shows all six probabilities per entry. All three lines are adjustable in
      **设置 › 窗口标题**; saving new ones re-applies them to the cached
-     Jev verdicts, leaving the ones decided by hand untouched.
+     Jev verdicts, leaving the ones decided by hand untouched. A master switch
+     — in that same pane and in the menu-bar menu, applied the moment it is
+     flipped — turns the whole thing off: no title is read, nothing is asked of
+     Jev, the envelope carries a null title and the status reads `disabled`. The
+     judgment cache survives, so flipping it back does not re-ask anything.
 
   Only the title text and the application's name and Bundle ID leave the machine
   for a judgment; the TypeSafe API key lives in Keychain (or `TYPESAFE_API_KEY`).

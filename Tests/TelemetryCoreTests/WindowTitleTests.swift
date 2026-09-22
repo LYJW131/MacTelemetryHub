@@ -953,6 +953,34 @@ struct JevWindowTitleQuestionTests {
 }
 
 /**
+ * 读标题之前就能定下来的两档，以及哪一档压过哪一档。
+ */
+struct WindowTitleSuppressionTests {
+    @Test func masterSwitchOutranksTheBlacklist() {
+        // 总开关关着就一律「已关闭」，连黑名单都不必查 —— 拨回来时说的才是
+        // 「这个应用在黑名单里」，而不是反过来。
+        #expect(
+            WindowTitleStatus.suppressed(reportingEnabled: false, blacklisted: false) == .disabled
+        )
+        #expect(
+            WindowTitleStatus.suppressed(reportingEnabled: false, blacklisted: true) == .disabled
+        )
+        #expect(
+            WindowTitleStatus.suppressed(reportingEnabled: true, blacklisted: true) == .blacklisted
+        )
+        // 两个闸都没拦住才轮到照常读、照常判
+        #expect(WindowTitleStatus.suppressed(reportingEnabled: true, blacklisted: false) == nil)
+    }
+
+    /// 关掉的标题绝不进信封，和锁定一档一样。
+    @Test func disabledIsNotReportable() {
+        #expect(WindowTitleStatus.disabled.isReportable == false)
+        #expect(WindowTitleStatus.disabled.rawValue == "disabled")
+        #expect(WindowTitleStatus.disabled.displayName == "已关闭")
+    }
+}
+
+/**
  * 判断中的标题接力。
  *
  * 钉住的是三条边界：只接「判断中」、只接同一个应用、最长 20 秒。三条里任意一条
@@ -987,7 +1015,7 @@ struct WindowTitleHoldTests {
     @Test func everyOtherStatusDropsTheHold() {
         for status in [
             WindowTitleStatus.locked, .needsConfirmation, .omitted, .none,
-            .blacklisted, .hidden, .noAccess, .unavailable,
+            .disabled, .blacklisted, .hidden, .noAccess, .unavailable,
         ] {
             var hold = WindowTitleHold()
             _ = hold.reportableTitle(

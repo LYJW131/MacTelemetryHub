@@ -195,11 +195,11 @@ final class DesktopActivityMonitor: ObservableObject {
         onChange?()
     }
 
-    /// 黑名单命中就连辅助功能元素都不读 —— 不读也就没什么可泄漏的。
+    /// 总开关关着或者黑名单命中，就连辅助功能元素都不读 —— 不读也就没什么可泄漏的。
     private func updateWindowTitleMonitoring(for app: NSRunningApplication) {
-        guard judge?.isBlacklisted(app.bundleIdentifier) != true else {
+        if let suppressed = judge?.suppressedStatus(for: app.bundleIdentifier) {
             detachAccessibilityObserver()
-            setWindowTitle(nil, status: .blacklisted)
+            setWindowTitle(nil, status: suppressed)
             return
         }
         refreshWindowTitle(for: app)
@@ -207,8 +207,8 @@ final class DesktopActivityMonitor: ObservableObject {
     }
 
     private func refreshWindowTitle(for app: NSRunningApplication) {
-        guard judge?.isBlacklisted(app.bundleIdentifier) != true else {
-            setWindowTitle(nil, status: .blacklisted)
+        if let suppressed = judge?.suppressedStatus(for: app.bundleIdentifier) {
+            setWindowTitle(nil, status: suppressed)
             return
         }
         let granted = AXIsProcessTrusted()
@@ -259,7 +259,7 @@ final class DesktopActivityMonitor: ObservableObject {
     }
 
     private func attachAccessibilityObserver(to app: NSRunningApplication) {
-        guard judge?.isBlacklisted(app.bundleIdentifier) != true,
+        guard judge?.suppressedStatus(for: app.bundleIdentifier) == nil,
               windowTitleAccessGranted else {
             detachAccessibilityObserver()
             return
@@ -398,9 +398,9 @@ final class DesktopActivityMonitor: ObservableObject {
         Task { @MainActor in
             guard monitor.accessibilityObserverIdentity == observerIdentity else { return }
             guard let app = NSWorkspace.shared.frontmostApplication else { return }
-            guard monitor.judge?.isBlacklisted(app.bundleIdentifier) != true else {
+            if let suppressed = monitor.judge?.suppressedStatus(for: app.bundleIdentifier) {
                 monitor.detachAccessibilityObserver()
-                monitor.setWindowTitle(nil, status: .blacklisted)
+                monitor.setWindowTitle(nil, status: suppressed)
                 return
             }
             if focusedWindowChanged { monitor.refreshObservedWindow() }

@@ -23,6 +23,7 @@ final class AppSettings: ObservableObject {
         static let chargerModuleEnabled = "chargerModuleEnabled"
         static let desktopModuleEnabled = "desktopModuleEnabled"
         static let desktopReportingBlacklist = "desktopReportingBlacklist"
+        static let windowTitleReportingEnabled = "windowTitleReportingEnabled"
         static let windowTitleBlacklist = "windowTitleBlacklist"
         static let windowTitleTrustedApplications = "windowTitleTrustedApplications"
         static let windowTitleRiskLockMinimum = "windowTitleRiskLockMinimum"
@@ -73,6 +74,14 @@ final class AppSettings: ObservableObject {
     @Published var powerBankIdleSleepEnabled = true
     @Published var desktopModuleEnabled = true
     @Published var desktopReportingBlacklist = ""
+    /**
+     * 窗口标题的总开关。
+     *
+     * 关掉就整条链不读、不判、不报，判断缓存原样留着。和其它设置不同，它当场
+     * 落盘 —— 菜单栏上那一下要立刻生效，所以它不进 `draftToken`，也没有
+     * 「未保存」这回事。
+     */
+    @Published var windowTitleReportingEnabled = true
     /// 标题黑名单：这些应用的窗口标题永不读取、永不判断、永不上报。
     @Published var windowTitleBlacklist = ""
     /// 免判放行：这些应用的标题直接上报，不问 Jev。
@@ -180,6 +189,9 @@ final class AppSettings: ObservableObject {
         powerBankIdleSleepEnabled = defaults.object(forKey: Key.powerBankIdleSleepEnabled) as? Bool ?? true
         desktopModuleEnabled = defaults.object(forKey: Key.desktopModuleEnabled) as? Bool ?? true
         desktopReportingBlacklist = defaults.string(forKey: Key.desktopReportingBlacklist) ?? ""
+        windowTitleReportingEnabled = defaults.object(
+            forKey: Key.windowTitleReportingEnabled
+        ) as? Bool ?? true
         windowTitleBlacklist = defaults.string(forKey: Key.windowTitleBlacklist) ?? ""
         windowTitleTrustedApplications = defaults.string(
             forKey: Key.windowTitleTrustedApplications
@@ -454,6 +466,7 @@ final class AppSettings: ObservableObject {
         defaults.set(powerBankIdleSleepEnabled, forKey: Key.powerBankIdleSleepEnabled)
         defaults.set(desktopModuleEnabled, forKey: Key.desktopModuleEnabled)
         defaults.set(desktopReportingBlacklist, forKey: Key.desktopReportingBlacklist)
+        defaults.set(windowTitleReportingEnabled, forKey: Key.windowTitleReportingEnabled)
         defaults.set(windowTitleBlacklist, forKey: Key.windowTitleBlacklist)
         defaults.set(windowTitleTrustedApplications, forKey: Key.windowTitleTrustedApplications)
         defaults.set(windowTitleRiskLockMinimum, forKey: Key.windowTitleRiskLockMinimum)
@@ -488,6 +501,18 @@ final class AppSettings: ObservableObject {
      * 毫无关系的字段（比如上报端点还没填完）会让保存失败 —— 界面报一个看不懂的错，
      * 配对却已经改掉了，两边对不上。配对是一个独立动作，落盘也该是独立的。
      */
+    /**
+     * 只落窗口标题总开关这一个键。
+     *
+     * 和配对 UUID 同一个理由：菜单栏上拨一下是个独立动作，走整页 `save()` 的话
+     * 一个跟它无关的字段没填好就会把这一步顶回来，而开关早就改进内存里了。
+     * `save()` 里照样写它一次，幂等。
+     */
+    func persistWindowTitleReporting(_ enabled: Bool) {
+        windowTitleReportingEnabled = enabled
+        defaults.set(enabled, forKey: Key.windowTitleReportingEnabled)
+    }
+
     func persistPeripheralIdentifier(for slot: ChargingDeviceSlot) {
         switch slot {
         case .charger:

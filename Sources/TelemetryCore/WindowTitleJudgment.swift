@@ -359,6 +359,14 @@ struct WindowTitleJudgmentEntry: Codable, Equatable, Sendable {
 enum WindowTitleStatus: String, Equatable, Sendable {
     /// 没有标题：窗口没标题、应用没窗口，或者前台应用采集关着。
     case none
+    /**
+     * 窗口标题这件事整个关掉了。
+     *
+     * 站长在设置页或菜单栏上拨的那个总开关。和黑名单一样是「不读、不判、
+     * 不报」，区别只在范围：黑名单挑应用，这一档一刀切。判断缓存原样留着，
+     * 拨回来之后那些标题不用重新问 Jev。
+     */
+    case disabled
     /// 应用在标题黑名单里：从头到尾不读、不判、不报。
     case blacklisted
     /// 命中远端隐藏黑名单。本机照旧显示，但绝不送去 TypeSafe，也不上报。
@@ -379,6 +387,7 @@ enum WindowTitleStatus: String, Equatable, Sendable {
     var displayName: String {
         switch self {
         case .none: "无标题"
+        case .disabled: "已关闭"
         case .blacklisted: "黑名单"
         case .hidden: "远端已隐藏"
         case .noAccess: "缺少辅助功能权限"
@@ -395,6 +404,25 @@ enum WindowTitleStatus: String, Equatable, Sendable {
     /// 这一档的标题能不能进信封。界面之外别再各自判一遍。
     var isReportable: Bool {
         self == .published || self == .trusted
+    }
+
+    /**
+     * 标题还没被读出来就已经定下来的那两档。
+     *
+     * 总开关和黑名单是同一件事的两个范围，合在一处是为了让「谁压过谁」只有
+     * 一个答案：总开关关着时连黑名单都不必查，一律 `.disabled`。返回 nil 才
+     * 表示这条标题该照常读、照常判。
+     *
+     * 远端隐藏名单（`hidden`）不在这里：那一档照旧读标题、本机照旧显示，
+     * 只是不送去 TypeSafe、不进信封，判断顺序归 `WindowTitleJudge.resolve`。
+     */
+    static func suppressed(
+        reportingEnabled: Bool,
+        blacklisted: Bool
+    ) -> WindowTitleStatus? {
+        if !reportingEnabled { return .disabled }
+        if blacklisted { return .blacklisted }
+        return nil
     }
 }
 

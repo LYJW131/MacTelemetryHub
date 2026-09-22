@@ -217,6 +217,23 @@ final class ServiceController: ObservableObject {
         sendHeartbeat("offline", blocking: true)
     }
 
+    /**
+     * 拨窗口标题的总开关。
+     *
+     * 设置页那个 Toggle 和菜单栏那个走的都是这里：只落这一个键，只把这一件事
+     * 推给 judge。不走整页 `applySettings()` —— 那会连带把设置页里还没保存的
+     * 黑名单、三条线一起应用，而菜单栏上拨一下不该有这种副作用。
+     *
+     * `judge.setReportingEnabled` 里的 `configure` 末尾会叫 `onVerdict`，桌面
+     * 监视器立刻重采一次：关掉时远端马上收到一条 null 标题，开回来时当场开始
+     * 判断，不用等下一次标题变化。
+     */
+    func setWindowTitleReporting(_ enabled: Bool) {
+        guard settings.windowTitleReportingEnabled != enabled else { return }
+        settings.persistWindowTitleReporting(enabled)
+        windowTitleJudge.setReportingEnabled(enabled)
+    }
+
     func applySettings() throws {
         let previousReporter = reporterRestartKey
         let previousCoding = codingScheduleKey
@@ -644,6 +661,7 @@ final class ServiceController: ObservableObject {
             self?.desktopActivity.refreshAfterJudgment()
         }
         windowTitleJudge.configure(WindowTitleJudge.Rules(
+            reportingEnabled: settings.windowTitleReportingEnabled,
             blacklist: settings.normalizedWindowTitleBlacklist,
             trusted: settings.normalizedWindowTitleTrustedApplications,
             // 远端隐藏的应用一条标题都不许送去 TypeSafe。
