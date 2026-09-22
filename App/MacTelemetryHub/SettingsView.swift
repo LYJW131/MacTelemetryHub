@@ -26,8 +26,8 @@ private enum SettingsCategory: String, CaseIterable, Identifiable {
     var detail: String {
         switch self {
         case .general: "后台运行与应用标识"
-        case .sources: "前台应用、音乐与用量统计"
-        case .windowTitle: "待确认的标题与判断结论缓存"
+        case .sources: "应用身份、音乐与用量统计"
+        case .windowTitle: "读取、判断与上报窗口标题的全部设置"
         case .charger: "Anker Prime 配对与端口遥测"
         case .local: "本机健康检查与充电设备 SSE"
         case .reporting: "版本化遥测入口与上报策略"
@@ -196,15 +196,14 @@ struct SettingsView: View {
             generalSettings
         case .sources:
             // 只有这一页订阅前台应用和 MusicKit 状态。
-            SettingsSourcesRefresh(
-                desktopActivity: desktopActivity,
-                authorization: appleMusicAuthorization,
-                judge: judge
-            ) {
+            // 标题的名单、key 和权限都搬去窗口标题页了，这一页只剩 MusicKit
+            // 的授权状态需要订阅。
+            SettingsSourcesRefresh(authorization: appleMusicAuthorization) {
                 sourceSettings
             }
         case .windowTitle:
-            // 判断结论每回来一条这一页就要重绘，所以订阅只收在这里。
+            // 判断结论每回来一条这一页就要重绘；辅助功能和通知这两个权限状态
+            // 分别挂在 desktopActivity 和 judge 上，订阅都只收在这里。
             SettingsWindowTitleRefresh(judge: judge, desktopActivity: desktopActivity) {
                 windowTitleSettings
             }
@@ -258,8 +257,20 @@ struct SettingsView: View {
         }
     }
 
+    /**
+     * 这一节只管「此刻在用哪个应用」这一层。
+     *
+     * 窗口标题从读取到上报的每一项都在「窗口标题」页 —— 标题是另一个量级的
+     * 隐私，混在应用身份下面会让人以为关掉这里的开关标题就不出去了，而实际
+     * 决定它的是那一页的总开关。两页唯一的交叉是下面这份远端上报黑名单：
+     * 命中的应用连标题都不会被送去 TypeSafe，那句话写在标题名单那一节。
+     */
     private var desktopSourceSection: some View {
-        settingSection("前台应用", detail: "应用身份默认参与上报；可按 Bundle ID 排除。", icon: "macwindow") {
+        settingSection(
+            "前台应用",
+            detail: "应用身份默认参与上报；可按 Bundle ID 排除。窗口标题的读取与判断另见「窗口标题」页。",
+            icon: "macwindow"
+        ) {
             Toggle("启用前台应用采集", isOn: $settings.desktopModuleEnabled)
                 .toggleStyle(.switch)
 
@@ -278,68 +289,6 @@ struct SettingsView: View {
             Text("命中时本机界面和本地 API 仍会显示当前应用；远端会收到一次空状态来清除上一个应用，应用身份和图标不会上传。")
                 .font(.caption)
                 .foregroundStyle(.secondary)
-
-            Divider().padding(.vertical, 3)
-
-            bundleIdentifierListEditor(
-                title: "标题黑名单",
-                detail: "这些应用的窗口标题永不读取、永不判断、永不上报",
-                text: $settings.windowTitleBlacklist,
-                configured: settings.normalizedWindowTitleBlacklist,
-                chooseTitle: "选择不读取窗口标题的应用",
-                choosePrompt: "加入标题黑名单",
-                add: { settings.addToWindowTitleBlacklist(bundleIdentifier: $0) }
-            )
-
-            Divider().padding(.vertical, 3)
-
-            bundleIdentifierListEditor(
-                title: "免判放行",
-                detail: "这些应用的标题直接上报，不问 Jev",
-                text: $settings.windowTitleTrustedApplications,
-                configured: settings.normalizedWindowTitleTrustedApplications,
-                chooseTitle: "选择免判放行的应用",
-                choosePrompt: "加入免判放行",
-                add: { settings.addToWindowTitleTrustedApplications(bundleIdentifier: $0) }
-            )
-
-            Text("两份名单之外的每一条标题都要先过 Jev：判为公开才上报，判为私密直接锁定，把握不足时发一条通知等你拍板。远端上报黑名单里的应用永远不会把标题送去 TypeSafe。")
-                .font(.caption)
-                .foregroundStyle(.secondary)
-                .fixedSize(horizontal: false, vertical: true)
-
-            Divider().padding(.vertical, 3)
-
-            fieldTitle("TypeSafe API Key", detail: "保存在钥匙串；也可用环境变量 TYPESAFE_API_KEY")
-            SecureField("TypeSafe API Key", text: $settings.typesafeAPIKey)
-                .font(.body.monospaced())
-                .textFieldStyle(.roundedBorder)
-
-            LabeledContent("辅助功能权限") {
-                Text(windowTitleAccessText)
-                    .foregroundStyle(windowTitleAccessColor)
-            }
-
-            LabeledContent("通知权限") {
-                Text(notificationAuthorizationText)
-                    .foregroundStyle(.secondary)
-            }
-
-            Text("没有 API key 或判断失败时，标题一律按锁定处理，不会上报，也不会被永久记成私密。")
-                .font(.caption)
-                .foregroundStyle(.secondary)
-                .fixedSize(horizontal: false, vertical: true)
-
-            if !desktopActivity.windowTitleAccessGranted {
-                HStack(spacing: 10) {
-                    Button("请求辅助功能权限") {
-                        desktopActivity.requestWindowTitleAccess()
-                    }
-                    Button("打开系统设置") {
-                        desktopActivity.openWindowTitlePrivacySettings()
-                    }
-                }
-            }
         }
     }
 
@@ -530,7 +479,8 @@ struct SettingsView: View {
         VStack(alignment: .leading, spacing: 0) {
             windowTitleReportingSection
             windowTitlePendingSection
-            windowTitleThresholdSection
+            windowTitleListSection
+            windowTitleJudgmentSection
             windowTitleCacheSection
         }
     }
@@ -545,16 +495,94 @@ struct SettingsView: View {
     private var windowTitleReportingSection: some View {
         settingSection(
             "窗口标题上报",
-            detail: "关掉之后标题既不判也不报。这一项当场生效，不用点保存。",
+            detail: "总开关，以及读标题、发通知这两件事的前置权限。开关当场生效，不用点保存。",
             icon: "text.word.spacing"
         ) {
+            // 标题是搭在前台应用采集上的：那一层关着，这一页的开关开着也读不到东西。
+            // 不说清楚的话，「开关是开的，怎么一直没标题」会查到判断和权限上去。
+            if !settings.desktopModuleEnabled {
+                HStack(spacing: 10) {
+                    Label("前台应用采集已关闭，标题不会读取。", systemImage: "exclamationmark.triangle")
+                        .font(.caption)
+                        .foregroundStyle(.orange)
+                        .fixedSize(horizontal: false, vertical: true)
+                    Button("去数据源开启") { selection = .sources }
+                        .buttonStyle(.link)
+                        .font(.caption)
+                }
+            }
+
             Toggle("启用窗口标题上报", isOn: Binding(
                 get: { settings.windowTitleReportingEnabled },
                 set: { service.setWindowTitleReporting($0) }
             ))
             .toggleStyle(.switch)
 
-            Text("关掉之后本机不读窗口标题、不问 Jev、信封里的标题为空，菜单栏和面板上都显示「已关闭」。下面那份判断缓存原样留着，拨回来的标题不用重新问一次。菜单栏菜单里有同一个开关。")
+            Text("关掉之后本机不读窗口标题、不问 Jev、信封里的标题为空，菜单栏和面板上都显示「已关闭」。最下面那份判断缓存原样留着，拨回来的标题不用重新问一次。菜单栏菜单里有同一个开关。")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+
+            Divider().padding(.vertical, 3)
+
+            LabeledContent("辅助功能权限") {
+                Text(windowTitleAccessText)
+                    .foregroundStyle(windowTitleAccessColor)
+            }
+
+            LabeledContent("通知权限") {
+                Text(notificationAuthorizationText)
+                    .foregroundStyle(.secondary)
+            }
+
+            Text("读窗口标题要辅助功能权限；「待确认」那一档靠通知当场拍板，通知权限留到第一条待确认出现时才请求。")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+
+            if !desktopActivity.windowTitleAccessGranted {
+                HStack(spacing: 10) {
+                    Button("请求辅助功能权限") {
+                        desktopActivity.requestWindowTitleAccess()
+                    }
+                    Button("打开系统设置") {
+                        desktopActivity.openWindowTitlePrivacySettings()
+                    }
+                }
+            }
+        }
+    }
+
+    /// 两份按应用划的名单：一份从不读，一份不用问。都在判断之前起作用。
+    private var windowTitleListSection: some View {
+        settingSection(
+            "标题名单",
+            detail: "按 Bundle ID 划出「从不读」和「不用问」两头；名单之外的每条标题都要过 Jev。",
+            icon: "list.bullet.rectangle"
+        ) {
+            bundleIdentifierListEditor(
+                title: "标题黑名单",
+                detail: "这些应用的窗口标题永不读取、永不判断、永不上报",
+                text: $settings.windowTitleBlacklist,
+                configured: settings.normalizedWindowTitleBlacklist,
+                chooseTitle: "选择不读取窗口标题的应用",
+                choosePrompt: "加入标题黑名单",
+                add: { settings.addToWindowTitleBlacklist(bundleIdentifier: $0) }
+            )
+
+            Divider().padding(.vertical, 3)
+
+            bundleIdentifierListEditor(
+                title: "免判放行",
+                detail: "这些应用的标题直接上报，不问 Jev",
+                text: $settings.windowTitleTrustedApplications,
+                configured: settings.normalizedWindowTitleTrustedApplications,
+                chooseTitle: "选择免判放行的应用",
+                choosePrompt: "加入免判放行",
+                add: { settings.addToWindowTitleTrustedApplications(bundleIdentifier: $0) }
+            )
+
+            Text("两份名单之外的每一条标题都要先过 Jev：判为公开才上报，判为私密直接锁定，把握不足时发一条通知等你拍板。数据源页那份远端上报黑名单里的应用永远不会把标题送去 TypeSafe。")
                 .font(.caption)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
@@ -562,17 +590,30 @@ struct SettingsView: View {
     }
 
     /**
-     * 三条线。
+     * 判断这件事的两半：凭据和策略。
      *
-     * 放在待确认之后、判断缓存之前：等人拍板的条目要第一眼看见，而这三个数
-     * 管的正是下面那份列表怎么分档，改完就能对着列表看新线落在哪里。
+     * key 决定问不问得动 Jev，三条线决定回来的概率落在哪一档 —— 合成一节是
+     * 因为少了任何一半「判断」都不成立。摆在判断缓存之前：改完线往下一眼就
+     * 能看见新线把已有条目分成了什么样。
      */
-    private var windowTitleThresholdSection: some View {
+    private var windowTitleJudgmentSection: some View {
         settingSection(
-            "判断线",
-            detail: "Jev 给的概率落在哪一档由这三条线决定。保存后生效。",
+            "判断",
+            detail: "问 Jev 用的凭据，以及概率落在哪一档的三条线。保存后生效。",
             icon: "slider.horizontal.below.rectangle"
         ) {
+            fieldTitle("TypeSafe API Key", detail: "保存在钥匙串；也可用环境变量 TYPESAFE_API_KEY")
+            SecureField("TypeSafe API Key", text: $settings.typesafeAPIKey)
+                .font(.body.monospaced())
+                .textFieldStyle(.roundedBorder)
+
+            Text("没有 API key 或判断失败时，标题一律按锁定处理，不会上报，也不会被永久记成私密。")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+
+            Divider().padding(.vertical, 3)
+
             HStack(alignment: .top, spacing: 14) {
                 NumericField(
                     title: "锁定线",
@@ -599,7 +640,7 @@ struct SettingsView: View {
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
 
-            Text("保存后，下面这份缓存里由 Jev 判的条目会按新线重算一遍，你自己拍过板的那些不动。重算成待确认不会补发通知 —— 它们排在上面那份列表的最前面。")
+            Text("保存后，下面那份判断缓存里由 Jev 判的条目会按新线重算一遍，你自己拍过板的那些不动。重算成待确认不会补发通知 —— 它们会出现在上面「待确认」那一节里。")
                 .font(.caption)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
@@ -1240,10 +1281,7 @@ struct SettingsView: View {
 
 /// 设置页里需要跟着子对象刷新的那一块。父视图不订阅这些对象。
 private struct SettingsSourcesRefresh<Content: View>: View {
-    @ObservedObject var desktopActivity: DesktopActivityMonitor
     @ObservedObject var authorization: AppleMusicAuthorizationManager
-    /// 通知授权状态挂在 judge 上，不订阅它那一行不会跟着变。
-    @ObservedObject var judge: WindowTitleJudge
     @ViewBuilder var content: () -> Content
 
     var body: some View { content() }
