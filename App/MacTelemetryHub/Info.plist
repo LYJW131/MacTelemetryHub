@@ -27,7 +27,7 @@
     <key>NSAppleMusicUsageDescription</key>
     <string>读取你的 Apple Music 资料库权限，用于获取 Apple Music 用户令牌并同步到你配置的后端。</string>
     <key>NSAccessibilityUsageDescription</key>
-    <string>读取当前窗口标题并仅显示在本机界面；窗口标题不会发送到远端或写入本地 API。</string>
+    <string>读取当前窗口标题。标题先过黑名单和 TypeSafe 模型判断：不在标题黑名单、也不在免判名单里的标题会连同应用名发送给 TypeSafe 判断能否公开；判为可公开的标题会随上报发到你配置的后端，并出现在本地 HTTP 接口的 /health 里；锁定、待确认或省略的标题不出本机。</string>
     <key>NSLocalNetworkUsageDescription</key>
     <string>在本机网络提供充电器状态 API，并按配置上报遥测数据。</string>
     <key>NSPrincipalClass</key>

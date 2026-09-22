@@ -1,8 +1,22 @@
 # Mac Telemetry Hub
 
-A private, extensible macOS status reporter. Charger telemetry is one optional
+A personal, extensible macOS status reporter. Charger telemetry is one optional
 module alongside desktop activity, local Apple Music playback, and coding
-usage, rather than the identity of the whole application.
+usage, rather than the identity of the whole application. The user interface is
+Simplified Chinese; this README documents the protocol and behaviour in English.
+
+## Where the data goes
+
+Nothing leaves the Mac until you configure a destination. Every network path
+below is off by default.
+
+| Data | Destination | Default |
+| --- | --- | --- |
+| The telemetry envelope: charger readings, frontmost app name and icon, window titles cleared for publishing, Music.app state, coding usage | The `POST` URL you enter under 设置 › 上报. The author's own backend is not published; the ingest protocol below is the whole contract and is enough to build one. | Off (`postEnabled` false, empty URL) |
+| Window titles that are neither blacklisted nor trusted, with the app name and bundle ID | `https://api.typesafe.ai/v1/systemone` (TypeSafe's Jev model), to decide whether the title may be published; see **Module permissions** | Off until a TypeSafe API key is entered |
+| Charger cover JPEG and app icons | The S3-compatible bucket (R2) you configure | Off |
+| Cursor cloud usage history | `https://cursor.com` dashboard endpoints, using Cursor.app's own local login | Off (coding usage module disabled) |
+| Local HTTP API: `/health` (frontmost app, icon state, a window title only when it is already cleared for publishing), `/apple-music/authorization`, charging SSE streams | Whoever can reach the bind address; no authentication | Off; loopback only when enabled |
 
 ## What the app includes
 
@@ -29,7 +43,7 @@ usage, rather than the identity of the whole application.
   the menu bar
 - coding-usage aggregation that never uploads session IDs, project paths, prompts, or replies
 - charger cover name plus the original JPEG uploaded to R2 (no resize or transcode; the point is to leave Anker's signed URL)
-- coding agent usage aggregation in the envelope (subscription plan tiers and rate-limit windows are reported separately by `reporters/agent-limits-reporter` in the lyjwpage repo)
+- coding agent usage aggregation in the envelope (subscription plan tiers and rate-limit windows are out of scope here; the author reports them from a separate container to `/api/ingest/agents`)
 - login launch using `SMAppService.mainApp`
 
 Each module can be disabled without stopping the others. Disabling the charger
@@ -117,10 +131,10 @@ runs independently of the slower cloud history refresh. The calendar reads the
 local ledger without starting a second history download. Usage and session counts
 are assembled by the shared engine before upload.
 
-Plan tiers and rate-limit windows belong to the NAS container
-`reporters/agent-limits-reporter` in the lyjwpage repository. It reports through
-`/api/ingest/agents`; this app reports usage through `/api/ingest/mac` and does not
-fetch or forward those account limits.
+Plan tiers and rate-limit windows come from a separate producer (the author runs
+a small container that posts them to `/api/ingest/agents`; it is not part of this
+repository). This app reports usage through `/api/ingest/mac` and does not fetch
+or forward those account limits.
 
 Every module is sent only when its own display content changes.
 
@@ -362,9 +376,23 @@ pause land in 320–490 ms, application switches in 560–620 ms.
   below.
 - Coding usage reads the original local logs/databases with the bundled `ccusage`
   helper. Cursor cloud history uses Cursor.app's existing local login state and
-  sends its credential only to Cursor's HTTPS endpoints. Enable the coding usage
-  module and check the CLI path in Settings; no local panel URL is needed. Each
-  collection interval has a 60-second minimum.
+  sends its credential only to Cursor's HTTPS endpoints. Note that this talks to
+  an undocumented dashboard endpoint (`cursor.com/api/dashboard/…`) with the
+  cookie Cursor.app already holds — it is not an official API, it can break or
+  be disallowed by Cursor at any time, and enabling it is your own call. Enable
+  the coding usage module and check the CLI path in Settings; no local panel URL
+  is needed. Each collection interval has a 60-second minimum.
+
+## Anker BLE protocol notice
+
+`Sources/ChargerTelemetryKit` implements the BLE protocol of the Anker Prime
+charger and power bank as observed between the Anker app and the author's own
+devices, including the static AES-GCM material the firmware uses for the
+initial handshake. It is published so that owners of the same hardware can read
+their own devices; it is not affiliated with, endorsed by, or supported by
+Anker, comes with no warranty, and may stop working after a firmware update.
+Check your local law and the device's terms before using it. The protocol notes
+live in [LYJW131/anker-prime-ble](https://github.com/LYJW131/anker-prime-ble).
 
 ## Open and run in Xcode
 
@@ -407,8 +435,8 @@ There is no separate credentials endpoint — the button only wakes the reporter
 loop. The backend should treat the token as a secret, avoid logging it, and
 return a 2xx response only after accepting the payload.
 
-The developer token is no longer part of this contract: the API Worker signs its
-own with the team's `.p8` key, so nothing expiring travels in the envelope, and
+The developer token is no longer part of this contract: the receiving backend signs its
+own with a MusicKit private key (`.p8`), so nothing expiring travels in the envelope, and
 an envelope that still carries `developerToken` or `expiresAt` is rejected. The
 app only re-reads MusicKit's cached user token every five minutes and uploads it
 when the value changes (it still asks MusicKit for a developer token in passing,
@@ -473,6 +501,12 @@ The default bind is `127.0.0.1:8787` (loopback only). Set the bind address to
 `0.0.0.0`, `::`, or a specific interface IP to listen more widely. If the port
 is temporarily occupied, the app retries every three seconds.
 
+**There is no authentication on this API.** Bound to anything but loopback,
+everyone on that network segment can read `/health` (frontmost app name, icon
+hash, and any window title already cleared for publishing),
+`/apple-music/authorization`, and the charging SSE streams. Keep the loopback
+default unless you trust the whole network.
+
 - `GET /health` — process liveness, plus each charging link's enabled / connected / phase.
   `reporter` carries the remote loop's `postEnabled`, `lastSuccessAt`, `lastError` and
   whether R2 direct upload is fully configured; `desktopIcon` shows the frontmost app's
@@ -526,4 +560,4 @@ Window usage is reconciled by event time, including late-arriving records. It is
 internal Jev evidence and does not appear in the public Vibe Coding patch.
 
 Read-only diagnostic: `swift run coding-usage pulse --output /tmp/pulse-usage.json`.
-Deploy the matching lyjwpage Worker and frontend before installing this reporter.
+Deploy a backend that accepts the ingest protocol above before installing this reporter.

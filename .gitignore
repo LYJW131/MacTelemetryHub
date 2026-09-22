@@ -9,3 +9,16 @@ xcuserdata/
 
 # macOS
 .DS_Store
+
+# 凭据类文件：现在没有，公开后一次误 add -A 就是事故
+.env
+.env.*
+.dev.vars
+*.p8
+*.p12
+*.pem
+*.mobileprovision
+*.cer
+
+# 本机 agent 工作树
+.claude/

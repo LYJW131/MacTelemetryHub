@@ -13,9 +13,9 @@ import Testing
 struct WindowTitleNormalizerTests {
     @Test func stripsBrailleSpinner() {
         // npm / cargo 那一类转轮。整个 U+2800–U+28FF 都要剥，不是只剥见过的几个。
-        #expect(WindowTitleNormalizer.normalize("⠋ Building lyjwpage") == "Building lyjwpage")
-        #expect(WindowTitleNormalizer.normalize("⠹ Building lyjwpage") == "Building lyjwpage")
-        #expect(WindowTitleNormalizer.normalize("⣿ Building lyjwpage") == "Building lyjwpage")
+        #expect(WindowTitleNormalizer.normalize("⠋ Building project") == "Building project")
+        #expect(WindowTitleNormalizer.normalize("⠹ Building project") == "Building project")
+        #expect(WindowTitleNormalizer.normalize("⣿ Building project") == "Building project")
     }
 
     @Test func spinnerFramesCollapseToOneKey() {

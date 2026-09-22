@@ -3,9 +3,11 @@
 Recorded BLE sessions with both devices. Each line of a `.jsonl` is one
 frame: direction, command, the raw frame, and the decrypted payload.
 
-These are both the evidence behind [docs/powerbank.md](../docs/powerbank.md) and
+These are both the evidence behind [docs/powerbank.md in anker-prime-ble](https://github.com/LYJW131/anker-prime-ble/blob/main/docs/powerbank.md) and
 a regression suite. After changing a decoder, replay all of them — no radio, no
-device:
+device. The replay tool is the Python package from
+[anker-prime-ble](https://github.com/LYJW131/anker-prime-ble), run from that
+repository's virtualenv:
 
 ```bash
 for f in captures/*.jsonl; do
