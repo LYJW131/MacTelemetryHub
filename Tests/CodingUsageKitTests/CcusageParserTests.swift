@@ -7,6 +7,28 @@ struct CcusageParserTests {
         #expect(CcusageCollector.sources(requested: ["claude", "cursor"], discovered: ["opencode", "cursor"])
             == ["claude", "opencode"])
     }
+    @Test func piCommandReadsBothSessionStores() {
+        let home = URL(fileURLWithPath: "/tmp/home")
+        let collector = CcusageCollector(executableURL: URL(fileURLWithPath: "/usr/bin/false"), offline: true, home: home)
+        let args = collector.commandArguments(source: "pi", section: "daily")
+        let path = args[args.firstIndex(of: "--pi-path")! + 1]
+        #expect(path == "/tmp/home/.pi/agent/sessions,/tmp/home/.omp/agent/sessions")
+        #expect(args.contains("--mode"))
+        #expect(!collector.commandArguments(source: "claude", section: "daily").contains("--pi-path"))
+        #expect(!collector.commandArguments(source: "codex", section: "daily").contains("--mode"))
+        #expect(CcusageCollector.sources(requested: ["claude"], discovered: [], includePi: true) == ["claude", "pi"])
+        #expect(!CcusageCollector.includePi(available: ["claude"], home: home))
+    }
+    @Test func ompSessionsArePresentOnlyWhenALogExists() throws {
+        let home = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: home) }
+        #expect(!CcusageCollector.ompSessionsPresent(home: home))
+        let file = home.appendingPathComponent(".omp/agent/sessions/-x/session.jsonl")
+        try FileManager.default.createDirectory(at: file.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try Data("\n".utf8).write(to: file)
+        #expect(CcusageCollector.ompSessionsPresent(home: home))
+        #expect(CcusageCollector.includePi(available: ["pi"], home: home))
+    }
 
     private let now = CodingUsageDates.parseInstant("2026-09-05T04:00:00Z")!
     private let noSessions = Data("{\"sessions\":[]}".utf8)
@@ -171,4 +193,46 @@ struct CcusageParserTests {
         #expect(failures["antigravity"] == true)
         #expect(failures["grok"] == true)
     }
+    @Test func ompStoreIsCollectedWhenDiscoveryCannotSeeIt() async throws {
+        let home = FileManager.default.temporaryDirectory.appendingPathComponent("omp-pi-" + UUID().uuidString)
+        let sessions = home.appendingPathComponent(".omp/agent/sessions/-proj")
+        try FileManager.default.createDirectory(at: sessions, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: home) }
+        try Data("{}\n".utf8).write(to: sessions.appendingPathComponent("one.jsonl"))
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent("ccusage-omp-" + UUID().uuidString)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let executable = directory.appendingPathComponent("ccusage")
+        let sample = String(decoding: try data(rawDay()), as: UTF8.self)
+        let script = """
+        #!\(testPython)
+        import sys, json
+        args=sys.argv[1:]
+        if args==['--help']:
+            print('  claude    Show Claude usage\\n  pi    Show pi usage')
+            raise SystemExit
+        if args[0]=='daily':
+            print('{"daily":[]}')
+            raise SystemExit
+        if args[0]=='pi':
+            joined=args[args.index('--pi-path')+1]
+            if '.pi/agent/sessions' not in joined or '.omp/agent/sessions' not in joined:
+                raise SystemExit(2)
+            if args[1]=='daily':
+                print(json.dumps({'daily':[\(sample)]}))
+                raise SystemExit
+            print('{"sessions":[]}')
+            raise SystemExit
+        print('{"daily":[]}' if args[1]=='daily' else '{"sessions":[]}')
+        """
+        try Data(script.utf8).write(to: executable)
+        try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: executable.path)
+        let results = await CcusageCollector(executableURL: executable, sourceIDs: ["claude"], offline: true, home: home)
+            .collect(at: now)
+        let pi = results.compactMap { if case let .success(report) = $0, report.sourceID == "pi" { report } else { nil } }
+        #expect(pi.count == 1)
+        #expect(pi.first?.days.first?.totalTokens == 37)
+        #expect(pi.first?.days.first?.models["model-a"] == 37)
+    }
+
 }

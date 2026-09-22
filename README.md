@@ -153,7 +153,11 @@ TokenTracker，也不连接它的 HTTP 面板，不读取或导入它的 queue�
 | Cursor | 不采集。云端历史由 agent-limits-reporter 用它自己的登录态上报；本机快照把 `cursor` 放进 `omittedSources`，合计和年度图都不含它 | 当前没有本机会话适配器，不把云端历史冒充正在使用状态 |
 
 本地采集先通过 `ccusage daily --by-agent --json --offline` 发现来源，再按来源读取
-`daily` 和 `session`。所有日桶统一为 `Asia/Shanghai`，命令不传 `--since` 或 `--until`，
+`daily` 和 `session`。`pi` 的默认目录只有 `~/.pi/agent/sessions`，全来源发现也不接受
+`--pi-path`，所以看不到 `~/.omp/agent/sessions`。omp 会话目录里有 jsonl 且 ccusage 提供
+`pi` 时，采集会把 `pi` 加进来。`pi` 的 `daily` 和 `session` 传 `--pi-path`，同时包含
+`~/.pi/agent/sessions` 与 `~/.omp/agent/sessions`；该参数替换默认目录，只传一边会丢掉另一边。
+所有日桶统一为 `Asia/Shanghai`，命令不传 `--since` 或 `--until`，
 不把“今日”或“近一年”当成累计用量的历史范围。年度图是完整账本的一个窗口。
 活动天数按所有来源中 token 大于零的日期取并集；会话数只统计实际读到且去重的本机会话。
 

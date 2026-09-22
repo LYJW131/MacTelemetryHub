@@ -15,23 +15,55 @@ public struct CcusageCollector: Sendable {
     public var sourceIDs: [String]
     public var timeout: TimeInterval
     public var offline: Bool
+    public var home: URL
 
     public init(executableURL: URL, environment: [String: String] = [:],
                 sourceIDs: [String] = ["claude", "codex", "grok", "antigravity"],
-                timeout: TimeInterval = 90, offline: Bool = false) {
+                timeout: TimeInterval = 90, offline: Bool = false,
+                home: URL = FileManager.default.homeDirectoryForCurrentUser) {
         self.executableURL = executableURL; self.environment = environment
         self.sourceIDs = sourceIDs; self.timeout = timeout; self.offline = offline
+        self.home = home
     }
 
     /// `cursor` 是云端账号，不是 ccusage 来源。发现结果里若出现同名 id，不能并进本地采集。
-    static func sources(requested: [String], discovered: Set<String>) -> [String] {
-        Set(requested).union(discovered).subtracting(["cursor"]).sorted()
+    /// `includePi` 补上全来源发现看不到的 omp 会话；`--pi-path` 会替换默认目录，不能只传一边。
+    static func sources(requested: [String], discovered: Set<String>, includePi: Bool = false) -> [String] {
+        var ids = Set(requested).union(discovered)
+        if includePi { ids.insert("pi") }
+        return ids.subtracting(["cursor"]).sorted()
     }
+
+    static func piSessionPaths(home: URL) -> [String] {
+        [".pi/agent/sessions", ".omp/agent/sessions"].map { home.appendingPathComponent($0).path }
+    }
+
+    static func ompSessionsPresent(home: URL) -> Bool {
+        let root = home.appendingPathComponent(".omp/agent/sessions")
+        guard let enumerator = FileManager.default.enumerator(at: root, includingPropertiesForKeys: nil,
+                                                              options: [.skipsHiddenFiles]) else { return false }
+        for case let url as URL in enumerator where url.pathExtension == "jsonl" { return true }
+        return false
+    }
+
+    func commandArguments(source: String, section: String) -> [String] {
+        var arguments = [source, section, "--json", "--no-color", "--timezone", "Asia/Shanghai"]
+        if source != "codex" { arguments += ["--mode", "calculate"] }
+        if offline { arguments.append("--offline") }
+        if source == "pi" { arguments += ["--pi-path", Self.piSessionPaths(home: home).joined(separator: ",")] }
+        return arguments
+    }
+    static func includePi(available: Set<String>?, home: URL) -> Bool {
+        available?.contains("pi") == true && ompSessionsPresent(home: home)
+    }
+
+
 
     public func collect(at now: Date = Date()) async -> [CodingUsageSourceResult] {
         let available = await availableSources()
+        let includePi = Self.includePi(available: available, home: home)
         let (discovered, discoveryError) = await discoveredSources(useCache: false)
-        let requested = Self.sources(requested: sourceIDs, discovered: discovered)
+        let requested = Self.sources(requested: sourceIDs, discovered: discovered, includePi: includePi)
         return await withTaskGroup(of: CodingUsageSourceResult.self, returning: [CodingUsageSourceResult].self) { group in
             for source in requested {
                 group.addTask {
@@ -73,9 +105,10 @@ public struct CcusageCollector: Sendable {
 
     public func collectSessions() async -> [CodingUsageSessionsResult] {
         let available = await availableSources()
+        let includePi = Self.includePi(available: available, home: home)
         let (discovered, _) = await discoveredSources(useCache: true)
         return await withTaskGroup(of: CodingUsageSessionsResult.self, returning: [CodingUsageSessionsResult].self) { group in
-            for source in Self.sources(requested: sourceIDs, discovered: discovered) {
+            for source in Self.sources(requested: sourceIDs, discovered: discovered, includePi: includePi) {
                 group.addTask {
                     if let available, !available.contains(source) {
                         return .failure(sourceID: source, message: "当前 ccusage 版本不支持 \(source)", unavailable: true)
@@ -96,10 +129,7 @@ public struct CcusageCollector: Sendable {
     }
 
     private func run(source: String, section: String) async throws -> Data {
-        var arguments = [source, section, "--json", "--no-color", "--timezone", "Asia/Shanghai"]
-        // These are ALL historical records, deliberately without --since / --until.
-        if source != "codex" { arguments += ["--mode", "calculate"] }
-        if offline { arguments.append("--offline") }
+        let arguments = commandArguments(source: source, section: section)
         if source == "antigravity" {
             let commandArguments = arguments
             return try await CcusageSQLiteAccess.run {
