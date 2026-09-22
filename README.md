@@ -322,10 +322,10 @@ pause land in 320–490 ms, application switches in 560–620 ms.
 - Foreground app names and icons use `NSWorkspace` and need no special
   permission. With explicit Accessibility permission, the app also reads the
   focused window title. Window contents are never read.
-- Window titles are gated in three tiers, all editable in
-  **设置 › 窗口标题** — the pane that holds every window-title setting, from
-  the master switch and the two permissions down to the lists, the judgment
-  credentials and lines, and the verdict cache. **设置 › 数据源** keeps only
+- Behind the master switch, window titles are gated in three tiers, all
+  editable in **设置 › 窗口标题** — the pane that holds every
+  window-title setting, from that switch and the two permissions down to the
+  lists, the judgment credentials and lines, and the verdict cache. **设置 › 数据源** keeps only
   application identity: the foreground-capture switch and the
   remote-reporting blacklist.
   1. **标题黑名单** — those Bundle IDs never have their accessibility window or
