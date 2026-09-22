@@ -34,11 +34,13 @@ below is off by default.
 - foreground application reporting: the app's name, bundle ID, icon, and — when a
   judgment clears it — the focused window title, with an exact Bundle ID blacklist
   for remote reporting
-- window titles gated by a blacklist plus two TypeSafe Jev yes/no judgments
-  (sensitive? informative?): blacklisted apps are never read, trusted apps are
-  published directly, everything else lands in one of four verdicts — published,
-  locked, omitted (nothing to show, e.g. a title that is just the app's own name)
-  or pending. A pending title raises a notification with a single 公开 button;
+- window titles gated by a blacklist plus six TypeSafe Jev yes/no judgments
+  asked in one request (secrets, private matters, employer material, adult
+  content, political sensitivity, informativeness): blacklisted apps are never
+  read, trusted apps are published directly, everything else lands in one of
+  four verdicts — published, locked (with the dimensions that triggered it),
+  omitted (nothing to show, e.g. a title that is just the app's own name) or
+  pending. A pending title raises a notification with a single 公开 button;
   closing the notification locks it, and pending titles can also be settled from
   the menu bar
 - coding-usage aggregation that never uploads session IDs, project paths, prompts, or replies
@@ -325,19 +327,30 @@ pause land in 320–490 ms, application switches in 560–620 ms.
      title read at all, and switching to one detaches the previous observer.
   2. **免判放行** — those titles are reported as they are, with no judgment.
   3. Everything else — each normalized title is sent to TypeSafe's `jev-latest`
-     model (`POST https://api.typesafe.ai/v1/systemone`) as **two `noul` (yes/no)
-     questions over the same state, asked in one request**: `windowTitleSensitive`
-     (would publishing this expose a credential, a financial, medical, legal or
-     relationship matter, a named third party, or an employer's material?) and
-     `windowTitleInformative` (does the title say anything beyond the application
-     name — a file, page, project or track — rather than just repeating the app
-     name or generic chrome such as `Untitled`?). Each answer is a probability,
-     and four verdicts follow from three measured thresholds, in this order:
-     `sensitive ≥ 0.60` locks; `informative < 0.50` omits the title (not
+     model (`POST https://api.typesafe.ai/v1/systemone`) as **six `noul` (yes/no)
+     questions over the same state, asked in one request**. One label per
+     question, so that a title can only be caught by a risk it was actually
+     asked about:
+
+     | Question | Yes means |
+     | --- | --- |
+     | `exposesSecret` | a password, key, token, secret or account number |
+     | `exposesPrivateMatter` | money, health, legal, romantic or family matters; a named private individual; a personal message subject |
+     | `exposesConfidentialWork` | an employer's or client's internal material — the owner's own repositories and hobby projects are not |
+     | `isAdultContent` | pornographic or sexually explicit |
+     | `isPoliticallySensitive` | political leaders, regimes, movements or contested events, including coded references (homophones, nicknames, memes) |
+     | `isInformative` | the title says something beyond the application's own name |
+
+     Each answer is a probability. The five risk questions share one pair of
+     measured thresholds and are combined in code by an **any-serious-violation**
+     rule, never a weighted average; the four verdicts follow in this order:
+     any risk `≥ 0.60` locks, and every triggered dimension is recorded so the
+     UI can say *已锁定 · 政治敏感*; `isInformative < 0.50` omits the title (not
      reported, no notification, but listed in **设置 › 窗口标题** where it can
-     be published by hand); `sensitive ≤ 0.15` publishes; anything left — a
+     be published by hand); all five risks `≤ 0.10` publishes; anything left — a
      title the model is genuinely unsure about — raises a user notification
-     carrying the app name and the title. The notification has exactly one
+     carrying the app name and the title, and the UI names the dimensions that
+     are still in the middle band. The notification has exactly one
      action, 公开: macOS folds two or more actions into an 选项 submenu, so a
      second button would cost two clicks. Closing the notification
      (X / Clear / Clear All) locks the title instead, but only while that title is still pending, so
@@ -348,9 +361,11 @@ pause land in 320–490 ms, application switches in 560–620 ms.
      two clicks from settled. Until the user answers, the title is treated as
      locked. Verdicts are cached on disk by Bundle ID plus normalized title
      (LRU, 500 entries, `~/Library/Application Support/
-     MacTelemetryHub/window-title-judgments.json`, format version 2 — an older
-     file is discarded and re-judged rather than migrated) and are reviewable,
-     re-judgeable and deletable in **设置 › 窗口标题**.
+     MacTelemetryHub/window-title-judgments.json`, format version 3 — an older
+     file is discarded and re-judged rather than migrated, because a version-2
+     list was never asked about politics or adult content at all) and are
+     reviewable, re-judgeable and deletable in **设置 › 窗口标题**, which also
+     shows all six probabilities per entry.
 
   Only the title text and the application's name and Bundle ID leave the machine
   for a judgment; the TypeSafe API key lives in Keychain (or `TYPESAFE_API_KEY`).

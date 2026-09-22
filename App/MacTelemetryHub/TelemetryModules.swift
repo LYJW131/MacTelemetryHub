@@ -17,6 +17,14 @@ final class DesktopActivityMonitor: ObservableObject {
     @Published private(set) var windowTitle: String?
     /// 这条标题停在判断流程的哪一步。仪表盘、菜单栏、设置页都读它。
     @Published private(set) var windowTitleStatus: WindowTitleStatus = .none
+    /**
+     * 落在这一档的理由，比如「政治敏感」。没有可说的就是 nil。
+     *
+     * 从判断缓存里取，所以它只在锁定和待确认两档上有值。放在这里而不是让
+     * 每个界面自己去查缓存：`onVerdict` 之后本来就要重采一次，理由跟着状态
+     * 一起更新，三处界面看到的是同一份。
+     */
+    @Published private(set) var windowTitleReason: String?
     @Published private(set) var windowTitleAccessGranted = AXIsProcessTrusted()
     /// snapshot 变化时通知上报循环，让它别干等到下一个周期
     var onChange: (() -> Void)?
@@ -93,6 +101,7 @@ final class DesktopActivityMonitor: ObservableObject {
         snapshot = nil
         windowTitle = nil
         windowTitleStatus = .none
+        windowTitleReason = nil
     }
 
     /// 判断放行之后才允许进信封的那一份。判断中、锁定、待确认、失败一律为 nil。
@@ -207,12 +216,21 @@ final class DesktopActivityMonitor: ObservableObject {
             bundleIdentifier: app.bundleIdentifier,
             normalizedTitle: next
         ) ?? .unavailable
-        setWindowTitle(next, status: status)
+        setWindowTitle(
+            next,
+            status: status,
+            reason: judge?.reason(bundleIdentifier: app.bundleIdentifier, normalizedTitle: next)
+        )
     }
 
-    private func setWindowTitle(_ title: String?, status: WindowTitleStatus) {
+    private func setWindowTitle(
+        _ title: String?,
+        status: WindowTitleStatus,
+        reason: String? = nil
+    ) {
         if windowTitle != title { windowTitle = title }
         if windowTitleStatus != status { windowTitleStatus = status }
+        if windowTitleReason != reason { windowTitleReason = reason }
     }
 
     private func attachAccessibilityObserver(to app: NSRunningApplication) {

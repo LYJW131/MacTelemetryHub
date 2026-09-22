@@ -615,6 +615,13 @@ struct SettingsView: View {
                 .font(.caption)
                 .foregroundStyle(.secondary)
                 .lineLimit(2)
+            if let probabilities = windowTitleProbabilityDetail(entry) {
+                Text(probabilities)
+                    .font(.caption2.monospacedDigit())
+                    .foregroundStyle(.tertiary)
+                    .lineLimit(2)
+                    .textSelection(.enabled)
+            }
             HStack(spacing: 8) { actions() }
         }
         .padding(9)
@@ -624,17 +631,33 @@ struct SettingsView: View {
         .clipShape(RoundedRectangle(cornerRadius: 8))
     }
 
+    /// 第一行：应用、结论加理由、谁拍的板、时间。六个概率另起一行。
     private func windowTitleEntryDetail(_ entry: WindowTitleJudgmentEntry) -> String {
-        var parts = [entry.applicationName, windowTitleVerdictName(entry.verdict)]
+        var parts = [entry.applicationName, windowTitleVerdictText(entry)]
         parts.append(entry.source == .user ? "我拍的板" : "Jev")
-        if let probability = entry.probabilities[WindowTitleJudgmentThresholds.sensitiveOption] {
-            parts.append(String(format: "sensitive %.2f", probability))
-        }
-        if let probability = entry.probabilities[WindowTitleJudgmentThresholds.informativeOption] {
-            parts.append(String(format: "informative %.2f", probability))
-        }
         parts.append(entry.judgedAt.formatted(date: .abbreviated, time: .shortened))
         return parts.joined(separator: " · ")
+    }
+
+    /**
+     * 六个概率排成一行。
+     *
+     * 全列出来而不是只列越线的那几个：调题面时要看的正是那些没越线的数
+     * 离线有多远，只印理由的话这张表就没法对账。
+     */
+    private func windowTitleProbabilityDetail(_ entry: WindowTitleJudgmentEntry) -> String? {
+        let parts = WindowTitleDimension.allCases.compactMap { dimension -> String? in
+            guard let probability = entry.probabilities[dimension.rawValue] else { return nil }
+            return String(format: "%@ %.2f", dimension.displayName, probability)
+        }
+        return parts.isEmpty ? nil : parts.joined(separator: " · ")
+    }
+
+    /// 「已锁定 · 政治敏感」。待确认的理由是此刻卡在两条线中间的那几道。
+    private func windowTitleVerdictText(_ entry: WindowTitleJudgmentEntry) -> String {
+        let name = windowTitleVerdictName(entry.verdict)
+        guard let reason = entry.reasonText else { return name }
+        return "\(name) · \(reason)"
     }
 
     private func windowTitleVerdictName(_ verdict: WindowTitleVerdict) -> String {
@@ -648,8 +671,10 @@ struct SettingsView: View {
 
     private var currentWindowTitleSummary: String {
         let status = desktopActivity.windowTitleStatus
-        guard let title = desktopActivity.windowTitle else { return status.displayName }
-        return "\(title) · \(status.displayName)"
+        var verdict = status.displayName
+        if let reason = desktopActivity.windowTitleReason { verdict += " · \(reason)" }
+        guard let title = desktopActivity.windowTitle else { return verdict }
+        return "\(title) · \(verdict)"
     }
 
     private var chargerSettings: some View {

@@ -645,9 +645,9 @@ struct DashboardView: View {
         var parts: [String] = []
         if let title = desktopActivity.windowTitle, !title.isEmpty {
             // 标题后面一定跟着它的结论：本机看得见不等于已经公开出去了。
-            parts.append("\(title) · \(desktopActivity.windowTitleStatus.displayName)")
+            parts.append("\(title) · \(windowTitleStatusText)")
         } else if desktopActivity.windowTitleStatus != .none {
-            parts.append(desktopActivity.windowTitleStatus.displayName)
+            parts.append(windowTitleStatusText)
         }
         if let bundleIdentifier = desktopActivity.snapshot?.bundleIdentifier,
            !bundleIdentifier.isEmpty {
@@ -657,6 +657,14 @@ struct DashboardView: View {
             parts.append("远端已隐藏")
         }
         return parts.isEmpty ? nil : parts.joined(separator: " · ")
+    }
+
+    /// 结论加上理由：挡下来的那几档要说清是哪一道题挡的，
+    /// 「已锁定」和「已锁定 · 政治敏感」对站长是两件事。
+    private var windowTitleStatusText: String {
+        let name = desktopActivity.windowTitleStatus.displayName
+        guard let reason = desktopActivity.windowTitleReason else { return name }
+        return "\(name) · \(reason)"
     }
 
     private func sectionHeading(_ title: String, detail: String) -> some View {

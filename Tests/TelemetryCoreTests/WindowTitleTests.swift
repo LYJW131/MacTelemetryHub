@@ -59,109 +59,218 @@ struct WindowTitleNormalizerTests {
     }
 }
 
+
+/**
+ * 六道概率到四档的落法。
+ *
+ * 组合规则（任一严重违规即拦）、判定顺序（风险 → 信息量 → 放行）、两条线的
+ * 等号侧，以及实测那张表逐条 —— 这四件是这个功能的全部策略，挪一位就会让
+ * 「待确认」要么变成常态要么形同虚设。
+ */
 struct WindowTitleThresholdTests {
-    /// 两道题都满意才公开：不敏感，而且确实说了点什么。
-    @Test func cleanAndInformativeIsPublished() {
-        // 实测：ReportDecision.swift — MacTelemetryHub（Xcode）
-        #expect(
-            WindowTitleJudgmentThresholds.verdict(sensitive: 0.07, informative: 0.97)
-                == .published
-        )
+    /// 五道风险题全干净、而且确实说了点什么，才自动公开。
+    private func probabilities(
+        secret: Double = 0.02,
+        privateMatter: Double = 0.03,
+        work: Double = 0.03,
+        adult: Double = 0.01,
+        political: Double = 0.02,
+        informative: Double = 0.97
+    ) -> [WindowTitleDimension: Double] {
+        [
+            .exposesSecret: secret,
+            .exposesPrivateMatter: privateMatter,
+            .exposesConfidentialWork: work,
+            .isAdultContent: adult,
+            .isPoliticallySensitive: political,
+            .isInformative: informative,
+        ]
     }
 
-    @Test func sensitiveAboveLockLineIsLocked() {
-        // 实测：招商银行 — 个人账户余额与最近交易（Safari）。信息量满格也先锁掉。
-        #expect(
-            WindowTitleJudgmentThresholds.verdict(sensitive: 0.97, informative: 0.98) == .locked
+    @Test func cleanAndInformativeIsPublished() {
+        // 实测：ReportDecision.swift — MacTelemetryHub（Xcode）
+        let judged = WindowTitleJudgmentThresholds.judge(
+            probabilities(secret: 0.04, privateMatter: 0.05, work: 0.07, political: 0.05)
         )
+        #expect(judged.verdict == .published)
+        #expect(judged.lockedBy.isEmpty)
+    }
+
+    /**
+     * 这条就是拆题的理由。
+     *
+     * 一道揉在一起的「敏感吗」给过它 0.07，于是一条键政标题被自动公开了。
+     * 拆开之后政治那道是 0.98，另外四道照旧干净 —— 挡下它的是被问到的那一道。
+     */
+    @Test func politicalTitleIsLockedEvenWhenEveryOtherRiskIsClean() {
+        let judged = WindowTitleJudgmentThresholds.judge(probabilities(political: 0.98))
+        #expect(judged.verdict == .locked)
+        #expect(judged.lockedBy == [.isPoliticallySensitive])
+    }
+
+    @Test func adultContentIsLocked() {
+        // 实测：Pornhub - Free Porn Videos（Safari）
+        let judged = WindowTitleJudgmentThresholds.judge(
+            probabilities(privateMatter: 0.08, adult: 0.99, political: 0.03, informative: 0.98)
+        )
+        #expect(judged.verdict == .locked)
+        #expect(judged.lockedBy == [.isAdultContent])
+    }
+
+    @Test func bankTitleIsLocked() {
+        // 实测：招商银行 — 个人账户余额与最近交易（Safari）。信息量满格也先锁掉。
+        let judged = WindowTitleJudgmentThresholds.judge(
+            probabilities(secret: 0.07, privateMatter: 0.97, work: 0.31, political: 0.03)
+        )
+        #expect(judged.verdict == .locked)
+        #expect(judged.lockedBy == [.exposesPrivateMatter])
+    }
+
+    /// 多道同时越线时 `lockedBy` 要全记下来，顺序跟着 `allCases`。
+    /// 只记第一个的话，界面会把一条「密码 + 工作机密」说成单一理由。
+    @Test func everyTriggeredDimensionIsRecorded() {
+        let judged = WindowTitleJudgmentThresholds.judge(
+            probabilities(secret: 0.92, work: 0.71, political: 0.88)
+        )
+        #expect(judged.verdict == .locked)
+        #expect(judged.lockedBy == [
+            .exposesSecret,
+            .exposesConfidentialWork,
+            .isPoliticallySensitive,
+        ])
     }
 
     @Test func uninformativeTitleIsOmitted() {
         // 实测：Claude（Claude）。公开它毫无风险，也毫无意义。
-        #expect(
-            WindowTitleJudgmentThresholds.verdict(sensitive: 0.03, informative: 0.04) == .omitted
+        let judged = WindowTitleJudgmentThresholds.judge(
+            probabilities(privateMatter: 0.03, work: 0.03, political: 0.03, informative: 0.06)
         )
+        #expect(judged.verdict == .omitted)
+        #expect(judged.lockedBy.isEmpty)
     }
 
-    /// 顺序是策略的一部分：隐私先于信息量。两条都不满足时必须落在锁定上，
+    /// 顺序是策略的一部分：风险先于信息量。两条都不满足时必须落在锁定上，
     /// 否则一条敏感又没信息的标题会以「已省略」的名义留在界面上。
-    @Test func privacyOutranksOmission() {
-        #expect(
-            WindowTitleJudgmentThresholds.verdict(sensitive: 0.9, informative: 0.04) == .locked
+    @Test func riskOutranksOmission() {
+        let judged = WindowTitleJudgmentThresholds.judge(
+            probabilities(privateMatter: 0.9, informative: 0.04)
         )
+        #expect(judged.verdict == .locked)
+        #expect(judged.lockedBy == [.exposesPrivateMatter])
     }
 
     @Test func middleGroundNeedsConfirmation() {
-        // 实测：Interview notes.txt 0.24、Budget draft.txt 0.26。
+        // 实测：Interview notes.txt 私人 0.13、Budget draft.txt 私人 0.55。
         // 既不够干净也不够危险，只能让人看一眼 —— 这正是中间地带存在的理由。
-        #expect(
-            WindowTitleJudgmentThresholds.verdict(sensitive: 0.24, informative: 0.98)
-                == .needsConfirmation
+        for value in [0.13, 0.55] {
+            let judged = WindowTitleJudgmentThresholds.judge(probabilities(privateMatter: value))
+            #expect(judged.verdict == .needsConfirmation)
+            // 待确认不写 lockedBy：没有任何一道越过锁定线。
+            #expect(judged.lockedBy.isEmpty)
+        }
+    }
+
+    /// 待确认的理由不落盘，从概率现算 —— 阈值挪一位，旧条目的理由跟着改。
+    @Test func unsettledDimensionsExplainTheConfirmation() {
+        let unsettled = WindowTitleJudgmentThresholds.unsettledDimensions(
+            probabilities(privateMatter: 0.55, political: 0.31)
         )
-        #expect(
-            WindowTitleJudgmentThresholds.verdict(sensitive: 0.26, informative: 0.98)
-                == .needsConfirmation
-        )
+        #expect(unsettled == [.exposesPrivateMatter, .isPoliticallySensitive])
     }
 
     @Test func thresholdsAreExactBoundaries() {
-        // 三条线都取到等号那一侧：0.6 就锁，0.15 就放行，0.5 就算有信息。
+        // 三条线都取到等号那一侧：0.6 就锁，0.10 就放行，0.5 就算有信息。
         #expect(
-            WindowTitleJudgmentThresholds.verdict(
-                sensitive: WindowTitleJudgmentThresholds.sensitiveLockMinimum,
-                informative: 0.98
-            ) == .locked
+            WindowTitleJudgmentThresholds.judge(
+                probabilities(political: WindowTitleJudgmentThresholds.riskLockMinimum)
+            ).verdict == .locked
         )
         #expect(
-            WindowTitleJudgmentThresholds.verdict(
-                sensitive: WindowTitleJudgmentThresholds.sensitiveClearMaximum,
-                informative: 0.98
-            ) == .published
+            WindowTitleJudgmentThresholds.judge(
+                probabilities(privateMatter: WindowTitleJudgmentThresholds.riskClearMaximum)
+            ).verdict == .published
+        )
+        // 刚过放行线一点点就该问人了
+        #expect(
+            WindowTitleJudgmentThresholds.judge(probabilities(privateMatter: 0.11)).verdict
+                == .needsConfirmation
         )
         #expect(
-            WindowTitleJudgmentThresholds.verdict(
-                sensitive: 0.16,
-                informative: 0.98
-            ) == .needsConfirmation
+            WindowTitleJudgmentThresholds.judge(
+                probabilities(informative: WindowTitleJudgmentThresholds.informativeMinimum)
+            ).verdict == .published
         )
         #expect(
-            WindowTitleJudgmentThresholds.verdict(
-                sensitive: 0.02,
-                informative: WindowTitleJudgmentThresholds.informativeMinimum
-            ) == .published
-        )
-        #expect(
-            WindowTitleJudgmentThresholds.verdict(sensitive: 0.02, informative: 0.49) == .omitted
+            WindowTitleJudgmentThresholds.judge(probabilities(informative: 0.49)).verdict
+                == .omitted
         )
     }
 
-    /// 实测那张表整条跑一遍：题面和阈值是一对，谁动了这里都会红。
+    /**
+     * 实测那张表整条跑一遍。
+     *
+     * 六列按 `WindowTitleDimension.allCases` 的顺序：密钥、私人、工作、成人、
+     * 政治、信息量。题面和阈值是一对，谁动了这里都会红。
+     */
     @Test func measuredTitlesLandWhereTheTableSays() {
-        let measured: [(String, Double, Double, WindowTitleVerdict)] = [
-            ("Swift Concurrency — Apple Developer Documentation", 0.02, 0.97, .published),
-            ("TypeSafe - Google Chrome", 0.04, 0.93, .published),
-            ("user@mac: ~/Developer/project — zsh", 0.04, 0.96, .published),
-            ("ReportDecision.swift — MacTelemetryHub", 0.07, 0.97, .published),
-            ("Q4 planning notes", 0.09, 0.96, .published),
-            ("Meeting agenda.txt", 0.11, 0.98, .published),
-            ("Untitled", 0.02, 0.04, .omitted),
-            ("Claude", 0.03, 0.04, .omitted),
-            ("Mac Telemetry Hub", 0.03, 0.04, .omitted),
-            ("Interview notes.txt", 0.24, 0.98, .needsConfirmation),
-            ("Budget draft.txt", 0.26, 0.98, .needsConfirmation),
-            ("Call with the landlord.txt", 0.68, 0.98, .locked),
-            ("Re: 合同签署 — 张伟", 0.95, 0.97, .locked),
-            ("Cloudflare R2 production access key — password", 0.96, 0.97, .locked),
-            ("招商银行 — 个人账户余额与最近交易", 0.97, 0.98, .locked),
+        let measured: [(String, [Double], WindowTitleVerdict, [WindowTitleDimension])] = [
+            ("Swift Concurrency — Apple Developer Documentation",
+             [0.01, 0.02, 0.02, 0.01, 0.02, 0.96], .published, []),
+            ("TypeSafe - Google Chrome",
+             [0.04, 0.05, 0.05, 0.02, 0.05, 0.85], .published, []),
+            ("user@mac: ~/Developer/project — zsh",
+             [0.03, 0.04, 0.03, 0.01, 0.02, 0.96], .published, []),
+            ("ReportDecision.swift — MacTelemetryHub",
+             [0.04, 0.05, 0.07, 0.01, 0.05, 0.97], .published, []),
+            ("Q4 planning notes",
+             [0.02, 0.05, 0.05, 0.01, 0.02, 0.94], .published, []),
+            ("Meeting agenda.txt",
+             [0.02, 0.06, 0.05, 0.01, 0.03, 0.97], .published, []),
+            ("Untitled",
+             [0.02, 0.03, 0.03, 0.01, 0.02, 0.04], .omitted, []),
+            ("Claude",
+             [0.02, 0.03, 0.03, 0.01, 0.03, 0.06], .omitted, []),
+            ("Mac Telemetry Hub",
+             [0.02, 0.03, 0.03, 0.01, 0.03, 0.06], .omitted, []),
+            ("Interview notes.txt",
+             [0.03, 0.13, 0.07, 0.01, 0.04, 0.97], .needsConfirmation, []),
+            ("Budget draft.txt",
+             [0.02, 0.55, 0.05, 0.01, 0.03, 0.97], .needsConfirmation, []),
+            ("Call with the landlord.txt",
+             [0.03, 0.74, 0.07, 0.01, 0.02, 0.98], .locked, [.exposesPrivateMatter]),
+            ("Re: 合同签署 — 张伟",
+             [0.02, 0.98, 0.52, 0.01, 0.03, 0.97], .locked, [.exposesPrivateMatter]),
+            ("Cloudflare R2 production access key — password",
+             [0.92, 0.09, 0.09, 0.01, 0.03, 0.95], .locked, [.exposesSecret]),
+            ("招商银行 — 个人账户余额与最近交易",
+             [0.07, 0.97, 0.31, 0.01, 0.03, 0.97], .locked, [.exposesPrivateMatter]),
+            ("二次元毛邓江胡！Mygo 动漫少女代指中国五代领导人的键政密码本",
+             [0.02, 0.03, 0.03, 0.02, 0.98, 0.96], .locked, [.isPoliticallySensitive]),
+            ("习近平 - 维基百科",
+             [0.02, 0.04, 0.03, 0.01, 0.98, 0.97], .locked, [.isPoliticallySensitive]),
+            ("六四事件 - YouTube",
+             [0.02, 0.05, 0.03, 0.02, 0.98, 0.98], .locked, [.isPoliticallySensitive]),
+            ("Pornhub - Free Porn Videos",
+             [0.02, 0.08, 0.03, 0.99, 0.03, 0.98], .locked, [.isAdultContent]),
+            ("r/nsfw - Reddit",
+             [0.02, 0.06, 0.03, 0.97, 0.07, 0.97], .locked, [.isAdultContent]),
+            ("Bank of America - Accounts",
+             [0.04, 0.94, 0.20, 0.01, 0.03, 0.96], .locked, [.exposesPrivateMatter]),
+            ("Ozempic dosage guide — Reddit",
+             [0.02, 0.74, 0.03, 0.01, 0.04, 0.97], .locked, [.exposesPrivateMatter]),
+            ("Genshin Impact — Steam",
+             [0.02, 0.03, 0.07, 0.01, 0.03, 0.85], .published, []),
+            ("村上春树《挪威的森林》 - 微信读书",
+             [0.01, 0.03, 0.02, 0.01, 0.02, 0.97], .published, []),
+            ("The Economist — China's economy",
+             [0.01, 0.03, 0.03, 0.01, 0.31, 0.98], .needsConfirmation, []),
         ]
-        for (title, sensitive, informative, expected) in measured {
-            #expect(
-                WindowTitleJudgmentThresholds.verdict(
-                    sensitive: sensitive,
-                    informative: informative
-                ) == expected,
-                "\(title)"
+        for (title, values, expectedVerdict, expectedLockedBy) in measured {
+            let judged = WindowTitleJudgmentThresholds.judge(
+                Dictionary(uniqueKeysWithValues: zip(WindowTitleDimension.allCases, values))
             )
+            #expect(judged.verdict == expectedVerdict, "\(title)")
+            #expect(judged.lockedBy == expectedLockedBy, "\(title)")
         }
     }
 }
@@ -169,11 +278,23 @@ struct WindowTitleThresholdTests {
 struct WindowTitleJudgmentCacheTests {
     private let t0 = Date(timeIntervalSince1970: 1_789_099_506)
 
+    /// 实测的 `ReportDecision.swift — MacTelemetryHub`，六个键。
+    static let cleanProbabilities: [String: Double] = [
+        "exposesSecret": 0.04,
+        "exposesPrivateMatter": 0.05,
+        "exposesConfidentialWork": 0.07,
+        "isAdultContent": 0.01,
+        "isPoliticallySensitive": 0.05,
+        "isInformative": 0.97,
+    ]
+
     private func entry(
         bundle: String = "com.apple.dt.Xcode",
         title: String,
         verdict: WindowTitleVerdict = .published,
         source: WindowTitleJudgmentSource = .jev,
+        probabilities: [String: Double] = cleanProbabilities,
+        lockedBy: [WindowTitleDimension] = [],
         at offset: TimeInterval = 0
     ) -> WindowTitleJudgmentEntry {
         WindowTitleJudgmentEntry(
@@ -182,7 +303,8 @@ struct WindowTitleJudgmentCacheTests {
             title: title,
             verdict: verdict,
             source: source,
-            probabilities: ["sensitive": 0.07, "informative": 0.97],
+            probabilities: probabilities,
+            lockedBy: lockedBy,
             judgedAt: t0.addingTimeInterval(offset),
             lastSeenAt: t0.addingTimeInterval(offset)
         )
@@ -207,6 +329,7 @@ struct WindowTitleJudgmentCacheTests {
             verdict: renamed.verdict,
             source: renamed.source,
             probabilities: renamed.probabilities,
+            lockedBy: renamed.lockedBy,
             judgedAt: renamed.judgedAt,
             lastSeenAt: renamed.lastSeenAt
         )
@@ -225,7 +348,7 @@ struct WindowTitleJudgmentCacheTests {
 
     @Test func storeReplacesSameKey() {
         var cache = WindowTitleJudgmentCache(entries: [entry(title: "A")])
-        cache.store(entry(title: "A", verdict: .locked, source: .user))
+        cache.store(entry(title: "A", verdict: .locked, source: .user, probabilities: [:]))
         #expect(cache.entries.count == 1)
         #expect(cache.entries.first?.verdict == .locked)
         #expect(cache.entries.first?.source == .user)
@@ -248,12 +371,85 @@ struct WindowTitleJudgmentCacheTests {
         let cache = WindowTitleJudgmentCache(entries: [
             entry(title: "ReportDecision.swift — MacTelemetryHub"),
             entry(title: "Q4 planning notes", verdict: .needsConfirmation, at: 10),
-            entry(title: "招商银行", verdict: .locked, source: .user, at: 20),
+            entry(
+                title: "招商银行",
+                verdict: .locked,
+                source: .user,
+                probabilities: [:],
+                at: 20
+            ),
         ])
         let restored = WindowTitleJudgmentCache.decoded(from: try cache.encoded())
         #expect(restored == cache)
         // 顺序也要保住：LRU 的淘汰顺序就藏在数组顺序里
         #expect(restored.entries.map(\.title) == cache.entries.map(\.title))
+    }
+
+    /**
+     * `lockedBy` 要能落盘、能读回来。
+     *
+     * 界面上「已锁定 · 政治敏感」的后半截就存在这里；丢了的话重启之后一屋子
+     * 锁定条目都说不清自己是被哪道题挡下来的，而重判一次要重新花一次钱。
+     */
+    @Test func lockedBySurvivesARoundTrip() throws {
+        let cache = WindowTitleJudgmentCache(entries: [
+            entry(
+                title: "六四事件 - YouTube",
+                verdict: .locked,
+                probabilities: [
+                    "exposesSecret": 0.02,
+                    "exposesPrivateMatter": 0.05,
+                    "exposesConfidentialWork": 0.03,
+                    "isAdultContent": 0.02,
+                    "isPoliticallySensitive": 0.98,
+                    "isInformative": 0.98,
+                ],
+                lockedBy: [.isPoliticallySensitive]
+            ),
+            entry(
+                title: "两道一起越线",
+                verdict: .locked,
+                probabilities: [
+                    "exposesSecret": 0.92,
+                    "exposesPrivateMatter": 0.03,
+                    "exposesConfidentialWork": 0.71,
+                    "isAdultContent": 0.01,
+                    "isPoliticallySensitive": 0.02,
+                    "isInformative": 0.95,
+                ],
+                lockedBy: [.exposesSecret, .exposesConfidentialWork],
+                at: 10
+            ),
+        ])
+        let restored = WindowTitleJudgmentCache.decoded(from: try cache.encoded())
+        #expect(restored == cache)
+        #expect(restored.entries.first?.lockedBy == [.isPoliticallySensitive])
+        #expect(restored.entries.first?.reasonText == "政治敏感")
+        #expect(restored.entries.last?.reasonText == "密钥凭据、工作机密")
+    }
+
+    /// 待确认的理由不落盘，从概率现算：卡在两条线中间的那几道就是理由。
+    @Test func confirmationReasonComesFromTheProbabilities() {
+        let pending = entry(
+            title: "Interview notes.txt",
+            verdict: .needsConfirmation,
+            probabilities: [
+                "exposesSecret": 0.03,
+                "exposesPrivateMatter": 0.13,
+                "exposesConfidentialWork": 0.07,
+                "isAdultContent": 0.01,
+                "isPoliticallySensitive": 0.04,
+                "isInformative": 0.97,
+            ]
+        )
+        #expect(pending.reasonText == "私人事务")
+        // 放行和省略没有理由可说
+        #expect(entry(title: "A").reasonText == nil)
+        #expect(entry(title: "Claude", verdict: .omitted).reasonText == nil)
+        // 用户拍板锁的那条没有模型理由：probabilities 和 lockedBy 都是空的
+        #expect(
+            entry(title: "B", verdict: .locked, source: .user, probabilities: [:]).reasonText == nil
+        )
     }
 
     @Test func rejectsForeignFormatInsteadOfCrashing() {
@@ -264,32 +460,32 @@ struct WindowTitleJudgmentCacheTests {
     }
 
     /**
-     * 版本 1 的文件整份作废。
+     * 版本 2 的文件整份作废。
      *
-     * 字段形状没变，它完全解得开 —— 正因为如此这条测试才必要：
-     * 里面的 `Claude` 当时被判成「已公开」，不丢掉的话它永远进不了新加的
-     * 「已省略」一档，首页上就一直挂着一个和应用名重复的标题。
+     * 下面这条是真实发生过的漏：一道揉在一起的「敏感吗」给了这条键政标题
+     * 0.07，于是它以「已公开」的身份躺在名单里。版本 2 从来没问过政治和成人
+     * 内容，留着它等于把那次误判永久保存 —— 整份丢掉重判才是唯一稳的做法。
      */
-    @Test func formatVersionOneIsDiscarded() {
-        let version1 = Data("""
+    @Test func formatVersionTwoIsDiscarded() {
+        let version2 = Data("""
             {
-              "version": 1,
+              "version": 2,
               "entries": [
                 {
-                  "bundleIdentifier": "com.anthropic.claudefordesktop",
-                  "applicationName": "Claude",
-                  "title": "Claude",
+                  "bundleIdentifier": "com.google.Chrome",
+                  "applicationName": "YouTube",
+                  "title": "二次元毛邓江胡！Mygo 动漫少女代指中国五代领导人的键政密码本",
                   "verdict": "published",
                   "source": "jev",
-                  "probabilities": { "public": 1, "private": 0, "unsure": 0 },
+                  "probabilities": { "sensitive": 0.07, "informative": 0.96 },
                   "judgedAt": 1789099506000,
                   "lastSeenAt": 1789099506000
                 }
               ]
             }
             """.utf8)
-        #expect(WindowTitleJudgmentCache.decoded(from: version1).entries.isEmpty)
-        #expect(WindowTitleJudgmentCache.formatVersion == 2)
+        #expect(WindowTitleJudgmentCache.decoded(from: version2).entries.isEmpty)
+        #expect(WindowTitleJudgmentCache.formatVersion == 3)
     }
 
     /// 已省略这一档要能落盘、能读回来 —— 否则每次重启都要把
@@ -321,33 +517,61 @@ struct JevWindowTitleQuestionTests {
         // 语境说明必须在 state 里：问题 ID 不会送给模型。
         #expect((state?["purpose"] as? String)?.isEmpty == false)
 
-        // 两道题在同一个请求里：同一份 state，互相看不到对方的答案，
-        // 一次往返就完。拆成两次请求只是把延迟和限额都翻倍。
+        // 六道题在同一个请求里：同一份 state，互相看不到对方的答案，
+        // 一次往返就完。拆成六次请求只是把延迟和限额都翻六倍。
         let questions = body?["questions"] as? [String: Any]
-        #expect(Set(questions?.keys ?? [:].keys) == [
-            JevWindowTitleQuestion.sensitiveQuestionID,
-            JevWindowTitleQuestion.informativeQuestionID,
-        ])
+        #expect(
+            Set(questions?.keys ?? [:].keys)
+                == Set(WindowTitleDimension.allCases.map(\.rawValue))
+        )
 
-        // 两道都是是非题，criteria 的键固定是 true / false —— 这是 TypeSafe
+        // 六道都是是非题，criteria 的键固定是 true / false —— 这是 TypeSafe
         // 那侧的形状，不是我们自己起的名字。
-        for id in [
-            JevWindowTitleQuestion.sensitiveQuestionID,
-            JevWindowTitleQuestion.informativeQuestionID,
-        ] {
-            let question = questions?[id] as? [String: Any]
-            #expect(question?["type"] as? String == "noul")
-            #expect((question?["instructions"] as? String)?.isEmpty == false)
+        for dimension in WindowTitleDimension.allCases {
+            let question = questions?[dimension.rawValue] as? [String: Any]
+            #expect(question?["type"] as? String == "noul", "\(dimension.rawValue)")
+            let instructions = question?["instructions"] as? String
+            #expect(instructions?.isEmpty == false, "\(dimension.rawValue)")
             let criteria = question?["criteria"] as? [String: String]
-            #expect(Set(criteria?.keys ?? [:].keys) == ["true", "false"])
+            #expect(Set(criteria?.keys ?? [:].keys) == ["true", "false"], "\(dimension.rawValue)")
         }
+    }
+
+    /// 五道风险题都要带上「别的维度有别的题在问」那句围栏。少一句，一条政治
+    /// 标题就会顺手把私人事务和成人内容一起点亮，`lockedBy` 成了噪声。
+    @Test func riskQuestionsFenceTheirOwnScope() {
+        for dimension in WindowTitleDimension.risks {
+            let instructions = JevWindowTitleQuestion.question(for: dimension).instructions
+            #expect(
+                instructions.contains("are judged by separate questions asked alongside this one"),
+                "\(dimension.rawValue)"
+            )
+        }
+    }
+
+    /// 「陌生项目名默认算站长自己的」这句归工作机密那道题。没有它的时候
+    /// `ReportDecision.swift — MacTelemetryHub` 会被当成未公开的工作内容。
+    @Test func confidentialWorkAssumesUnfamiliarProjectsAreTheOwnersOwn() {
+        #expect(
+            JevWindowTitleQuestion.question(for: .exposesConfidentialWork).instructions
+                .contains("assume an unfamiliar project name is the owner's own")
+        )
+    }
+
+    /// 政治那道必须明说「谐音、代号、梗」也算 —— 漏了它，那条把领导人写成
+    /// 二次元梗的 YouTube 标题就还是挡不住。
+    @Test func politicalQuestionCoversCodedReferences() {
+        let instructions = JevWindowTitleQuestion
+            .question(for: .isPoliticallySensitive).instructions
+        #expect(instructions.contains("homophone"))
+        #expect(instructions.contains("meme"))
     }
 
     /**
      * 真实响应的形状。
      *
      * 这几段是 2026-09-22 对 `https://api.typesafe.ai/v1/systemone` 实测回来的
-     * 原样 JSON（`jev-1.13.0`，两道是非题一次问），只是重新缩进过。解析代码要
+     * 原样 JSON（`jev-1.13.0`，六道是非题一次问），只是重新缩进过。解析代码要
      * 对着真东西测，不是对着我以为的形状：noul 的答案里只有一个 `noul`，
      * 没有 `confidence`，也没有分布。
      */
@@ -355,79 +579,135 @@ struct JevWindowTitleQuestionTests {
         {
           "model": "jev-1.13.0",
           "answers": {
-            "windowTitleSensitive": { "type": "noul", "noul": 0.07 },
-            "windowTitleInformative": { "type": "noul", "noul": 0.97 }
+            "exposesSecret": { "type": "noul", "noul": 0.04 },
+            "exposesPrivateMatter": { "type": "noul", "noul": 0.05 },
+            "exposesConfidentialWork": { "type": "noul", "noul": 0.07 },
+            "isAdultContent": { "type": "noul", "noul": 0.01 },
+            "isPoliticallySensitive": { "type": "noul", "noul": 0.05 },
+            "isInformative": { "type": "noul", "noul": 0.97 }
           },
-          "usage": { "input_tokens": 978, "output_tokens": 47 }
+          "usage": { "input_tokens": 2293, "output_tokens": 127 }
         }
         """.utf8)
 
-    /// 同一批实测里私密那一条（`招商银行 — 个人账户余额与最近交易`）。
-    static let liveLockedResponse = Data("""
+    /**
+     * 同一批实测里那条键政标题（YouTube 上「…代指中国五代领导人的键政密码本」）。
+     *
+     * 拆题之前它在一道揉起来的「敏感吗」上只拿到 0.07，直接被公开了；拆开之后
+     * 政治那道是 0.98，另外四道照旧干净。这一段就是这次改动的存在理由。
+     */
+    static let livePoliticalResponse = Data("""
         {
           "model": "jev-1.13.0",
           "answers": {
-            "windowTitleSensitive": { "type": "noul", "noul": 0.97 },
-            "windowTitleInformative": { "type": "noul", "noul": 0.98 }
+            "exposesSecret": { "type": "noul", "noul": 0.02 },
+            "exposesPrivateMatter": { "type": "noul", "noul": 0.03 },
+            "exposesConfidentialWork": { "type": "noul", "noul": 0.03 },
+            "isAdultContent": { "type": "noul", "noul": 0.02 },
+            "isPoliticallySensitive": { "type": "noul", "noul": 0.98 },
+            "isInformative": { "type": "noul", "noul": 0.96 }
           },
-          "usage": { "input_tokens": 983, "output_tokens": 47 }
+          "usage": { "input_tokens": 2308, "output_tokens": 127 }
         }
         """.utf8)
 
-    /// 同一批实测里的 `Claude`（Claude）：一点不敏感，也一点没说。
+    /// 同一批实测里的 `Re: 合同签署 — 张伟`（Mail）：私人事务满格，工作机密
+    /// 0.52 卡在两条线中间 —— 锁定的理由只记越线的那一道。
+    static let liveContractResponse = Data("""
+        {
+          "model": "jev-1.13.0",
+          "answers": {
+            "exposesSecret": { "type": "noul", "noul": 0.02 },
+            "exposesPrivateMatter": { "type": "noul", "noul": 0.98 },
+            "exposesConfidentialWork": { "type": "noul", "noul": 0.52 },
+            "isAdultContent": { "type": "noul", "noul": 0.01 },
+            "isPoliticallySensitive": { "type": "noul", "noul": 0.03 },
+            "isInformative": { "type": "noul", "noul": 0.97 }
+          },
+          "usage": { "input_tokens": 2291, "output_tokens": 127 }
+        }
+        """.utf8)
+
+    /// 同一批实测里的 `Claude`（Claude）：五道风险一点不沾，也一点没说。
     static let liveOmittedResponse = Data("""
         {
           "model": "jev-1.13.0",
           "answers": {
-            "windowTitleSensitive": { "type": "noul", "noul": 0.03 },
-            "windowTitleInformative": { "type": "noul", "noul": 0.04 }
+            "exposesSecret": { "type": "noul", "noul": 0.02 },
+            "exposesPrivateMatter": { "type": "noul", "noul": 0.03 },
+            "exposesConfidentialWork": { "type": "noul", "noul": 0.03 },
+            "isAdultContent": { "type": "noul", "noul": 0.01 },
+            "isPoliticallySensitive": { "type": "noul", "noul": 0.03 },
+            "isInformative": { "type": "noul", "noul": 0.06 }
           },
-          "usage": { "input_tokens": 973, "output_tokens": 47 }
+          "usage": { "input_tokens": 2288, "output_tokens": 127 }
         }
         """.utf8)
 
     @Test func parsesLivePublishedResponse() throws {
         let outcome = try JevClient.outcome(from: Self.livePublishedResponse)
         #expect(outcome.verdict == .published)
-        #expect(outcome.sensitive == 0.07)
-        #expect(outcome.informative == 0.97)
-        // 落盘形状：两个概率合成一个字典，缓存和设置页都看这一份。
-        #expect(outcome.probabilities == ["sensitive": 0.07, "informative": 0.97])
+        #expect(outcome.lockedBy.isEmpty)
+        // 落盘形状：六个概率合成一个字典，键就是题目 ID。
+        #expect(outcome.probabilities == [
+            "exposesSecret": 0.04,
+            "exposesPrivateMatter": 0.05,
+            "exposesConfidentialWork": 0.07,
+            "isAdultContent": 0.01,
+            "isPoliticallySensitive": 0.05,
+            "isInformative": 0.97,
+        ])
+        #expect(outcome.probability(of: .isInformative) == 0.97)
     }
 
-    @Test func parsesLiveLockedResponse() throws {
-        let outcome = try JevClient.outcome(from: Self.liveLockedResponse)
+    @Test func parsesLivePoliticalResponse() throws {
+        let outcome = try JevClient.outcome(from: Self.livePoliticalResponse)
         #expect(outcome.verdict == .locked)
-        #expect(outcome.sensitive == 0.97)
+        #expect(outcome.lockedBy == [.isPoliticallySensitive])
+        #expect(outcome.probability(of: .isPoliticallySensitive) == 0.98)
+    }
+
+    @Test func parsesLiveContractResponse() throws {
+        let outcome = try JevClient.outcome(from: Self.liveContractResponse)
+        #expect(outcome.verdict == .locked)
+        // 工作机密 0.52 没越线，不进理由
+        #expect(outcome.lockedBy == [.exposesPrivateMatter])
     }
 
     @Test func parsesLiveOmittedResponse() throws {
         let outcome = try JevClient.outcome(from: Self.liveOmittedResponse)
         #expect(outcome.verdict == .omitted)
-        #expect(outcome.informative == 0.04)
+        #expect(outcome.probability(of: .isInformative) == 0.06)
     }
 
-    /// 两道题缺哪一道都算失败。它们出自同一次调用，少一个说明那次回答本身
-    /// 不对劲 —— 宁可当判断失败重试，也不用半份答案把标题钉死。
-    @Test func missingAnswerIsAnError() {
+    /**
+     * 六道题缺哪一道都算失败。
+     *
+     * 它们出自同一次调用，少一个说明那次回答本身不对劲 —— 宁可当判断失败重试，
+     * 也不能拿残缺的答案落档：缺的偏偏是政治那道的话，一条键政标题会以
+     * 「风险题全干净」的名义直接公开出去。
+     */
+    @Test func missingAnswerIsAnError() throws {
         let empty = Data(#"{"model":"jev-1.13.0","answers":{},"usage":{}}"#.utf8)
         #expect(throws: JevError.missingAnswer) { try JevClient.outcome(from: empty) }
 
-        let withoutInformative = Data("""
-            {
-              "model": "jev-1.13.0",
-              "answers": { "windowTitleSensitive": { "type": "noul", "noul": 0.07 } }
+        // 逐道抽掉一个，六次都该报错
+        let full = try JSONSerialization.jsonObject(with: Self.livePublishedResponse)
+        guard var object = full as? [String: Any],
+              let answers = object["answers"] as? [String: Any]
+        else {
+            Issue.record("实测响应解不开")
+            return
+        }
+        for dimension in WindowTitleDimension.allCases {
+            var missing = answers
+            missing[dimension.rawValue] = nil
+            object["answers"] = missing
+            let data = try JSONSerialization.data(withJSONObject: object)
+            #expect(throws: JevError.missingAnswer, "\(dimension.rawValue)") {
+                try JevClient.outcome(from: data)
             }
-            """.utf8)
-        #expect(throws: JevError.missingAnswer) { try JevClient.outcome(from: withoutInformative) }
-
-        let withoutSensitive = Data("""
-            {
-              "model": "jev-1.13.0",
-              "answers": { "windowTitleInformative": { "type": "noul", "noul": 0.97 } }
-            }
-            """.utf8)
-        #expect(throws: JevError.missingAnswer) { try JevClient.outcome(from: withoutSensitive) }
+        }
     }
 
     @Test func onlyRateLimitAndServerErrorsRetry() {

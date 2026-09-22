@@ -5,30 +5,35 @@ import ChargerTelemetryKit
 #endif
 
 /**
- * 问 Jev 两件关于一条窗口标题的事。
+ * 问 Jev 六件关于一条窗口标题的事。
  *
  * TypeSafe 的 System One 走一个裸 HTTP 端点，回来的是**概率**而不是一段话。
- * 这里问两道是非题（noul）：会不会泄密，以及有没有信息量。两道在同一个请求
- * 里、看同一份 state、互相看不到对方的答案，一次往返就完。
+ * 这里一次请求问六道是非题（noul），看同一份 state，互相看不到对方的答案，
+ * 一次往返就完。
  *
- * 为什么不用三选一的 `choice`：noul 的中间地带本来就是「模型也说不准」，
- * 落档交给 `WindowTitleJudgmentThresholds` 的三条线即可；把「拿不准」写成
- * choice 的一个选项，是让模型替我们表达把握不足，而那是概率自己的事。
+ * 为什么是六道而不是两道：早一版把凭据、财务、医疗、法律、感情、具名第三方、
+ * 雇主材料全揉进一道 `windowTitleSensitive` 里，结果是一条
+ * 「二次元毛邓江胡！…键政密码本」的 YouTube 标题只拿到 0.07 —— 它确实不涉及
+ * 钱、病、合同和密码，而那道题里压根没有「政治」和「成人内容」这两个词，
+ * 模型没被问到的东西当然答不出来。TypeSafe 的说法是一个标签一道 noul：互相
+ * 独立的维度各问各的，组合规则留在代码里（见 `WindowTitleJudgmentThresholds`），
+ * 原始概率照样可复用。
  *
  * 所以这一整块是纯的 —— 题面是常量、请求体是 Encodable、响应是 Decodable，
  * 落档在阈值那边。能被测的就是这三件。
  *
  * ⚠️ 题面和阈值是一对。实测数字记在 `WindowTitleJudgmentThresholds` 上，
- * 改这里的字必须重跑那张表。特别是「陌生项目名默认算站长自己的」这一句：
- * 没有它的时候，`ReportDecision.swift — MacTelemetryHub` 会被当成「未公开的
- * 工作内容」，自家仓库跟着一起遭殃。
+ * 改这里的字必须重跑那张表。两句尤其要留着：
+ *
+ * - 「陌生项目名默认算站长自己的」（在 `exposesConfidentialWork` 里）：
+ *   没有它的时候 `ReportDecision.swift — MacTelemetryHub` 会被当成「未公开的
+ *   工作内容」，自家仓库跟着一起遭殃。
+ * - 每道题末尾那句「别的维度有别的题在问」：没有它的话一条政治标题会顺手把
+ *   私人事务和成人内容一起点亮（「少女」「键政」），`lockedBy` 就成了噪声。
  */
 enum JevWindowTitleQuestion {
     static let endpoint = URL(string: "https://api.typesafe.ai/v1/systemone")!
     static let model = "jev-latest"
-    /// 问题 ID 只给代码用，模型看不到它，所以含义必须写在 instructions 里。
-    static let sensitiveQuestionID = "windowTitleSensitive"
-    static let informativeQuestionID = "windowTitleInformative"
     static let defaultTimeout: TimeInterval = 10
 
     static let purpose = """
@@ -38,41 +43,179 @@ enum JevWindowTitleQuestion {
         next to it, verbatim, visible to anyone on the internet.
         """
 
-    /// 第一题：公开这条标题会不会泄密。
-    static let sensitiveInstructions = """
+    /// 每道题末尾都补这一句。六道题同时在问，谁也别替别人回答。
+    private static func scopeFence(_ mine: String, others: String) -> String {
+        """
+        \(others) are judged by separate questions asked alongside this one; answer only about \
+        \(mine) here. Judge only `state.title` in the context of `state.applicationName`.
+        """
+    }
+
+    // MARK: - 五道风险题
+
+    static let secretInstructions = """
         Decide whether publishing `state.title` verbatim next to `state.applicationName` would \
-        expose something that must stay private. The owner wants their own work visible: their own \
-        repositories, source files, shell sessions, personal notes about hobby projects, public web \
-        pages and public media are not secrets, even when the project name is unfamiliar — assume \
-        an unfamiliar project name is the owner's own. Answer yes only when the title would expose \
-        a credential, key, token or password; a financial, banking, payment, medical, legal or \
-        relationship matter; a named third party or a private message from one; or material that \
-        belongs to an employer or client rather than the owner, such as an internal document, a \
-        customer name or an unreleased commercial product. Judge only `state.title` in the context \
-        of `state.applicationName`.
+        expose a secret credential: a password, passphrase, API key, access key, client secret, \
+        token, private key, recovery phrase, one-time code, or an account, card or licence \
+        number. Answer yes when the title carries such a value, or when it names one specific \
+        credential record closely enough that the credential itself is identified, such as a \
+        password-manager entry for a named production key. A file, repository, command or page \
+        that merely deals with authentication in general — documentation about OAuth, a source \
+        file named for a login flow, a sign-in page — carries no secret. \
+        \(scopeFence(
+            "credentials",
+            others: "Private personal matters, employer or client material, adult content and political topics"
+        ))
         """
 
-    static let sensitiveCriteria: [String: String] = [
+    static let secretCriteria: [String: String] = [
         "true": """
-            Publishing the title would expose something that must stay private: a bank, brokerage \
-            or payment account view; a medical, legal or relationship matter; a password, API key \
-            or token; a named private individual or the subject line of a personal message; an \
-            employer's or client's internal document, customer or unreleased product.
+            The title reveals a credential or pins down one specific credential record: a \
+            password, passphrase, API or access key, client secret, token, private key, recovery \
+            phrase or one-time code, an account, card or licence number, or a password-manager \
+            entry naming a particular production key or account.
             """,
         "false": """
-            Nothing in the title is sensitive: a source file and repository name, a shell prompt \
-            with a project path, a public website or documentation page, a public video, song or \
-            article title, the owner's own hobby project, an empty or placeholder document name, \
-            or ordinary application chrome such as "Untitled", "Preferences" or the bare app name.
+            No credential is revealed: source files and repositories, a shell prompt, \
+            documentation about authentication or security, a sign-in or account page with no \
+            secret in the title, or any title that only mentions keys and passwords as a subject \
+            without carrying one.
             """,
     ]
 
+    static let privateMatterInstructions = """
+        Decide whether publishing `state.title` verbatim next to `state.applicationName` would \
+        expose a private matter of the owner's own life or of someone they deal with: money — a \
+        bank, brokerage, payment, tax or invoice view, a balance, a salary; health or medical \
+        care; a legal matter or a signed agreement; a romantic or family relationship. Answer \
+        yes as well when the title names a private individual the owner deals with: a person's \
+        name in a mail subject, a chat or call with a named person, the subject line of a direct \
+        message or e-mail. A public figure, an author, an artist, a fictional character, a \
+        company or a product name is not a private individual. \
+        \(scopeFence(
+            "private personal matters",
+            others: "Credentials, employer or client material, adult content and political topics"
+        ))
+        """
+
+    static let privateMatterCriteria: [String: String] = [
+        "true": """
+            The title exposes a private personal matter: a bank, brokerage, payment, tax or \
+            invoice view, a balance or salary figure, a medical, pharmaceutical or mental-health \
+            topic, a legal case or a contract being signed, a romantic or family matter, or a \
+            named private individual such as the recipient or subject of a personal e-mail, \
+            message or call.
+            """,
+        "false": """
+            Nothing private is exposed: public web pages and documentation, source code, shell \
+            sessions, public media, published books, films, games and articles, the owner's own \
+            hobby projects and their notes and plans, and titles naming only public figures, \
+            authors, companies, products or fictional characters.
+            """,
+    ]
+
+    static let confidentialWorkInstructions = """
+        Decide whether publishing `state.title` verbatim next to `state.applicationName` would \
+        expose material that belongs to an employer or a client rather than to the owner: an \
+        internal or confidential company document, a named customer or client account, an \
+        unreleased commercial product or feature, an internal ticket, incident or roadmap item, \
+        or a business figure that is not public. The owner is an individual developer working on \
+        their own things: their own repositories, source files and shell sessions, and their \
+        personal notes, plans, agendas and drafts about their own life or hobby projects, are \
+        not an employer's material, even when the project name is unfamiliar — assume an \
+        unfamiliar project name is the owner's own. \
+        \(scopeFence(
+            "employer or client confidentiality",
+            others: "Credentials, private personal matters, adult content and political topics"
+        ))
+        """
+
+    static let confidentialWorkCriteria: [String: String] = [
+        "true": """
+            The title exposes something owned by an employer or a client: an internal or \
+            confidential company document, a named customer or client account, an unreleased \
+            commercial product or feature, an internal ticket, incident or roadmap item, or a \
+            business figure that has not been published.
+            """,
+        "false": """
+            The material is the owner's own or already public: their own repositories and source \
+            files, a shell prompt with a project path, their own notes, plans, agendas and \
+            drafts, public documentation and web pages, public media, or an unfamiliar project \
+            name that is most likely one of the owner's own.
+            """,
+    ]
+
+    static let adultContentInstructions = """
+        Decide whether `state.title` is pornographic or sexually explicit. Answer yes when the \
+        title names an adult site, an explicit video, gallery or story, an NSFW community, board \
+        or channel, or sex-work advertising, or when it otherwise describes explicit sexual \
+        content. Answer no for mainstream books, films, television, games, anime and music whose \
+        titles are not themselves explicit, even when the work carries mature, violent or \
+        romantic themes, and no for clinical, biological or educational material about sexuality \
+        and the body. \
+        \(scopeFence(
+            "explicit adult content",
+            others: "Credentials, private personal matters, employer or client material and political topics"
+        ))
+        """
+
+    static let adultContentCriteria: [String: String] = [
+        "true": """
+            The title is pornographic or explicitly sexual: an adult video or image site, an \
+            explicit clip, gallery or story, an NSFW forum, subreddit or channel, or an \
+            advertisement for sexual services.
+            """,
+        "false": """
+            The title is not explicit: ordinary sites, files and code; mainstream books, films, \
+            series, games, anime and music, including works with mature, violent or romantic \
+            themes; and clinical, biological or educational material about sexuality.
+            """,
+    ]
+
+    static let politicallySensitiveInstructions = """
+        Decide whether `state.title` touches a political subject that would cause trouble for \
+        the owner if it appeared on their public personal homepage. Answer yes when the title is \
+        about a political leader, head of state or party official; a government, party or regime \
+        and its conduct as a subject of praise, criticism or commentary; a political movement, \
+        protest, uprising, crackdown or other contested historical or current political event; \
+        censorship, surveillance, dissidents or human rights; or an ethnic, religious or \
+        territorial dispute. Answer yes as well when the title points at such a subject through \
+        a nickname, homophone, abbreviation, code word, meme or fan-culture substitution instead \
+        of a plain name — political commentary dressed up as entertainment still counts. Answer \
+        no for neutral coverage of economics, business, technology, science or sport that takes \
+        no political side and names no contested political subject, and no for the owner's own \
+        code, files and tools. \
+        \(scopeFence(
+            "political sensitivity",
+            others: "Credentials, private personal matters, employer or client material and adult content"
+        ))
+        """
+
+    static let politicallySensitiveCriteria: [String: String] = [
+        "true": """
+            The title is about a politically contested subject: a named political leader or \
+            official, a government, party or regime and its conduct, a political movement, \
+            protest or suppressed historical event, censorship, surveillance, dissidents or \
+            human rights, or an ethnic, religious or territorial dispute — including when that \
+            subject is named indirectly through nicknames, homophones, initials, code words or \
+            memes.
+            """,
+        "false": """
+            The title is politically neutral: source code, tools and documentation; ordinary \
+            technology, science or sport coverage; business and economic reporting that takes no \
+            political side and names no contested political subject; entertainment with no \
+            political referent; and everyday personal content.
+            """,
+    ]
+
+    // MARK: - 信息量
+
     /**
-     * 第二题：这条标题除了应用名之外还说了什么。
+     * 第六题：这条标题除了应用名之外还说了什么。
      *
-     * 和第一题互不蕴含，所以是单独一道题：第一题问风险，这一题问信息量。
-     * `Claude` 在第一题上是干干净净的 sensitive 0.03 —— 它该被挡下来的
-     * 理由和隐私无关，而是没什么可说。
+     * 和五道风险题互不蕴含，所以单独一道：那五道问风险，这一道问信息量。
+     * `Claude` 在五道风险题上干干净净 —— 它该被挡下来的理由和隐私无关，
+     * 而是没什么可说。
      */
     static let informativeInstructions = """
         Decide whether `state.title` tells a visitor anything beyond `state.applicationName` \
@@ -82,7 +225,8 @@ enum JevWindowTitleQuestion {
         application's own name or a close variant of it, or generic window chrome that any user \
         of that application would see, such as "Untitled", "无标题", "主窗口", "New Tab", \
         "Preferences", "Settings", "Window" or an empty name. Judge only how much the title adds \
-        to the application name; whether the content is sensitive is not this question.
+        to the application name; whether the content is sensitive is judged by separate \
+        questions asked alongside this one.
         """
 
     static let informativeCriteria: [String: String] = [
@@ -98,6 +242,38 @@ enum JevWindowTitleQuestion {
             """,
     ]
 
+    /**
+     * 维度到题面。
+     *
+     * 题目 ID 就是维度的 rawValue —— 一个名字管到底：请求里的键、响应里的键、
+     * 落盘 `probabilities` 的键都是它，代码里没有第二套映射需要对齐。
+     */
+    static func question(for dimension: WindowTitleDimension) -> JevNoulQuestion {
+        switch dimension {
+        case .exposesSecret:
+            JevNoulQuestion(instructions: secretInstructions, criteria: secretCriteria)
+        case .exposesPrivateMatter:
+            JevNoulQuestion(
+                instructions: privateMatterInstructions,
+                criteria: privateMatterCriteria
+            )
+        case .exposesConfidentialWork:
+            JevNoulQuestion(
+                instructions: confidentialWorkInstructions,
+                criteria: confidentialWorkCriteria
+            )
+        case .isAdultContent:
+            JevNoulQuestion(instructions: adultContentInstructions, criteria: adultContentCriteria)
+        case .isPoliticallySensitive:
+            JevNoulQuestion(
+                instructions: politicallySensitiveInstructions,
+                criteria: politicallySensitiveCriteria
+            )
+        case .isInformative:
+            JevNoulQuestion(instructions: informativeInstructions, criteria: informativeCriteria)
+        }
+    }
+
     static func request(
         applicationName: String,
         bundleIdentifier: String?,
@@ -111,16 +287,11 @@ enum JevWindowTitleQuestion {
                 bundleIdentifier: bundleIdentifier,
                 title: title
             ),
-            questions: [
-                sensitiveQuestionID: JevNoulQuestion(
-                    instructions: sensitiveInstructions,
-                    criteria: sensitiveCriteria
-                ),
-                informativeQuestionID: JevNoulQuestion(
-                    instructions: informativeInstructions,
-                    criteria: informativeCriteria
-                ),
-            ]
+            questions: Dictionary(
+                uniqueKeysWithValues: WindowTitleDimension.allCases.map {
+                    ($0.rawValue, question(for: $0))
+                }
+            )
         )
     }
 }
@@ -161,18 +332,21 @@ struct JevSystemOneResponse: Decodable, Equatable, Sendable {
     let answers: [String: Answer]
 }
 
-/// 一次判断的结果。落档已经算好，两个概率一起带上留给界面和缓存。
+/**
+ * 一次判断的结果。
+ *
+ * 落档已经算好，六个概率和触发锁定的维度一起带上 —— 界面要拿它说出
+ * 「已锁定 · 政治敏感」，缓存要把这句理由一起存下来。
+ */
 struct WindowTitleJudgmentOutcome: Equatable, Sendable {
     let verdict: WindowTitleVerdict
-    let sensitive: Double
-    let informative: Double
+    /// 六道题的概率。键是维度的 rawValue，也就是题目 ID。
+    let probabilities: [String: Double]
+    /// 把这条标题锁掉的那些维度。没锁定就是空的。
+    let lockedBy: [WindowTitleDimension]
 
-    /// 落盘和显示用的形状：缓存条目里就一个 `probabilities` 字典。
-    var probabilities: [String: Double] {
-        [
-            WindowTitleJudgmentThresholds.sensitiveOption: sensitive,
-            WindowTitleJudgmentThresholds.informativeOption: informative,
-        ]
+    func probability(of dimension: WindowTitleDimension) -> Double? {
+        probabilities[dimension.rawValue]
     }
 }
 
@@ -247,24 +421,27 @@ enum JevClient {
     /**
      * 响应解析。
      *
-     * 两道题缺哪一道都算 `missingAnswer`：它们出自同一次调用，少一个说明那次
+     * 六道题缺哪一道都算 `missingAnswer`：它们出自同一次调用，少一个说明那次
      * 回答本身不对劲，这条标题就当判断失败处理（按锁定、不写缓存、退避重试），
-     * 而不是用半份答案把它钉死在某一档上。
+     * 而不是拿残缺的答案把它钉死在某一档上 —— 缺的偏偏是政治那道的话，一条
+     * 键政标题会以「风险题全干净」的名义直接公开出去。
      */
     static func outcome(from data: Data) throws -> WindowTitleJudgmentOutcome {
         let decoded = try JSONDecoder().decode(JevSystemOneResponse.self, from: data)
-        guard let sensitive = decoded.answers[JevWindowTitleQuestion.sensitiveQuestionID]?.noul,
-              let informative = decoded.answers[JevWindowTitleQuestion.informativeQuestionID]?.noul
-        else {
-            throw JevError.missingAnswer
+        var probabilities: [WindowTitleDimension: Double] = [:]
+        for dimension in WindowTitleDimension.allCases {
+            guard let noul = decoded.answers[dimension.rawValue]?.noul else {
+                throw JevError.missingAnswer
+            }
+            probabilities[dimension] = noul
         }
+        let judged = WindowTitleJudgmentThresholds.judge(probabilities)
         return WindowTitleJudgmentOutcome(
-            verdict: WindowTitleJudgmentThresholds.verdict(
-                sensitive: sensitive,
-                informative: informative
+            verdict: judged.verdict,
+            probabilities: Dictionary(
+                uniqueKeysWithValues: probabilities.map { ($0.key.rawValue, $0.value) }
             ),
-            sensitive: sensitive,
-            informative: informative
+            lockedBy: judged.lockedBy
         )
     }
 

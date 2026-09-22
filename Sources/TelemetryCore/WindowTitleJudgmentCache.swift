@@ -22,8 +22,13 @@ struct WindowTitleJudgmentCache: Equatable, Sendable {
      * 2：加了「已省略」一档。字段形状没变，但旧名单里的 `Claude`、
      * `Mac Telemetry Hub` 这类条目当时被判成了「已公开」，不重判的话它们
      * 永远不会进新档 —— 整份作废比逐条猜它们该去哪里可靠。
+     *
+     * 3：一道「敏感吗」拆成五道风险题加一道信息量，`probabilities` 从两个键
+     * 变成六个，条目多了 `lockedBy`。作废的理由不只是字段对不上，更是结论本身
+     * 靠不住：版本 2 的名单里政治和成人内容这两件事从来没被问过，一条键政
+     * 标题当时拿着 sensitive 0.07 稳稳躺在「已公开」上。
      */
-    static let formatVersion = 2
+    static let formatVersion = 3
 
     /// 最近用过的排在最后。淘汰从头上开始。
     private(set) var entries: [WindowTitleJudgmentEntry] = []

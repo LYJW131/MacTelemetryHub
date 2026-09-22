@@ -49,7 +49,7 @@ enum WindowTitleStatus: String, Equatable, Sendable {
  * 窗口标题的「能不能公开」判断。
  *
  * 名单是三档的：标题黑名单里的应用从头到尾不读；免判放行名单里的直接上报；
- * 其余每一条**归一化后**的标题都问一次 Jev，按两道题的概率落成公开 /
+ * 其余每一条**归一化后**的标题都问一次 Jev，按六道题的概率落成公开 /
  * 锁定 / 已省略 / 待确认（顺序和阈值见 `WindowTitleJudgmentThresholds`）。
  * 命中远端隐藏黑名单的应用一律不问 —— 那份载荷连真实应用叫什么都不说，
  * 把它的标题送去第三方毫无道理。
@@ -209,6 +209,19 @@ final class WindowTitleJudge: ObservableObject {
         return .judging
     }
 
+    /**
+     * 这条标题落在这一档的理由，给界面用。
+     *
+     * 「已锁定 · 政治敏感」的后半截。只有缓存里已经有结论的标题说得出理由；
+     * 黑名单、免判、判断中这些档位本身就是理由，`WindowTitleStatus.displayName`
+     * 已经说完了。不读 LRU，也不写盘 —— 它只是 `resolve` 之后的一句补充。
+     */
+    func reason(bundleIdentifier: String?, normalizedTitle: String?) -> String? {
+        guard let title = normalizedTitle, !title.isEmpty else { return nil }
+        let key = WindowTitleJudgmentCache.key(bundleIdentifier: bundleIdentifier, title: title)
+        return cache.entry(forKey: key)?.reasonText
+    }
+
     /// 查表。只有键真的变了才推进 LRU，免得兜底轮询把这份名单写成流水账。
     private func cachedEntry(forKey key: String) -> WindowTitleJudgmentEntry? {
         guard lastResolvedKey != key else { return cache.entry(forKey: key) }
@@ -226,6 +239,8 @@ final class WindowTitleJudge: ObservableObject {
         entry.verdict = verdict
         entry.source = .user
         entry.probabilities = [:]
+        // 理由跟着概率一起抹掉：这条是用户拍的板，不该再挂着模型的说辞。
+        entry.lockedBy = []
         entry.judgedAt = Date()
         entry.lastSeenAt = Date()
         cache.store(entry)
@@ -356,6 +371,7 @@ final class WindowTitleJudge: ObservableObject {
             verdict: outcome.verdict,
             source: .jev,
             probabilities: outcome.probabilities,
+            lockedBy: outcome.lockedBy,
             judgedAt: now,
             lastSeenAt: now
         ))
