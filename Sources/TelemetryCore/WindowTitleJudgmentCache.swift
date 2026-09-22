@@ -16,8 +16,14 @@ import Foundation
  */
 struct WindowTitleJudgmentCache: Equatable, Sendable {
     static let capacity = 500
-    /// 文件里带一个版本号：格式改了直接丢掉重判，不做迁移。
-    static let formatVersion = 1
+    /**
+     * 文件里带一个版本号：格式改了直接丢掉重判，不做迁移。
+     *
+     * 2：加了「已省略」一档。字段形状没变，但旧名单里的 `Claude`、
+     * `Mac Telemetry Hub` 这类条目当时被判成了「已公开」，不重判的话它们
+     * 永远不会进新档 —— 整份作废比逐条猜它们该去哪里可靠。
+     */
+    static let formatVersion = 2
 
     /// 最近用过的排在最后。淘汰从头上开始。
     private(set) var entries: [WindowTitleJudgmentEntry] = []

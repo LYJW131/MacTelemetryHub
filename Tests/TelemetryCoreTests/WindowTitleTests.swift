@@ -60,43 +60,109 @@ struct WindowTitleNormalizerTests {
 }
 
 struct WindowTitleThresholdTests {
-    @Test func publicAboveThresholdIsPublished() {
+    /// 两道题都满意才公开：不敏感，而且确实说了点什么。
+    @Test func cleanAndInformativeIsPublished() {
         // 实测：ReportDecision.swift — MacTelemetryHub（Xcode）
-        let verdict = WindowTitleJudgmentThresholds.verdict(
-            probabilities: ["public": 0.91, "private": 0.01, "unsure": 0.08]
+        #expect(
+            WindowTitleJudgmentThresholds.verdict(sensitive: 0.07, informative: 0.97)
+                == .published
         )
-        #expect(verdict == .published)
     }
 
-    @Test func privateAboveThresholdIsLocked() {
-        // 实测：招商银行 — 个人账户余额与最近交易（Safari）
-        let verdict = WindowTitleJudgmentThresholds.verdict(
-            probabilities: ["public": 0.0, "private": 1.0, "unsure": 0.0]
+    @Test func sensitiveAboveLockLineIsLocked() {
+        // 实测：招商银行 — 个人账户余额与最近交易（Safari）。信息量满格也先锁掉。
+        #expect(
+            WindowTitleJudgmentThresholds.verdict(sensitive: 0.97, informative: 0.98) == .locked
         )
-        #expect(verdict == .locked)
     }
 
-    @Test func spreadDistributionNeedsConfirmation() {
-        // 实测：Q4 planning notes（Notes）。既不够安全也不够危险，只能问人。
-        let verdict = WindowTitleJudgmentThresholds.verdict(
-            probabilities: ["public": 0.70, "private": 0.04, "unsure": 0.26]
+    @Test func uninformativeTitleIsOmitted() {
+        // 实测：Claude（Claude）。公开它毫无风险，也毫无意义。
+        #expect(
+            WindowTitleJudgmentThresholds.verdict(sensitive: 0.03, informative: 0.04) == .omitted
         )
-        #expect(verdict == .needsConfirmation)
     }
 
-    @Test func choiceIsNotTheDecision() {
-        // choice 只是最高那一项。public 0.53 的 choice 也是 "public"，
-        // 但那种把握不该自动公开 —— 分档只看概率。
-        let verdict = WindowTitleJudgmentThresholds.verdict(
-            probabilities: ["public": 0.53, "private": 0.19, "unsure": 0.28]
+    /// 顺序是策略的一部分：隐私先于信息量。两条都不满足时必须落在锁定上，
+    /// 否则一条敏感又没信息的标题会以「已省略」的名义留在界面上。
+    @Test func privacyOutranksOmission() {
+        #expect(
+            WindowTitleJudgmentThresholds.verdict(sensitive: 0.9, informative: 0.04) == .locked
         )
-        #expect(verdict == .needsConfirmation)
+    }
+
+    @Test func middleGroundNeedsConfirmation() {
+        // 实测：Interview notes.txt 0.24、Budget draft.txt 0.26。
+        // 既不够干净也不够危险，只能让人看一眼 —— 这正是中间地带存在的理由。
+        #expect(
+            WindowTitleJudgmentThresholds.verdict(sensitive: 0.24, informative: 0.98)
+                == .needsConfirmation
+        )
+        #expect(
+            WindowTitleJudgmentThresholds.verdict(sensitive: 0.26, informative: 0.98)
+                == .needsConfirmation
+        )
     }
 
     @Test func thresholdsAreExactBoundaries() {
-        #expect(WindowTitleJudgmentThresholds.verdict(probabilities: ["public": 0.8]) == .published)
-        #expect(WindowTitleJudgmentThresholds.verdict(probabilities: ["public": 0.79, "private": 0.6]) == .locked)
-        #expect(WindowTitleJudgmentThresholds.verdict(probabilities: [:]) == .needsConfirmation)
+        // 三条线都取到等号那一侧：0.6 就锁，0.15 就放行，0.5 就算有信息。
+        #expect(
+            WindowTitleJudgmentThresholds.verdict(
+                sensitive: WindowTitleJudgmentThresholds.sensitiveLockMinimum,
+                informative: 0.98
+            ) == .locked
+        )
+        #expect(
+            WindowTitleJudgmentThresholds.verdict(
+                sensitive: WindowTitleJudgmentThresholds.sensitiveClearMaximum,
+                informative: 0.98
+            ) == .published
+        )
+        #expect(
+            WindowTitleJudgmentThresholds.verdict(
+                sensitive: 0.16,
+                informative: 0.98
+            ) == .needsConfirmation
+        )
+        #expect(
+            WindowTitleJudgmentThresholds.verdict(
+                sensitive: 0.02,
+                informative: WindowTitleJudgmentThresholds.informativeMinimum
+            ) == .published
+        )
+        #expect(
+            WindowTitleJudgmentThresholds.verdict(sensitive: 0.02, informative: 0.49) == .omitted
+        )
+    }
+
+    /// 实测那张表整条跑一遍：题面和阈值是一对，谁动了这里都会红。
+    @Test func measuredTitlesLandWhereTheTableSays() {
+        let measured: [(String, Double, Double, WindowTitleVerdict)] = [
+            ("Swift Concurrency — Apple Developer Documentation", 0.02, 0.97, .published),
+            ("TypeSafe - Google Chrome", 0.04, 0.93, .published),
+            ("user@mac: ~/Developer/project — zsh", 0.04, 0.96, .published),
+            ("ReportDecision.swift — MacTelemetryHub", 0.07, 0.97, .published),
+            ("Q4 planning notes", 0.09, 0.96, .published),
+            ("Meeting agenda.txt", 0.11, 0.98, .published),
+            ("Untitled", 0.02, 0.04, .omitted),
+            ("Claude", 0.03, 0.04, .omitted),
+            ("Mac Telemetry Hub", 0.03, 0.04, .omitted),
+            ("Interview notes.txt", 0.24, 0.98, .needsConfirmation),
+            ("Budget draft.txt", 0.26, 0.98, .needsConfirmation),
+            ("Call with the landlord.txt", 0.68, 0.98, .locked),
+            ("Re: 合同签署 — 张伟", 0.95, 0.97, .locked),
+            ("Cloudflare R2 production access key — password", 0.96, 0.97, .locked),
+            ("招商银行 — 个人账户余额与最近交易", 0.97, 0.98, .locked),
+        ]
+        for (title, sensitive, informative, expected) in measured {
+            #expect(
+                WindowTitleJudgmentThresholds.verdict(
+                    sensitive: sensitive,
+                    informative: informative
+                ) == expected,
+                "\(title)"
+            )
+        }
     }
 }
 
@@ -116,7 +182,7 @@ struct WindowTitleJudgmentCacheTests {
             title: title,
             verdict: verdict,
             source: source,
-            probabilities: ["public": 0.91, "private": 0.01, "unsure": 0.08],
+            probabilities: ["sensitive": 0.07, "informative": 0.97],
             judgedAt: t0.addingTimeInterval(offset),
             lastSeenAt: t0.addingTimeInterval(offset)
         )
@@ -196,6 +262,43 @@ struct WindowTitleJudgmentCacheTests {
         let old = Data(#"{"version":0,"entries":[]}"#.utf8)
         #expect(WindowTitleJudgmentCache.decoded(from: old).entries.isEmpty)
     }
+
+    /**
+     * 版本 1 的文件整份作废。
+     *
+     * 字段形状没变，它完全解得开 —— 正因为如此这条测试才必要：
+     * 里面的 `Claude` 当时被判成「已公开」，不丢掉的话它永远进不了新加的
+     * 「已省略」一档，首页上就一直挂着一个和应用名重复的标题。
+     */
+    @Test func formatVersionOneIsDiscarded() {
+        let version1 = Data("""
+            {
+              "version": 1,
+              "entries": [
+                {
+                  "bundleIdentifier": "com.anthropic.claudefordesktop",
+                  "applicationName": "Claude",
+                  "title": "Claude",
+                  "verdict": "published",
+                  "source": "jev",
+                  "probabilities": { "public": 1, "private": 0, "unsure": 0 },
+                  "judgedAt": 1789099506000,
+                  "lastSeenAt": 1789099506000
+                }
+              ]
+            }
+            """.utf8)
+        #expect(WindowTitleJudgmentCache.decoded(from: version1).entries.isEmpty)
+        #expect(WindowTitleJudgmentCache.formatVersion == 2)
+    }
+
+    /// 已省略这一档要能落盘、能读回来 —— 否则每次重启都要把
+    /// 「Claude」这类标题重新问一遍。
+    @Test func omittedVerdictSurvivesARoundTrip() throws {
+        let cache = WindowTitleJudgmentCache(entries: [entry(title: "Claude", verdict: .omitted)])
+        let restored = WindowTitleJudgmentCache.decoded(from: try cache.encoded())
+        #expect(restored.entries.first?.verdict == .omitted)
+    }
 }
 
 struct JevWindowTitleQuestionTests {
@@ -218,68 +321,113 @@ struct JevWindowTitleQuestionTests {
         // 语境说明必须在 state 里：问题 ID 不会送给模型。
         #expect((state?["purpose"] as? String)?.isEmpty == false)
 
+        // 两道题在同一个请求里：同一份 state，互相看不到对方的答案，
+        // 一次往返就完。拆成两次请求只是把延迟和限额都翻倍。
         let questions = body?["questions"] as? [String: Any]
-        let question = questions?[JevWindowTitleQuestion.questionID] as? [String: Any]
-        #expect(question?["type"] as? String == "choice")
-        #expect((question?["instructions"] as? String)?.isEmpty == false)
-        let criteria = question?["criteria"] as? [String: String]
-        #expect(Set(criteria?.keys ?? [:].keys) == ["public", "private", "unsure"])
+        #expect(Set(questions?.keys ?? [:].keys) == [
+            JevWindowTitleQuestion.sensitiveQuestionID,
+            JevWindowTitleQuestion.informativeQuestionID,
+        ])
+
+        // 两道都是是非题，criteria 的键固定是 true / false —— 这是 TypeSafe
+        // 那侧的形状，不是我们自己起的名字。
+        for id in [
+            JevWindowTitleQuestion.sensitiveQuestionID,
+            JevWindowTitleQuestion.informativeQuestionID,
+        ] {
+            let question = questions?[id] as? [String: Any]
+            #expect(question?["type"] as? String == "noul")
+            #expect((question?["instructions"] as? String)?.isEmpty == false)
+            let criteria = question?["criteria"] as? [String: String]
+            #expect(Set(criteria?.keys ?? [:].keys) == ["true", "false"])
+        }
     }
 
     /**
      * 真实响应的形状。
      *
-     * 这一段是 2026-09-22 对 `https://api.typesafe.ai/v1/systemone` 实测回来的
-     * 原样 JSON（`jev-1.13.0`，标题 `ReportDecision.swift — MacTelemetryHub`），
-     * 只是重新缩进过。解析代码要对着真东西测，不是对着我以为的形状。
+     * 这几段是 2026-09-22 对 `https://api.typesafe.ai/v1/systemone` 实测回来的
+     * 原样 JSON（`jev-1.13.0`，两道是非题一次问），只是重新缩进过。解析代码要
+     * 对着真东西测，不是对着我以为的形状：noul 的答案里只有一个 `noul`，
+     * 没有 `confidence`，也没有分布。
      */
-    static let liveResponse = Data("""
+    static let livePublishedResponse = Data("""
         {
           "model": "jev-1.13.0",
           "answers": {
-            "windowTitlePublishable": {
-              "type": "choice",
-              "choice": "public",
-              "confidence": 0.86,
-              "probabilities": { "unsure": 0.08, "public": 0.91, "private": 0.01 }
-            }
+            "windowTitleSensitive": { "type": "noul", "noul": 0.07 },
+            "windowTitleInformative": { "type": "noul", "noul": 0.97 }
           },
-          "usage": { "input_tokens": 674, "output_tokens": 45 }
+          "usage": { "input_tokens": 978, "output_tokens": 47 }
         }
         """.utf8)
 
-    /// 同一次实测里私密那一条。概率是精确的 0 和 1，解析不能被它绊住。
+    /// 同一批实测里私密那一条（`招商银行 — 个人账户余额与最近交易`）。
     static let liveLockedResponse = Data("""
         {
           "model": "jev-1.13.0",
           "answers": {
-            "windowTitlePublishable": {
-              "type": "choice",
-              "choice": "private",
-              "confidence": 1.0,
-              "probabilities": { "unsure": 0.0, "private": 1.0, "public": 0.0 }
-            }
+            "windowTitleSensitive": { "type": "noul", "noul": 0.97 },
+            "windowTitleInformative": { "type": "noul", "noul": 0.98 }
           },
-          "usage": { "input_tokens": 679, "output_tokens": 45 }
+          "usage": { "input_tokens": 983, "output_tokens": 47 }
         }
         """.utf8)
 
-    @Test func parsesLiveResponse() throws {
-        let outcome = try JevClient.outcome(from: Self.liveResponse)
-        #expect(outcome.choice == "public")
-        #expect(outcome.probabilities["public"] == 0.91)
+    /// 同一批实测里的 `Claude`（Claude）：一点不敏感，也一点没说。
+    static let liveOmittedResponse = Data("""
+        {
+          "model": "jev-1.13.0",
+          "answers": {
+            "windowTitleSensitive": { "type": "noul", "noul": 0.03 },
+            "windowTitleInformative": { "type": "noul", "noul": 0.04 }
+          },
+          "usage": { "input_tokens": 973, "output_tokens": 47 }
+        }
+        """.utf8)
+
+    @Test func parsesLivePublishedResponse() throws {
+        let outcome = try JevClient.outcome(from: Self.livePublishedResponse)
         #expect(outcome.verdict == .published)
+        #expect(outcome.sensitive == 0.07)
+        #expect(outcome.informative == 0.97)
+        // 落盘形状：两个概率合成一个字典，缓存和设置页都看这一份。
+        #expect(outcome.probabilities == ["sensitive": 0.07, "informative": 0.97])
     }
 
     @Test func parsesLiveLockedResponse() throws {
         let outcome = try JevClient.outcome(from: Self.liveLockedResponse)
         #expect(outcome.verdict == .locked)
-        #expect(outcome.probabilities["private"] == 1.0)
+        #expect(outcome.sensitive == 0.97)
     }
 
+    @Test func parsesLiveOmittedResponse() throws {
+        let outcome = try JevClient.outcome(from: Self.liveOmittedResponse)
+        #expect(outcome.verdict == .omitted)
+        #expect(outcome.informative == 0.04)
+    }
+
+    /// 两道题缺哪一道都算失败。它们出自同一次调用，少一个说明那次回答本身
+    /// 不对劲 —— 宁可当判断失败重试，也不用半份答案把标题钉死。
     @Test func missingAnswerIsAnError() {
-        let body = Data(#"{"model":"jev-1.13.0","answers":{},"usage":{}}"#.utf8)
-        #expect(throws: JevError.missingAnswer) { try JevClient.outcome(from: body) }
+        let empty = Data(#"{"model":"jev-1.13.0","answers":{},"usage":{}}"#.utf8)
+        #expect(throws: JevError.missingAnswer) { try JevClient.outcome(from: empty) }
+
+        let withoutInformative = Data("""
+            {
+              "model": "jev-1.13.0",
+              "answers": { "windowTitleSensitive": { "type": "noul", "noul": 0.07 } }
+            }
+            """.utf8)
+        #expect(throws: JevError.missingAnswer) { try JevClient.outcome(from: withoutInformative) }
+
+        let withoutSensitive = Data("""
+            {
+              "model": "jev-1.13.0",
+              "answers": { "windowTitleInformative": { "type": "noul", "noul": 0.97 } }
+            }
+            """.utf8)
+        #expect(throws: JevError.missingAnswer) { try JevClient.outcome(from: withoutSensitive) }
     }
 
     @Test func onlyRateLimitAndServerErrorsRetry() {

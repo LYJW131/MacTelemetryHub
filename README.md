@@ -20,11 +20,13 @@ usage, rather than the identity of the whole application.
 - foreground application reporting: the app's name, bundle ID, icon, and — when a
   judgment clears it — the focused window title, with an exact Bundle ID blacklist
   for remote reporting
-- window titles gated by a blacklist plus a TypeSafe Jev judgment: blacklisted apps
-  are never read, trusted apps are published directly, everything else is judged
-  per title and an uncertain verdict raises a notification with a single 公开
-  button — closing the notification locks the title, and the same pending titles
-  can be settled from the menu bar
+- window titles gated by a blacklist plus two TypeSafe Jev yes/no judgments
+  (sensitive? informative?): blacklisted apps are never read, trusted apps are
+  published directly, everything else lands in one of four verdicts — published,
+  locked, omitted (nothing to show, e.g. a title that is just the app's own name)
+  or pending. A pending title raises a notification with a single 公开 button;
+  closing the notification locks it, and pending titles can also be settled from
+  the menu bar
 - coding-usage aggregation that never uploads session IDs, project paths, prompts, or replies
 - charger cover name plus the original JPEG uploaded to R2 (no resize or transcode; the point is to leave Anker's signed URL)
 - coding agent usage aggregation in the envelope (subscription plan tiers and rate-limit windows are reported separately by `reporters/agent-limits-reporter` in the lyjwpage repo)
@@ -309,29 +311,39 @@ pause land in 320–490 ms, application switches in 560–620 ms.
      title read at all, and switching to one detaches the previous observer.
   2. **免判放行** — those titles are reported as they are, with no judgment.
   3. Everything else — each normalized title is sent to TypeSafe's `jev-latest`
-     model (`POST https://api.typesafe.ai/v1/systemone`) as one `choice` question
-     over `public` / `private` / `unsure`. `public ≥ 0.80` publishes,
-     `private ≥ 0.60` locks, anything else raises a user notification carrying
-     the app name and the title. The notification has exactly one action, 公开:
-     macOS folds two or more actions into an 选项 submenu, so a second button
-     would cost two clicks. Closing the notification (X / Clear / Clear All)
-     locks the title instead, but only while that title is still pending, so
+     model (`POST https://api.typesafe.ai/v1/systemone`) as **two `noul` (yes/no)
+     questions over the same state, asked in one request**: `windowTitleSensitive`
+     (would publishing this expose a credential, a financial, medical, legal or
+     relationship matter, a named third party, or an employer's material?) and
+     `windowTitleInformative` (does the title say anything beyond the application
+     name — a file, page, project or track — rather than just repeating the app
+     name or generic chrome such as `Untitled`?). Each answer is a probability,
+     and four verdicts follow from three measured thresholds, in this order:
+     `sensitive ≥ 0.60` locks; `informative < 0.50` omits the title (not
+     reported, no notification, but listed in **设置 › 窗口标题** where it can
+     be published by hand); `sensitive ≤ 0.15` publishes; anything left — a
+     title the model is genuinely unsure about — raises a user notification
+     carrying the app name and the title. The notification has exactly one
+     action, 公开: macOS folds two or more actions into an 选项 submenu, so a
+     second button would cost two clicks. Closing the notification
+     (X / Clear / Clear All) locks the title instead, but only while that title is still pending, so
      clearing a stale banner for an already-decided title changes nothing.
      Clicking the notification body decides nothing — it just opens
      **设置 › 窗口标题**. The menu-bar menu lists up to five pending titles at
      the top, each a submenu with 公开 and 锁定, so a missed notification is still
-     two clicks from settled. Until the user answers, the
-     title is treated as locked. Verdicts are cached on disk by Bundle ID plus
-     normalized title (LRU, 500 entries, `~/Library/Application Support/
-     MacTelemetryHub/window-title-judgments.json`) and are reviewable, re-judgeable
-     and deletable in **设置 › 窗口标题**.
+     two clicks from settled. Until the user answers, the title is treated as
+     locked. Verdicts are cached on disk by Bundle ID plus normalized title
+     (LRU, 500 entries, `~/Library/Application Support/
+     MacTelemetryHub/window-title-judgments.json`, format version 2 — an older
+     file is discarded and re-judged rather than migrated) and are reviewable,
+     re-judgeable and deletable in **设置 › 窗口标题**.
 
   Only the title text and the application's name and Bundle ID leave the machine
   for a judgment; the TypeSafe API key lives in Keychain (or `TYPESAFE_API_KEY`).
   Apps in the remote-reporting blacklist are **never** sent to TypeSafe and never
   report a title. A missing key, a timeout (10 s) or any other failure is treated
   as locked and is not cached, so one network hiccup cannot permanently mark a
-  title private. Titles judged public are the only ones that reach the envelope;
+  title private. Published titles are the only ones that reach the envelope;
   the local UI still shows the current title together with its verdict, and
   `GET /health` reports the verdict always but the title only when it is
   publishable. Judgments are throttled: a title must stay stable for 2 s, each

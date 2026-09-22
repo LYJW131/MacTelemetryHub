@@ -5,24 +5,30 @@ import ChargerTelemetryKit
 #endif
 
 /**
- * 问 Jev 一条窗口标题能不能公开。
+ * 问 Jev 两件关于一条窗口标题的事。
  *
- * TypeSafe 的 System One 走一个裸 HTTP 端点，回来的是**分布**而不是一段话：
- * 一个 `choice` 题，三个选项，三个概率。所以这一整块是纯的 —— 题面是常量、
- * 请求体是 Encodable、响应是 Decodable，落档交给
- * `WindowTitleJudgmentThresholds`。能被测的就是这三件。
+ * TypeSafe 的 System One 走一个裸 HTTP 端点，回来的是**概率**而不是一段话。
+ * 这里问两道是非题（noul）：会不会泄密，以及有没有信息量。两道在同一个请求
+ * 里、看同一份 state、互相看不到对方的答案，一次往返就完。
  *
- * ⚠️ 题面和阈值是一对。实测数字和调题面的过程记在
- * `WindowTitleJudgmentThresholds` 上，改这里的字必须重跑那张表。
- * 特别是「陌生项目名默认算站长自己的」这一句：没有它的时候，
- * `ReportDecision.swift — MacTelemetryHub` 只拿到 public 0.53 —— 模型按
- * 「未公开的工作内容」把自家仓库也算了进去。
+ * 为什么不用三选一的 `choice`：noul 的中间地带本来就是「模型也说不准」，
+ * 落档交给 `WindowTitleJudgmentThresholds` 的三条线即可；把「拿不准」写成
+ * choice 的一个选项，是让模型替我们表达把握不足，而那是概率自己的事。
+ *
+ * 所以这一整块是纯的 —— 题面是常量、请求体是 Encodable、响应是 Decodable，
+ * 落档在阈值那边。能被测的就是这三件。
+ *
+ * ⚠️ 题面和阈值是一对。实测数字记在 `WindowTitleJudgmentThresholds` 上，
+ * 改这里的字必须重跑那张表。特别是「陌生项目名默认算站长自己的」这一句：
+ * 没有它的时候，`ReportDecision.swift — MacTelemetryHub` 会被当成「未公开的
+ * 工作内容」，自家仓库跟着一起遭殃。
  */
 enum JevWindowTitleQuestion {
     static let endpoint = URL(string: "https://api.typesafe.ai/v1/systemone")!
     static let model = "jev-latest"
     /// 问题 ID 只给代码用，模型看不到它，所以含义必须写在 instructions 里。
-    static let questionID = "windowTitlePublishable"
+    static let sensitiveQuestionID = "windowTitleSensitive"
+    static let informativeQuestionID = "windowTitleInformative"
     static let defaultTimeout: TimeInterval = 10
 
     static let purpose = """
@@ -32,37 +38,63 @@ enum JevWindowTitleQuestion {
         next to it, verbatim, visible to anyone on the internet.
         """
 
-    static let instructions = """
-        Decide whether `state.title` can be published verbatim next to `state.applicationName`. \
-        The owner wants their own work visible: their own repositories, source files, shell \
-        sessions, personal notes about hobby projects, public web pages and public media are not \
-        secrets, even when the project name is unfamiliar — assume an unfamiliar project name \
-        is the owner's own. Treat the title as private only when publishing it would expose a \
-        credential, key, token or password; a financial, banking, payment, medical, legal or \
+    /// 第一题：公开这条标题会不会泄密。
+    static let sensitiveInstructions = """
+        Decide whether publishing `state.title` verbatim next to `state.applicationName` would \
+        expose something that must stay private. The owner wants their own work visible: their own \
+        repositories, source files, shell sessions, personal notes about hobby projects, public web \
+        pages and public media are not secrets, even when the project name is unfamiliar — assume \
+        an unfamiliar project name is the owner's own. Answer yes only when the title would expose \
+        a credential, key, token or password; a financial, banking, payment, medical, legal or \
         relationship matter; a named third party or a private message from one; or material that \
         belongs to an employer or client rather than the owner, such as an internal document, a \
-        customer name or an unreleased commercial product. Judge only `state.title` in the \
-        context of `state.applicationName`.
+        customer name or an unreleased commercial product. Judge only `state.title` in the context \
+        of `state.applicationName`.
         """
 
-    static let criteria: [String: String] = [
-        WindowTitleJudgmentThresholds.publicOption: """
-            Nothing in the title is sensitive. Examples: a source file and repository name, a \
-            shell prompt with a project path, a public website or documentation page, a public \
-            video, song or article title, an empty or placeholder document name, and ordinary \
-            application chrome such as "Untitled", "Preferences" or the bare app name.
+    static let sensitiveCriteria: [String: String] = [
+        "true": """
+            Publishing the title would expose something that must stay private: a bank, brokerage \
+            or payment account view; a medical, legal or relationship matter; a password, API key \
+            or token; a named private individual or the subject line of a personal message; an \
+            employer's or client's internal document, customer or unreleased product.
             """,
-        WindowTitleJudgmentThresholds.privateOption: """
-            Publishing the title would expose something that must stay private. Examples: a bank, \
-            brokerage or payment account view; a medical, legal or relationship matter; a \
-            password, API key or token; a named private individual or the subject line of a \
-            personal message; an employer's or client's internal document, customer or unreleased \
-            product.
+        "false": """
+            Nothing in the title is sensitive: a source file and repository name, a shell prompt \
+            with a project path, a public website or documentation page, a public video, song or \
+            article title, the owner's own hobby project, an empty or placeholder document name, \
+            or ordinary application chrome such as "Untitled", "Preferences" or the bare app name.
             """,
-        WindowTitleJudgmentThresholds.unsureOption: """
-            The title clearly names specific content, but there is not enough in it to tell \
-            whether that content is the owner's own public work or something sensitive, so a \
-            human should look at it before it is published.
+    ]
+
+    /**
+     * 第二题：这条标题除了应用名之外还说了什么。
+     *
+     * 和第一题互不蕴含，所以是单独一道题：第一题问风险，这一题问信息量。
+     * `Claude` 在第一题上是干干净净的 sensitive 0.03 —— 它该被挡下来的
+     * 理由和隐私无关，而是没什么可说。
+     */
+    static let informativeInstructions = """
+        Decide whether `state.title` tells a visitor anything beyond `state.applicationName` \
+        itself — what is being read, edited, watched, played or worked on, such as a file, a \
+        page, a repository, a document, a conversation partner or a track. Answer yes when the \
+        title names such content, even briefly. Answer no when the title is only the \
+        application's own name or a close variant of it, or generic window chrome that any user \
+        of that application would see, such as "Untitled", "无标题", "主窗口", "New Tab", \
+        "Preferences", "Settings", "Window" or an empty name. Judge only how much the title adds \
+        to the application name; whether the content is sensitive is not this question.
+        """
+
+    static let informativeCriteria: [String: String] = [
+        "true": """
+            The title names specific content or context worth showing next to the application \
+            name: a file or document name, a web page or site, a repository or project, a media \
+            title, a conversation, a shell path.
+            """,
+        "false": """
+            The title adds nothing: it repeats or paraphrases the application name, or it is \
+            generic chrome such as an untitled or new document, a preferences or settings \
+            window, a bare window label, or an empty string.
             """,
     ]
 
@@ -80,7 +112,14 @@ enum JevWindowTitleQuestion {
                 title: title
             ),
             questions: [
-                questionID: JevChoiceQuestion(instructions: instructions, criteria: criteria),
+                sensitiveQuestionID: JevNoulQuestion(
+                    instructions: sensitiveInstructions,
+                    criteria: sensitiveCriteria
+                ),
+                informativeQuestionID: JevNoulQuestion(
+                    instructions: informativeInstructions,
+                    criteria: informativeCriteria
+                ),
             ]
         )
     }
@@ -93,8 +132,9 @@ struct JevWindowTitleState: Encodable, Equatable, Sendable {
     let title: String
 }
 
-struct JevChoiceQuestion: Encodable, Equatable, Sendable {
-    let type = "choice"
+/// 是非题。`criteria` 的键固定是 `true` / `false`，这是 TypeSafe 那侧的形状。
+struct JevNoulQuestion: Encodable, Equatable, Sendable {
+    let type = "noul"
     let instructions: String
     let criteria: [String: String]
 
@@ -106,26 +146,34 @@ struct JevChoiceQuestion: Encodable, Equatable, Sendable {
 struct JevSystemOneRequest: Encodable, Equatable, Sendable {
     let model: String
     let state: JevWindowTitleState
-    let questions: [String: JevChoiceQuestion]
+    let questions: [String: JevNoulQuestion]
 }
 
 struct JevSystemOneResponse: Decodable, Equatable, Sendable {
+    /// 一道是非题的答案。`noul` 是「是」的概率（0 到 1），
+    /// 没有单独的 confidence —— 这个数自己就是把握。
     struct Answer: Decodable, Equatable, Sendable {
         let type: String
-        let choice: String
-        let confidence: Double
-        let probabilities: [String: Double]
+        let noul: Double?
     }
 
     let model: String
     let answers: [String: Answer]
 }
 
-/// 一次判断的结果。落档已经算好，原始分布一起带上留给界面和缓存。
+/// 一次判断的结果。落档已经算好，两个概率一起带上留给界面和缓存。
 struct WindowTitleJudgmentOutcome: Equatable, Sendable {
     let verdict: WindowTitleVerdict
-    let choice: String
-    let probabilities: [String: Double]
+    let sensitive: Double
+    let informative: Double
+
+    /// 落盘和显示用的形状：缓存条目里就一个 `probabilities` 字典。
+    var probabilities: [String: Double] {
+        [
+            WindowTitleJudgmentThresholds.sensitiveOption: sensitive,
+            WindowTitleJudgmentThresholds.informativeOption: informative,
+        ]
+    }
 }
 
 enum JevError: LocalizedError, Equatable {
@@ -196,16 +244,27 @@ enum JevClient {
         return try outcome(from: data)
     }
 
-    /// 响应解析。分档只看 `probabilities`，`choice` 只是记录下来给界面看。
+    /**
+     * 响应解析。
+     *
+     * 两道题缺哪一道都算 `missingAnswer`：它们出自同一次调用，少一个说明那次
+     * 回答本身不对劲，这条标题就当判断失败处理（按锁定、不写缓存、退避重试），
+     * 而不是用半份答案把它钉死在某一档上。
+     */
     static func outcome(from data: Data) throws -> WindowTitleJudgmentOutcome {
         let decoded = try JSONDecoder().decode(JevSystemOneResponse.self, from: data)
-        guard let answer = decoded.answers[JevWindowTitleQuestion.questionID] else {
+        guard let sensitive = decoded.answers[JevWindowTitleQuestion.sensitiveQuestionID]?.noul,
+              let informative = decoded.answers[JevWindowTitleQuestion.informativeQuestionID]?.noul
+        else {
             throw JevError.missingAnswer
         }
         return WindowTitleJudgmentOutcome(
-            verdict: WindowTitleJudgmentThresholds.verdict(probabilities: answer.probabilities),
-            choice: answer.choice,
-            probabilities: answer.probabilities
+            verdict: WindowTitleJudgmentThresholds.verdict(
+                sensitive: sensitive,
+                informative: informative
+            ),
+            sensitive: sensitive,
+            informative: informative
         )
     }
 

@@ -17,6 +17,8 @@ enum WindowTitleStatus: String, Equatable, Sendable {
     case published
     case locked
     case needsConfirmation
+    /// 能公开但没什么可公开的：标题只是应用名或者通用占位。不报，也不打扰。
+    case omitted
     case judging
     /// 没配 API key，或者判断失败。按锁定处理。
     case unavailable
@@ -31,6 +33,7 @@ enum WindowTitleStatus: String, Equatable, Sendable {
         case .published: "已公开"
         case .locked: "已锁定"
         case .needsConfirmation: "待确认"
+        case .omitted: "已省略"
         case .judging: "判断中"
         case .unavailable: "无法判断"
         }
@@ -45,8 +48,9 @@ enum WindowTitleStatus: String, Equatable, Sendable {
 /**
  * 窗口标题的「能不能公开」判断。
  *
- * 规则是三档的：标题黑名单里的应用从头到尾不读；免判放行名单里的直接上报；
- * 其余每一条**归一化后**的标题都问一次 Jev，按概率落成公开 / 锁定 / 待确认。
+ * 名单是三档的：标题黑名单里的应用从头到尾不读；免判放行名单里的直接上报；
+ * 其余每一条**归一化后**的标题都问一次 Jev，按两道题的概率落成公开 /
+ * 锁定 / 已省略 / 待确认（顺序和阈值见 `WindowTitleJudgmentThresholds`）。
  * 命中远端隐藏黑名单的应用一律不问 —— 那份载荷连真实应用叫什么都不说，
  * 把它的标题送去第三方毫无道理。
  *
@@ -192,6 +196,7 @@ final class WindowTitleJudge: ObservableObject {
             case .published: return .published
             case .locked: return .locked
             case .needsConfirmation: return .needsConfirmation
+            case .omitted: return .omitted
             }
         }
         // 没 key 和「试了几次都失败」都按锁定处理，而且到此为止 —— 再排一次

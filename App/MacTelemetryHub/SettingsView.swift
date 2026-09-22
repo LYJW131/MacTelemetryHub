@@ -583,6 +583,7 @@ struct SettingsView: View {
                         Menu("改档") {
                             Button("公开") { judge.decide(key: entry.key, verdict: .published) }
                             Button("锁定") { judge.decide(key: entry.key, verdict: .locked) }
+                            Button("已省略") { judge.decide(key: entry.key, verdict: .omitted) }
                             Button("待确认") {
                                 judge.decide(key: entry.key, verdict: .needsConfirmation)
                             }
@@ -626,8 +627,11 @@ struct SettingsView: View {
     private func windowTitleEntryDetail(_ entry: WindowTitleJudgmentEntry) -> String {
         var parts = [entry.applicationName, windowTitleVerdictName(entry.verdict)]
         parts.append(entry.source == .user ? "我拍的板" : "Jev")
-        if let probability = entry.probabilities["public"] {
-            parts.append(String(format: "public %.2f", probability))
+        if let probability = entry.probabilities[WindowTitleJudgmentThresholds.sensitiveOption] {
+            parts.append(String(format: "sensitive %.2f", probability))
+        }
+        if let probability = entry.probabilities[WindowTitleJudgmentThresholds.informativeOption] {
+            parts.append(String(format: "informative %.2f", probability))
         }
         parts.append(entry.judgedAt.formatted(date: .abbreviated, time: .shortened))
         return parts.joined(separator: " · ")
@@ -638,6 +642,7 @@ struct SettingsView: View {
         case .published: "已公开"
         case .locked: "已锁定"
         case .needsConfirmation: "待确认"
+        case .omitted: "已省略"
         }
     }
 
