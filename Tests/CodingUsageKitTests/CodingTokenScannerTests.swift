@@ -27,6 +27,8 @@ struct CodingTokenScannerTests {
         #expect(result.windows[0].agents[0].reasoningTokens==10)
         #expect(result.windows[0].agents[0].eventCount==1)
         #expect(try scanner.scan(home:root,at:Date(timeIntervalSince1970:Double(boundary+2000)/1000))==result)
+        #expect(scanner.latestActivity["codex"]?.at==Date(timeIntervalSince1970:Double(boundary+1000)/1000))
+        #expect(scanner.latestActivity["claude"]==nil)
     }
     @Test func claudeStreamingUsageReplacesRatherThanAddsAndPartialLineWaits() throws {
         let root=try home();defer{try? FileManager.default.removeItem(at:root)}
@@ -40,6 +42,8 @@ struct CodingTokenScannerTests {
         let next=try scanner.scan(home:root,at:now)
         #expect(next.windows[0].agents[0].outputTokens==20)
         #expect(next.windows[0].agents[0].eventCount==1)
+        #expect(scanner.latestActivity["claude"]?.model=="claude-test")
+        #expect(abs(scanner.latestActivity["claude"]!.at.timeIntervalSince(now.addingTimeInterval(-30)))<1)
         try (event(20)+Data([10])).write(to:root.appendingPathComponent(".claude/projects/copy.jsonl"))
         #expect(try scanner.scan(home:root,at:now).windows[0].agents[0].eventCount==1)
         let text=String(data:try JSONEncoder().encode(next),encoding:.utf8)!
@@ -49,5 +53,40 @@ struct CodingTokenScannerTests {
         let root=FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         var scanner=CodingTokenScanner();let value=try scanner.scan(home:root)
         #expect(value.sources.allSatisfy{$0.state=="unavailable"});#expect(value.windows.isEmpty)
+    }
+}
+
+struct SessionActivityOverlayTests {
+    private let now = CodingUsageDates.parseInstant("2026-09-23T04:00:00Z")!
+    private func agent(_ id: String, at: Date?, model: String? = "old-model") -> CodingUsageNowAgentPayload {
+        CodingUsageNowAgentPayload(id: id, currentModel: model, lastActivityAt: at.map(CodingUsageDates.instant),
+                                   active: false)
+    }
+
+    @Test func newerScannedEventLightsTheAgentAndCarriesItsModel() {
+        let payload = CodingUsageNowPayload(agents: [agent("codex", at: now.addingTimeInterval(-3_600)), agent("grok", at: nil)])
+        let seen = now.addingTimeInterval(-60)
+        let result = CodingUsageEngine.overlay(payload, activity: [
+            "codex": CodingTokenActivity(at: seen, model: "gpt-5.5-codex"),
+        ], at: now)
+        let codex = result.agents.first { $0.id == "codex" }!
+        #expect(codex.active)
+        #expect(codex.lastActivityAt == CodingUsageDates.instant(seen))
+        #expect(codex.currentModel == CodingUsageModelIdentity.canonical("gpt-5.5-codex"))
+        #expect(result.agents.first { $0.id == "grok" } == payload.agents[1])
+    }
+
+    @Test func olderOrExpiredScanDoesNotOverrideTheLedger() {
+        let recorded = now.addingTimeInterval(-30)
+        let payload = CodingUsageNowPayload(agents: [agent("claude", at: recorded)])
+        let older = CodingUsageEngine.overlay(payload, activity: [
+            "claude": CodingTokenActivity(at: now.addingTimeInterval(-120), model: "claude-opus-5"),
+        ], at: now)
+        #expect(older == payload)
+        let expired = CodingUsageEngine.overlay(CodingUsageNowPayload(agents: [agent("claude", at: nil)]), activity: [
+            "claude": CodingTokenActivity(at: now.addingTimeInterval(-301), model: nil),
+        ], at: now)
+        #expect(expired.agents[0].active == false)
+        #expect(expired.agents[0].currentModel == "old-model")
     }
 }

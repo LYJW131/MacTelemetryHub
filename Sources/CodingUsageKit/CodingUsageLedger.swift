@@ -245,7 +245,7 @@ public struct CodingUsageLedger: Sendable {
             }
         }
     }
-    private static func visibleModel(_ value: String) -> Bool {
+    static func visibleModel(_ value: String) -> Bool {
         !value.isEmpty && value != "unknown" && value != "codex-auto-review"
     }
     private static func ranked(_ values: [String: Int64]) -> [CodingUsageModelPayload] {

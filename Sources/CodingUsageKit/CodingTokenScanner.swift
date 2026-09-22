@@ -20,6 +20,11 @@ public struct CodingTokenSource: Codable, Equatable, Sendable {
     public var id: String
     public var state: String
 }
+/// The newest usage event a source wrote. The live “正在使用” light for scanned sources comes from this.
+public struct CodingTokenActivity: Equatable, Sendable {
+    public var at: Date
+    public var model: String?
+}
 public struct CodingTokenUsage: Codable, Equatable, Sendable {
     public var from: Int64
     public var to: Int64
@@ -42,6 +47,10 @@ public struct CodingTokenScanner: Sendable {
         var events: [String: Event] = [:]
     }
     private var files: [String: FileState] = [:]
+    /// Sources this scanner reads. Their activity does not need a `ccusage session` run.
+    public static let sourceIDs = ["codex", "claude"]
+    /// Newest event per source as of the last `scan`, within its 24-hour window.
+    public private(set) var latestActivity: [String: CodingTokenActivity] = [:]
     public init() {}
     public mutating func scan(home: URL, at now: Date = Date()) throws -> CodingTokenUsage {
         let end = Int64(now.timeIntervalSince1970 * 1000)
@@ -49,7 +58,7 @@ public struct CodingTokenScanner: Sendable {
         let roots = [("codex", home.appendingPathComponent(".codex/sessions")),
                      ("codex", home.appendingPathComponent(".codex/archived_sessions")),
                      ("claude", home.appendingPathComponent(".claude/projects"))]
-        var states = ["codex": "unavailable", "claude": "unavailable"]
+        var states = Dictionary(uniqueKeysWithValues: Self.sourceIDs.map { ($0, "unavailable") })
         var found = Set<String>()
         for (source, root) in roots {
             guard FileManager.default.fileExists(atPath: root.path) else { continue }
@@ -100,6 +109,13 @@ public struct CodingTokenScanner: Sendable {
                 unique[key] = event
             }
         }
+        var newest: [String: Event] = [:]
+        for event in unique.values where event.at > (newest[event.counts.id]?.at ?? .min) {
+            newest[event.counts.id] = event
+        }
+        latestActivity = newest.mapValues {
+            CodingTokenActivity(at: Date(timeIntervalSince1970: Double($0.at) / 1000), model: $0.counts.model)
+        }
         for event in unique.values {
                 let bucket = event.at / 300_000 * 300_000
                 let key = event.counts.id + ":" + (event.counts.model ?? "")
@@ -111,7 +127,7 @@ public struct CodingTokenScanner: Sendable {
                 buckets[bucket, default: [:]][key] = total
         }
         return CodingTokenUsage(from: start, to: end, collectedAt: end,
-            sources: ["codex", "claude"].map { CodingTokenSource(id: $0, state: states[$0]!) },
+            sources: Self.sourceIDs.map { CodingTokenSource(id: $0, state: states[$0]!) },
             windows: buckets.keys.sorted().map { from in CodingTokenWindow(from: from, to: from + 300_000,
                 agents: buckets[from]!.values.sorted { ($0.id + ($0.model ?? "")) < ($1.id + ($1.model ?? "")) }) })
     }

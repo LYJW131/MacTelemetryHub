@@ -113,13 +113,17 @@ final class VibeCodingUsageMonitor: CodingUsageMonitor {
 @MainActor
 final class CodingSessionMonitor: CodingUsageMonitor {
     func refreshIfNeeded(ccusageCLIPath: String, interval: Double) async {
-        if isDue(interval) { _ = await refreshNow(ccusageCLIPath: ccusageCLIPath) }
+        if isDue(interval) { _ = await refreshNow(ccusageCLIPath: ccusageCLIPath, forceCcusage: false) }
     }
 
+    /// Codex 和 Claude 每轮都由增量扫描器更新；其余来源的 ccusage session
+    /// 由引擎按 5 分钟节流，手动刷新时 `forceCcusage` 让它立刻跑一次。
     @discardableResult
-    func refreshNow(ccusageCLIPath: String) async -> Bool {
+    func refreshNow(ccusageCLIPath: String, forceCcusage: Bool = true) async -> Bool {
         await refresh({
-            let result = try await usageEngine.refreshSessions(executableURL: URL(fileURLWithPath: ccusageCLIPath))
+            let result = try await usageEngine.refreshSessions(
+                executableURL: URL(fileURLWithPath: ccusageCLIPath), forceCcusage: forceCcusage
+            )
             return (result.snapshot.now, result.errors.isEmpty ? nil : result.errors.joined(separator: "；"))
         }, comparable: Self.ignoringScanClock)
     }

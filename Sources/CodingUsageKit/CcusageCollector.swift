@@ -103,12 +103,14 @@ public struct CcusageCollector: Sendable {
         }
     }
 
-    public func collectSessions() async -> [CodingUsageSessionsResult] {
+    /// `excluding` drops sources after discovery; requesting fewer is not enough, discovery adds them back.
+    public func collectSessions(excluding: Set<String> = []) async -> [CodingUsageSessionsResult] {
         let available = await availableSources()
         let includePi = Self.includePi(available: available, home: home)
         let (discovered, _) = await discoveredSources(useCache: true)
         return await withTaskGroup(of: CodingUsageSessionsResult.self, returning: [CodingUsageSessionsResult].self) { group in
-            for source in Self.sources(requested: sourceIDs, discovered: discovered, includePi: includePi) {
+            for source in Self.sources(requested: sourceIDs, discovered: discovered, includePi: includePi)
+            where !excluding.contains(source) {
                 group.addTask {
                     if let available, !available.contains(source) {
                         return .failure(sourceID: source, message: "当前 ccusage 版本不支持 \(source)", unavailable: true)

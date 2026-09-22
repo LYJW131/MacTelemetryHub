@@ -5,6 +5,11 @@ public actor CodingUsageEngine {
     public let ledgerURL: URL
     public let home: URL
     private var tokenScanner = CodingTokenScanner()
+    /// `ccusage session` for sources the token scanner does not read. Once per this interval,
+    /// its errors are kept between runs so the status does not flicker.
+    public static let ccusageSessionInterval: TimeInterval = 300
+    private var lastCcusageSessions: Date?
+    private var ccusageSessionErrors: [String] = []
     private var inFlight: (id: UUID, task: Task<CodingUsageSnapshot, Error>)?
 
     public init(ledgerURL: URL, home: URL = FileManager.default.homeDirectoryForCurrentUser) {
@@ -58,29 +63,65 @@ public actor CodingUsageEngine {
         return try await Self.value(of: task)
     }
 
+    /**
+     * The one-minute “正在使用” refresh.
+     *
+     * Codex and Claude come from the incremental log scanner, which only reads bytes appended
+     * since the last scan and also yields the five-minute token windows. Every other local
+     * source still needs a `ccusage session` run, which rereads its whole history, so that runs
+     * at most every `ccusageSessionInterval` unless `forceCcusage` is set.
+     */
     public func refreshSessions(
-        executableURL: URL, environment: [String: String] = [:], at now: Date = Date()
+        executableURL: URL, environment: [String: String] = [:], forceCcusage: Bool = false,
+        at now: Date = Date()
     ) async throws -> (snapshot: CodingUsageSnapshot, errors: [String]) {
-        // Session reports need no price refresh. They never trigger Cursor cloud requests.
-        let knownSources = try CodingUsageLedger(url: ledgerURL).snapshot().usage.agents.map(\.id)
-            .filter { $0 != "cursor" }
-        let results = await CcusageCollector(executableURL: executableURL, environment: environment,
-                                            sourceIDs: knownSources, offline: true)
-            .collectSessions()
-        try Task.checkCancellation()
+        let tokenUsage = try tokenScanner.scan(home: home, at: now)
         var ledger = try CodingUsageLedger(url: ledgerURL)
-        var errors: [String] = []
-        for result in results {
+        let due = forceCcusage || lastCcusageSessions.map { now.timeIntervalSince($0) >= Self.ccusageSessionInterval } ?? true
+        if due {
+            // Session reports need no price refresh. They never trigger Cursor cloud requests.
+            let knownSources = try ledger.snapshot().usage.agents.map(\.id).filter { $0 != "cursor" }
+            let results = await CcusageCollector(executableURL: executableURL, environment: environment,
+                                                sourceIDs: knownSources, offline: true)
+                .collectSessions(excluding: Set(CodingTokenScanner.sourceIDs))
             try Task.checkCancellation()
-            switch result {
-            case let .success(sourceID, sessions): try ledger.applySessions(sourceID: sourceID, sessions: sessions)
-            case let .failure(_, message, _): errors.append(message)
+            ledger = try CodingUsageLedger(url: ledgerURL)
+            var errors: [String] = []
+            for result in results {
+                try Task.checkCancellation()
+                switch result {
+                case let .success(sourceID, sessions): try ledger.applySessions(sourceID: sourceID, sessions: sessions)
+                case let .failure(_, message, _): errors.append(message)
+                }
             }
+            lastCcusageSessions = now
+            ccusageSessionErrors = errors
         }
         let saved = try ledger.snapshot(at: now)
-        var current = saved.now
-        current.tokenUsage = try tokenScanner.scan(home: home, at: now)
-        return (CodingUsageSnapshot(usage: saved.usage, now: current, year: saved.year), errors)
+        var current = Self.overlay(saved.now, activity: tokenScanner.latestActivity, at: now)
+        current.tokenUsage = tokenUsage
+        return (CodingUsageSnapshot(usage: saved.usage, now: current, year: saved.year), ccusageSessionErrors)
+    }
+
+    /// Scanned activity wins when it is newer than what the ledger's session list says.
+    /// The ledger still carries these sources' sessions from the ten-minute usage refresh.
+    static func overlay(
+        _ payload: CodingUsageNowPayload, activity: [String: CodingTokenActivity], at now: Date
+    ) -> CodingUsageNowPayload {
+        let agents = payload.agents.map { agent -> CodingUsageNowAgentPayload in
+            guard let seen = activity[agent.id] else { return agent }
+            let recorded = agent.lastActivityAt.flatMap(CodingUsageDates.parseInstant)
+            if let recorded, recorded >= seen.at { return agent }
+            let model = seen.model.map(CodingUsageModelIdentity.canonical)
+                .flatMap { CodingUsageLedger.visibleModel($0) ? $0 : nil }
+            let age = now.timeIntervalSince(seen.at)
+            return CodingUsageNowAgentPayload(
+                id: agent.id, currentModel: model ?? agent.currentModel,
+                lastActivityAt: CodingUsageDates.instant(seen.at),
+                active: age >= 0 && age <= 300
+            )
+        }
+        return CodingUsageNowPayload(agents: agents, tokenUsage: payload.tokenUsage)
     }
 
     public func snapshot(omitting: Set<String> = [], at now: Date = Date()) throws -> CodingUsageSnapshot {

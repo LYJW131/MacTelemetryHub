@@ -124,7 +124,7 @@ endpoint produced it:
 
 | Module | Interval | Contents |
 | --- | --- | --- |
-| `vibeCodingNow` | 60 s | activity inferred from local session metadata, current model, and last activity time |
+| `vibeCodingNow` | 60 s | activity, current model, and last activity time. Codex and Claude come from an incremental scan of their JSONL logs every minute; other local sources run `ccusage session` at most every 5 minutes |
 | `vibeCodingUsage` | 10 min | retained token history, today's usage, API-equivalent valuation, session count, and per-source collection status |
 | `vibeCodingYear` | 1 h | 371 days from the same ledger, with daily totals and a compact top-5 model mix |
 
@@ -148,8 +148,9 @@ TokenTracker，也不连接它的 HTTP 面板，不读取或导入它的 queue�
 
 | 来源 | 用量历史 | 会话与此刻状态 |
 | --- | --- | --- |
-| Claude、Codex、Grok、Antigravity | 固定版本的 `ccusage` 读取本机原始日志或数据库；Antigravity 使用其本地 SQLite 用量记录 | `ccusage <source> session` 的本机会话元数据 |
-| 其他被 `ccusage` 发现且支持的来源 | 同样读取本机原始历史，动态纳入按来源统计 | 同样读取本机会话元数据 |
+| Claude、Codex | 固定版本的 `ccusage` 读取本机原始日志 | 每分钟增量扫描 JSONL 日志，只读上次之后追加的部分；最近一条用量事件的时刻和模型就是此刻状态，同一次扫描也产出五分钟用量窗口。会话数仍随用量刷新由 `ccusage session` 更新 |
+| Grok、Antigravity | 固定版本的 `ccusage` 读取本机原始日志或数据库；Antigravity 使用其本地 SQLite 用量记录 | `ccusage <source> session` 的本机会话元数据，最多 5 分钟一次（每次都要重读全部历史） |
+| 其他被 `ccusage` 发现且支持的来源 | 同样读取本机原始历史，动态纳入按来源统计 | 同上，最多 5 分钟一次 |
 | Cursor | 不采集。云端历史由 agent-limits-reporter 用它自己的登录态上报；本机快照把 `cursor` 放进 `omittedSources`，合计和年度图都不含它 | 当前没有本机会话适配器，不把云端历史冒充正在使用状态 |
 
 本地采集先通过 `ccusage daily --by-agent --json --offline` 发现来源，再按来源读取
