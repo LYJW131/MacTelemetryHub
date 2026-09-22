@@ -346,7 +346,7 @@ struct SettingsView: View {
     }
 
     private var vibeCodingSection: some View {
-        settingSection("Vibe Coding 用量", detail: "ccusage 读取本地完整用量与会话；Cursor 直接同步账号云端历史。Mac 保存历史并统一上报摘要，限额由 NAS 独立上报。不会上传 session ID、项目路径、提示词或回复。", icon: "terminal") {
+        settingSection("Vibe Coding 用量", detail: "正在使用等 Claude Code 的 hook，不轮询日志。当天用量只读 Claude Code。年度热力图才读取全部本机来源。Cursor 云端历史由容器上报。不会上传提示词、回复、项目路径或 session ID。", icon: "terminal") {
             Toggle("启用用量采集", isOn: $settings.vibeCodingModuleEnabled)
                 .toggleStyle(.switch)
 
@@ -358,9 +358,8 @@ struct SettingsView: View {
                         text: $settings.ccusageCLIPath,
                         placeholder: "应用内置 ccusage 的绝对路径"
                     )
-                    NumericField(title: "会话状态刷新", unit: "秒（最少 60）", placeholder: "60", value: $settings.codingSessionRefreshInterval)
-                    NumericField(title: "用量刷新", unit: "秒（最少 60）", placeholder: "600", value: $settings.vibeCodingUsageRefreshInterval)
-                    NumericField(title: "年度热力图刷新", unit: "秒（最少 60）", placeholder: "3600", value: $settings.vibeCodingYearRefreshInterval)
+                    NumericField(title: "当天用量刷新", unit: "秒（最少 60，只含 Claude Code）", placeholder: "600", value: $settings.vibeCodingUsageRefreshInterval)
+                    NumericField(title: "年度热力图刷新", unit: "秒（最少 60，全部 agent）", placeholder: "3600", value: $settings.vibeCodingYearRefreshInterval)
                 }
                 .padding(.top, 5)
             }

@@ -124,14 +124,15 @@ endpoint produced it:
 
 | Module | Interval | Contents |
 | --- | --- | --- |
-| `vibeCodingNow` | 60 s | activity inferred from local session metadata, current model, and last activity time |
-| `vibeCodingUsage` | 10 min | retained token history, today's usage, API-equivalent valuation, session count, and per-source collection status |
-| `vibeCodingYear` | 1 h | 371 days from the same ledger, with daily totals and a compact top-5 model mix |
+| `vibeCodingNow` | Claude Code hook | Claude Code only. A hook writes the event and model; the app does not poll logs. The site turns the light off five minutes after the last hook |
+| `vibeCodingUsage` | 10 min | Claude Code's Shanghai day only: tokens, cache hit, API-equivalent cost. Other agents stay on the ledger until the year refresh |
+| `vibeCodingYear` | 1 h | full local history for every agent, then 371 days with daily totals and a compact top-5 model mix |
 
-These intervals are configurable, with a 60-second minimum. Session collection
-runs independently of the slower cloud history refresh. The calendar reads the
-local ledger without starting a second history download. Usage and session counts
-are assembled by the shared engine before upload.
+The 10-minute and hourly intervals are configurable, with a 60-second minimum.
+“正在使用” is not on a timer: the app installs an async Claude Code hook and waits.
+The hourly refresh is the one that downloads full history. A Claude-only today
+refresh updates that one day and does not start a second history download.
+Usage totals are assembled by the shared engine before upload.
 
 Plan tiers and rate-limit windows come from a separate producer (the author runs
 a small container that posts them to `/api/ingest/agents`; it is not part of this
@@ -146,19 +147,20 @@ Every module is sent only when its own display content changes.
 TokenTracker，也不连接它的 HTTP 面板，不读取或导入它的 queue、缓存和汇总文件。
 首次历史重建只使用本机仍存在的原始数据。Cursor 云端记录不在这次重建里。
 
-| 来源 | 用量历史 | 会话与此刻状态 |
+| 来源 | 用量历史 | 此刻状态 |
 | --- | --- | --- |
-| Claude、Codex、Grok、Antigravity | 固定版本的 `ccusage` 读取本机原始日志或数据库；Antigravity 使用其本地 SQLite 用量记录 | `ccusage <source> session` 的本机会话元数据 |
-| 其他被 `ccusage` 发现且支持的来源 | 同样读取本机原始历史，动态纳入按来源统计 | 同样读取本机会话元数据 |
-| Cursor | 不采集。云端历史由 agent-limits-reporter 用它自己的登录态上报；本机快照把 `cursor` 放进 `omittedSources`，合计和年度图都不含它 | 当前没有本机会话适配器，不把云端历史冒充正在使用状态 |
+| Claude Code | 当天每 10 分钟 `ccusage claude daily --since/--until` 当天；年度刷新才重读完整历史 | Claude Code hook（`~/.claude/settings.json`）。不轮询会话日志 |
+| Codex、Grok、Antigravity，以及 `ccusage` 发现的其他来源 | 只在年度刷新读取完整历史 | 不采集。站点上这些行只保留限额 |
+| Cursor | 不采集。云端历史由 agent-limits-reporter 用它自己的登录态上报；本机快照把 `cursor` 放进 `omittedSources`，合计和年度图都不含它 | 不把云端历史冒充正在使用。活动灯由容器的用量事件驱动 |
 
-本地采集先通过 `ccusage daily --by-agent --json --offline` 发现来源，再按来源读取
-`daily` 和 `session`。`pi` 的默认目录只有 `~/.pi/agent/sessions`，全来源发现也不接受
+年度刷新先通过 `ccusage daily --by-agent --json --offline` 发现来源，再按来源读取
+`daily` 和 `session`。当天刷新不发现来源，只跑 Claude Code 的当天。`pi` 的默认目录只有 `~/.pi/agent/sessions`，全来源发现也不接受
 `--pi-path`，所以看不到 `~/.omp/agent/sessions`。omp 会话目录里有 jsonl 且 ccusage 提供
 `pi` 时，采集会把 `pi` 加进来。`pi` 的 `daily` 和 `session` 传 `--pi-path`，同时包含
 `~/.pi/agent/sessions` 与 `~/.omp/agent/sessions`；该参数替换默认目录，只传一边会丢掉另一边。
-所有日桶统一为 `Asia/Shanghai`，命令不传 `--since` 或 `--until`，
-不把“今日”或“近一年”当成累计用量的历史范围。年度图是完整账本的一个窗口。
+所有日桶统一为 `Asia/Shanghai`。年度刷新不传 `--since` 或 `--until`，
+不把“近一年”当成累计用量的历史范围。当天刷新只对 Claude Code 传当天的 `--since` 和 `--until`，
+并且只替换这一天，缩短的覆盖范围不会把旧日桶判成错误。年度图是完整账本的一个窗口。
 活动天数按所有来源中 token 大于零的日期取并集；会话数只统计实际读到且去重的本机会话。
 
 Cursor 云端历史不再由这台 Mac 拉取。`state.vscdb` 里的登录态和
@@ -584,15 +586,15 @@ and the hidden virtual application carries no title.
 
 ## Pulse window usage
 
-The session refresh includes `modules.vibeCodingNow.tokenUsage`: a rolling 24-hour
-set of five-minute, epoch-millisecond usage buckets from Codex and Claude JSONL logs.
-The scanner follows file offsets, handles unfinished lines, deduplicates Codex totals
-and Claude streaming messages, and never uploads content, paths or session IDs.
-`inputTokens` excludes cache reads; reasoning is a subset of output. `eventCount`
-counts usage events, not HTTP requests. Source status is `ok`, `partial` or
-`unavailable`; unsupported providers are unknown, not zero. Daily usage is unchanged.
-Window usage is reconciled by event time, including late-arriving records. It is
-internal Jev evidence and does not appear in the public Vibe Coding patch.
+The live app no longer attaches `modules.vibeCodingNow.tokenUsage`. “正在使用” is a
+Claude Code hook, not a log walk, and the site turns that light off from
+`lastActivityAt`. Pulse treats a missing token window as unknown, not zero.
+
+`swift run coding-usage pulse` still reads Claude Code JSONL for a local diagnostic.
+The scanner follows file offsets, handles unfinished lines, deduplicates streaming
+messages, and never writes content, paths or session IDs. `inputTokens` excludes
+cache reads; reasoning is a subset of output. `eventCount` counts usage events, not
+HTTP requests. Source status is `ok`, `partial` or `unavailable`.
 
 Read-only diagnostic: `swift run coding-usage pulse --output /tmp/pulse-usage.json`.
 Deploy a backend that accepts the ingest protocol above before installing this reporter.

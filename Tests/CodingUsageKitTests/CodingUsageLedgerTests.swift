@@ -193,4 +193,29 @@ struct CodingUsageLedgerTests {
         let days = accounts["claude"]!["local"]!["days"] as! [String: [String: Any]]
         #expect((days["2026-09-05"]?["totalTokens"] as? NSNumber)?.int64Value == 0)
     }
+
+    @Test func todayPatchReplacesClaudeTodayWithoutFlaggingMissingHistory() throws {
+        let url = try location(); defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
+        var ledger = try CodingUsageLedger(url: url)
+        try ledger.apply(report("claude", [day("2026-09-04", 10), day("2026-09-05", 20)]))
+        var patch = report("claude", [day("2026-09-05", 15)])
+        patch.preservesHistory = true
+        patch.coverageStart = "2026-09-05"
+        try ledger.apply(patch)
+        let agent = try ledger.snapshot(at: now).usage.agents.first { $0.id == "claude" }
+        #expect(agent?.today?.totalTokens == 15)
+        #expect(agent?.usageStatus.state == .ok)
+        #expect(agent?.usageStatus.error == nil)
+        #expect(agent?.usageStatus.coverageStart == "2026-09-04")
+        let later = CodingUsageDates.parseInstant("2026-09-05T05:00:00Z")!
+        var empty = CodingUsageSourceReport(
+            sourceID: "claude", days: [], collectedAt: later, coverageEnd: "2026-09-05",
+            costComplete: true, preservesHistory: true
+        )
+        empty.preservesHistory = true
+        try ledger.apply(empty)
+        let after = try ledger.snapshot(at: later).usage.agents.first { $0.id == "claude" }
+        #expect(after?.today?.totalTokens == 15)
+        #expect(try ledger.snapshot(at: now).usage.totals.totalTokens == 25)
+    }
 }

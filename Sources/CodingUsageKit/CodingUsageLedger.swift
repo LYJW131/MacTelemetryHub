@@ -52,29 +52,31 @@ public struct CodingUsageLedger: Sendable {
             var source = disk.accounts[report.sourceID]?[account] ?? SourceState()
             if let previousTime = source.status.collectedAt.flatMap(CodingUsageDates.parseInstant),
                report.collectedAt < previousTime { return }
-            var problems: [String] = report.diagnosticError.map { [$0] } ?? []
+            var problems: [String] = report.preservesHistory ? [] : (report.diagnosticError.map { [$0] } ?? [])
             let previousNonzero = source.days.values.filter { $0.totalTokens > 0 }
-            if let oldStart = previousNonzero.map(\.date).min(),
-               report.coverageStart == nil || report.coverageStart! > oldStart {
-                problems.append("历史起始范围缩短，已保留旧日桶")
+            if !report.preservesHistory {
+                if let oldStart = previousNonzero.map(\.date).min(),
+                   report.coverageStart == nil || report.coverageStart! > oldStart {
+                    problems.append("历史起始范围缩短，已保留旧日桶")
+                }
+                if let oldEnd = previousNonzero.map(\.date).max(),
+                   report.coverageEnd == nil || report.coverageEnd! < oldEnd {
+                    problems.append("历史结束范围缩短，已保留旧日桶")
+                }
+                let missing = previousNonzero.filter {
+                    freshRows[$0.date] == nil && !(report.authoritative && report.completeDates.contains($0.date))
+                }
+                if !missing.isEmpty { problems.append("\(missing.count) 个既有活动日未返回，已保留") }
             }
-            if let oldEnd = previousNonzero.map(\.date).max(),
-               report.coverageEnd == nil || report.coverageEnd! < oldEnd {
-                problems.append("历史结束范围缩短，已保留旧日桶")
-            }
-            let missing = previousNonzero.filter {
-                freshRows[$0.date] == nil && !(report.authoritative && report.completeDates.contains($0.date))
-            }
-            if !missing.isEmpty { problems.append("\(missing.count) 个既有活动日未返回，已保留") }
             for (date, row) in freshRows {
-                if let previous = source.days[date], !report.authoritative,
+                if !report.preservesHistory, let previous = source.days[date], !report.authoritative,
                    row.totalTokens < previous.totalTokens {
                     problems.append("非完整日桶出现下调，已保留旧值")
                     continue
                 }
                 source.days[date] = row
             }
-            if report.authoritative {
+            if report.authoritative && !report.preservesHistory {
                 for date in report.completeDates where freshRows[date] == nil {
                     source.days[date] = CodingUsageDayRecord(date: date, apiEquivalentCostUSD: 0)
                 }
@@ -86,7 +88,19 @@ public struct CodingUsageLedger: Sendable {
                     source.completeDates.insert(scannedToday)
                 }
             }
+            if report.preservesHistory {
+                let scannedToday = CodingUsageDates.day(report.collectedAt)
+                if report.coverageEnd == scannedToday, source.days[scannedToday] == nil {
+                    source.days[scannedToday] = CodingUsageDayRecord(date: scannedToday, apiEquivalentCostUSD: 0)
+                }
+            }
             Self.mergeSessions(report.sessions, into: &source)
+            if report.preservesHistory, source.status.state != .unavailable || source.status.collectedAt != nil {
+                source.status.collectedAt = CodingUsageDates.instant(report.collectedAt)
+                disk.accounts[report.sourceID, default: [:]][account] = source
+                disk.selectedAccounts[report.sourceID] = account
+                return
+            }
             source.status = CodingUsageStatus(
                 state: problems.isEmpty ? .ok : .error,
                 collectedAt: CodingUsageDates.instant(report.collectedAt),

@@ -9,24 +9,16 @@ struct CodingTokenScannerTests {
         try FileManager.default.createDirectory(at: url.appendingPathComponent(".claude/projects"), withIntermediateDirectories: true)
         return url
     }
-    @Test func codexDeduplicatesAndKeepsTokenComponentsAcrossWindows() throws {
+    @Test func codexLogsAreNotPartOfTheClaudeScan() throws {
         let root = try home(); defer { try? FileManager.default.removeItem(at: root) }
         let now = Date(); let ms = Int64(now.timeIntervalSince1970*1000); let boundary = ms/300000*300000
-        func event(_ at: Int64, _ total: Int) throws -> Data {
-            try JSONSerialization.data(withJSONObject: ["timestamp":ISO8601DateFormatter().string(from:Date(timeIntervalSince1970:Double(at)/1000)),
-                "type":"event_msg","payload":["type":"token_count","info":["total_token_usage":["total_tokens":total],"last_token_usage":["input_tokens":100,"cached_input_tokens":80,"output_tokens":20,"reasoning_output_tokens":10]]]]) + Data([10])
-        }
-        let file=root.appendingPathComponent(".codex/sessions/test.jsonl")
-        let first=try event(boundary-1000,120), second=try event(boundary+1000,240)
-        try (first+first+second).write(to:file)
-        var scanner=CodingTokenScanner()
-        let result=try scanner.scan(home:root,at:Date(timeIntervalSince1970:Double(boundary+2000)/1000))
-        #expect(result.windows.count==2)
-        #expect(result.windows[0].agents[0].inputTokens==20)
-        #expect(result.windows[0].agents[0].cacheReadTokens==80)
-        #expect(result.windows[0].agents[0].reasoningTokens==10)
-        #expect(result.windows[0].agents[0].eventCount==1)
-        #expect(try scanner.scan(home:root,at:Date(timeIntervalSince1970:Double(boundary+2000)/1000))==result)
+        let event = try JSONSerialization.data(withJSONObject: ["timestamp":ISO8601DateFormatter().string(from:Date(timeIntervalSince1970:Double(boundary+1000)/1000)),
+            "type":"event_msg","payload":["type":"token_count","info":["total_token_usage":["total_tokens":120],"last_token_usage":["input_tokens":100,"cached_input_tokens":80,"output_tokens":20,"reasoning_output_tokens":10]]]]) + Data([10])
+        try event.write(to: root.appendingPathComponent(".codex/sessions/test.jsonl"))
+        var scanner = CodingTokenScanner()
+        let result = try scanner.scan(home: root, at: Date(timeIntervalSince1970: Double(boundary+2000)/1000))
+        #expect(result.windows.isEmpty)
+        #expect(result.sources.map(\.id) == ["claude"])
     }
     @Test func claudeStreamingUsageReplacesRatherThanAddsAndPartialLineWaits() throws {
         let root=try home();defer{try? FileManager.default.removeItem(at:root)}
@@ -48,6 +40,7 @@ struct CodingTokenScannerTests {
     @Test func absentSourcesAreNotMeasuredZero() throws {
         let root=FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         var scanner=CodingTokenScanner();let value=try scanner.scan(home:root)
-        #expect(value.sources.allSatisfy{$0.state=="unavailable"});#expect(value.windows.isEmpty)
+        #expect(value.sources == [CodingTokenSource(id: "claude", state: "unavailable")])
+        #expect(value.windows.isEmpty)
     }
 }

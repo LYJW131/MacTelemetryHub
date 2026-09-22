@@ -550,20 +550,20 @@ struct DashboardView: View {
 
     private var vibeCodingSessionCard: some View {
         ModuleStatusCard(
-            title: "Vibe · 会话状态",
+            title: "Vibe · 正在使用",
             icon: "terminal",
             enabled: settings.vibeCodingModuleEnabled,
-            value: codingSessions.lastSuccess == nil ? "等待扫描" : "扫描完成",
+            value: codingSessions.lastSuccess == nil ? "等待 hook" : "已收到 hook",
             detail: codingSessions.lastError
                 ?? codingSessions.lastSuccess?.formatted(date: .omitted, time: .standard),
             action: { Task { await service.refreshVibeCodingSessionsNow() } },
             actionIcon: "arrow.clockwise",
-            actionHelp: "重新读取本地会话状态并上报",
+            actionHelp: "重新登记 Claude Code hook 并上报当前活动",
             actionEnabled: settings.vibeCodingModuleEnabled,
             isReporting: service.isRefreshingVibeCodingSessions
                 || service.isManualReportInFlight(.vibeCoding),
             feedback: service.isRefreshingVibeCodingSessions
-                ? "正在扫描会话状态…"
+                ? "正在登记 hook…"
                 : service.manualReportMessage(for: .vibeCoding),
             feedbackIsError: service.manualReportFailed(.vibeCoding)
         )
@@ -579,12 +579,12 @@ struct DashboardView: View {
                 ?? vibeCodingUsageCollector.lastSuccess?.formatted(date: .omitted, time: .standard),
             action: { Task { await service.refreshVibeCodingUsageNow() } },
             actionIcon: "arrow.clockwise",
-            actionHelp: "重新统计本地与 Cursor 云端完整历史并上报",
+            actionHelp: "重新统计 Claude Code 的当天用量并上报",
             actionEnabled: settings.vibeCodingModuleEnabled,
             isReporting: service.isRefreshingVibeCodingUsage
                 || service.isManualReportInFlight(.vibeCoding),
             feedback: service.isRefreshingVibeCodingUsage
-                ? "正在重新统计用量…"
+                ? "正在统计 Claude Code 当天用量…"
                 : service.manualReportMessage(for: .vibeCoding),
             feedbackIsError: service.manualReportFailed(.vibeCoding)
         )
@@ -600,12 +600,12 @@ struct DashboardView: View {
                 ?? vibeCodingYearCollector.lastSuccess?.formatted(date: .omitted, time: .standard),
             action: { Task { await service.refreshVibeCodingYearNow() } },
             actionIcon: "arrow.clockwise",
-            actionHelp: "重新读取过去 53 周的日合计并上报",
+            actionHelp: "重新采集全部本机 agent 的历史并上报年度图",
             actionEnabled: settings.vibeCodingModuleEnabled,
             isReporting: service.isRefreshingVibeCodingYear
                 || service.isManualReportInFlight(.vibeCodingYear),
             feedback: service.isRefreshingVibeCodingYear
-                ? "正在读取年度用量…"
+                ? "正在采集全部 agent 的年度用量…"
                 : service.manualReportMessage(for: .vibeCodingYear),
             feedbackIsError: service.manualReportFailed(.vibeCodingYear)
         )

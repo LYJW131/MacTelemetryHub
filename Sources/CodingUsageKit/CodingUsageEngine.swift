@@ -1,5 +1,12 @@
 import Foundation
 
+public enum CodingUsageRefreshScope: Equatable, Sendable {
+    /// Claude Code's Shanghai day only. Other ledger days stay where the yearly refresh left them.
+    case claudeToday
+    /// Every local source's full history. This is what the year chart is built from.
+    case allHistory
+}
+
 /// One collector owns every usage source. The app and the diagnostic CLI use this same path.
 public actor CodingUsageEngine {
     public let ledgerURL: URL
@@ -22,16 +29,23 @@ public actor CodingUsageEngine {
 
     public func refresh(
         executableURL: URL, environment: [String: String] = [:], offline: Bool = false,
-        includeCursor: Bool = true, omitting: Set<String> = [], at now: Date = Date()
+        includeCursor: Bool = true, omitting: Set<String> = [], at now: Date = Date(),
+        scope: CodingUsageRefreshScope = .allHistory
     ) async throws -> CodingUsageSnapshot {
         if let inFlight, !inFlight.task.isCancelled { return try await Self.value(of: inFlight.task) }
         let ledgerURL = self.ledgerURL
         let home = self.home
         let task = Task {
+            if scope == .claudeToday {
+                let collector = CcusageCollector(executableURL: executableURL, environment: environment,
+                                                sourceIDs: ["claude"], offline: true, home: home)
+                let results = await collector.collect(at: now, scope: .claudeToday(CodingUsageDates.compactDay(now)))
+                return try Self.apply(results, ledgerURL: ledgerURL, omitting: omitting, at: now)
+            }
             let knownSources = try CodingUsageLedger(url: ledgerURL).snapshot().usage.agents.map(\.id)
                 .filter { $0 != "cursor" }
             let collector = CcusageCollector(executableURL: executableURL, environment: environment,
-                                            sourceIDs: knownSources, offline: offline)
+                                            sourceIDs: knownSources, offline: offline, home: home)
             async let local = collector.collect(at: now)
             let results: [CodingUsageSourceResult]
             if includeCursor {
@@ -40,17 +54,7 @@ public actor CodingUsageEngine {
             } else {
                 results = await local
             }
-            try Task.checkCancellation()
-            var ledger = try CodingUsageLedger(url: ledgerURL)
-            for result in results {
-                try Task.checkCancellation()
-                switch result {
-                case let .success(report): try ledger.apply(report)
-                case let .failure(sourceID, message, unavailable):
-                    try ledger.recordFailure(sourceID: sourceID, error: message, unavailable: unavailable)
-                }
-            }
-            return try ledger.snapshot(at: now, omitting: omitting)
+            return try Self.apply(results, ledgerURL: ledgerURL, omitting: omitting, at: now)
         }
         let id = UUID()
         inFlight = (id, task)
@@ -85,6 +89,22 @@ public actor CodingUsageEngine {
 
     public func snapshot(omitting: Set<String> = [], at now: Date = Date()) throws -> CodingUsageSnapshot {
         try CodingUsageLedger(url: ledgerURL).snapshot(at: now, omitting: omitting)
+    }
+
+    private static func apply(
+        _ results: [CodingUsageSourceResult], ledgerURL: URL, omitting: Set<String>, at now: Date
+    ) throws -> CodingUsageSnapshot {
+        try Task.checkCancellation()
+        var ledger = try CodingUsageLedger(url: ledgerURL)
+        for result in results {
+            try Task.checkCancellation()
+            switch result {
+            case let .success(report): try ledger.apply(report)
+            case let .failure(sourceID, message, unavailable):
+                try ledger.recordFailure(sourceID: sourceID, error: message, unavailable: unavailable)
+            }
+        }
+        return try ledger.snapshot(at: now, omitting: omitting)
     }
 
     private static func value(of task: Task<CodingUsageSnapshot, Error>) async throws -> CodingUsageSnapshot {

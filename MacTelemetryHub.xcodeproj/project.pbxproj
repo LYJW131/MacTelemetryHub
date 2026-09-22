@@ -133,6 +133,27 @@
 		};
 /* End PBXCopyFilesBuildPhase section */
 
+/* Begin PBXShellScriptBuildPhase section */
+		A10000000000000000000041 /* Build claude-activity-hook */ = {
+			isa = PBXShellScriptBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			inputPaths = (
+				"$(SRCROOT)/Package.swift",
+				"$(SRCROOT)/Sources/ClaudeActivityHookCLI/main.swift",
+				"$(SRCROOT)/Sources/CodingUsageKit/ClaudeActivityHook.swift",
+			);
+			name = "Build claude-activity-hook";
+			outputPaths = (
+				"$(TARGET_BUILD_DIR)/$(CONTENTS_FOLDER_PATH)/MacOS/claude-activity-hook",
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+			shellPath = /bin/sh;
+			shellScript = "set -euo pipefail\nCONFIG=debug\nif [ \"${CONFIGURATION}\" = \"Release\" ]; then CONFIG=release; fi\nBUILD_PATH=\"${SRCROOT}/.build/hook-cli\"\nswift build --product claude-activity-hook -c \"$CONFIG\" --package-path \"${SRCROOT}\" --build-path \"$BUILD_PATH\"\nBIN=\"$BUILD_PATH/out/Products/${CONFIGURATION}/claude-activity-hook\"\nDEST=\"${TARGET_BUILD_DIR}/${CONTENTS_FOLDER_PATH}/MacOS/claude-activity-hook\"\nmkdir -p \"${DEST%/*}\"\ncp \"$BIN\" \"$DEST\"\nchmod 755 \"$DEST\"\nif [ -n \"${EXPANDED_CODE_SIGN_IDENTITY:-}\" ] && [ \"${EXPANDED_CODE_SIGN_IDENTITY}\" != \"-\" ]; then\n  codesign --force --sign \"${EXPANDED_CODE_SIGN_IDENTITY}\" --timestamp=none \"$DEST\"\nfi\n";
+		};
+/* End PBXShellScriptBuildPhase section */
+
 /* Begin PBXGroup section */
 		A10000000000000000000001 = {
 			isa = PBXGroup;
@@ -232,6 +253,7 @@
 				A10000000000000000000003 /* Frameworks */,
 				A10000000000000000000004 /* Resources */,
 				A10000000000000000000040 /* Embed ccusage */,
+				A10000000000000000000041 /* Build claude-activity-hook */,
 			);
 			buildRules = ();
 			dependencies = ();

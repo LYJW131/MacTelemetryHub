@@ -238,8 +238,7 @@ struct ReportDecision: Sendable {
         let musicChanged = inputs.appleMusicModuleEnabled &&
             (musicSignature != lastPosted.appleMusic || musicSeeked)
         /// 两个模块各判各的变化。门闩看的是载荷**变化**的时刻而不是采集
-        /// 成功的时刻 —— 会话状态 60 秒扫一次，绝大多数轮次什么都没变，拿
-        /// lastSuccess 当门闩会把每一轮扫描都变成一次上报。
+        /// 成功的时刻。正在使用的 hook 会比上报更密，没变的载荷不该每次都发。
         let vibeCodingEnabled = inputs.vibeCodingModuleEnabled
         func vibeCodingChanged(_ updatedAt: Date?, _ lastPostedAt: Date?) -> Bool {
             guard vibeCodingEnabled, let updatedAt else { return false }

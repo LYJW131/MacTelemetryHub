@@ -28,7 +28,9 @@ public struct CodingTokenUsage: Codable, Equatable, Sendable {
     public var windows: [CodingTokenWindow]
 }
 
-/// Reads only usage metadata. Prompt, response text, paths and session IDs never leave the scanner.
+/// Reads only Claude Code usage metadata. Codex logs are not walked: the live “正在使用”
+/// signal comes from a hook, and this scan is the manual `coding-usage pulse` diagnostic.
+/// Prompt, response text, paths and session IDs never leave the scanner.
 /// Per-file offsets avoid re-reading unchanged history; restart safely replays and deduplicates it.
 public struct CodingTokenScanner: Sendable {
     private struct Event: Sendable { var at: Int64; var counts: CodingTokenCounts }
@@ -46,10 +48,8 @@ public struct CodingTokenScanner: Sendable {
     public mutating func scan(home: URL, at now: Date = Date()) throws -> CodingTokenUsage {
         let end = Int64(now.timeIntervalSince1970 * 1000)
         let start = end - 86_400_000
-        let roots = [("codex", home.appendingPathComponent(".codex/sessions")),
-                     ("codex", home.appendingPathComponent(".codex/archived_sessions")),
-                     ("claude", home.appendingPathComponent(".claude/projects"))]
-        var states = ["codex": "unavailable", "claude": "unavailable"]
+        let roots = [("claude", home.appendingPathComponent(".claude/projects"))]
+        var states = ["claude": "unavailable"]
         var found = Set<String>()
         for (source, root) in roots {
             guard FileManager.default.fileExists(atPath: root.path) else { continue }
@@ -111,7 +111,7 @@ public struct CodingTokenScanner: Sendable {
                 buckets[bucket, default: [:]][key] = total
         }
         return CodingTokenUsage(from: start, to: end, collectedAt: end,
-            sources: ["codex", "claude"].map { CodingTokenSource(id: $0, state: states[$0]!) },
+            sources: ["claude"].map { CodingTokenSource(id: $0, state: states[$0]!) },
             windows: buckets.keys.sorted().map { from in CodingTokenWindow(from: from, to: from + 300_000,
                 agents: buckets[from]!.values.sorted { ($0.id + ($0.model ?? "")) < ($1.id + ($1.model ?? "")) }) })
     }

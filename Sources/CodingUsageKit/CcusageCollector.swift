@@ -46,9 +46,11 @@ public struct CcusageCollector: Sendable {
         return false
     }
 
-    func commandArguments(source: String, section: String) -> [String] {
+    func commandArguments(source: String, section: String, since: String? = nil, until: String? = nil) -> [String] {
         var arguments = [source, section, "--json", "--no-color", "--timezone", "Asia/Shanghai"]
         if source != "codex" { arguments += ["--mode", "calculate"] }
+        if let since { arguments += ["--since", since] }
+        if let until { arguments += ["--until", until] }
         if offline { arguments.append("--offline") }
         if source == "pi" { arguments += ["--pi-path", Self.piSessionPaths(home: home).joined(separator: ",")] }
         return arguments
@@ -59,7 +61,16 @@ public struct CcusageCollector: Sendable {
 
 
 
-    public func collect(at now: Date = Date()) async -> [CodingUsageSourceResult] {
+    /// `.all` is the yearly ledger refresh. `.claudeToday` only asks ccusage for Claude's Shanghai day.
+    public enum CollectScope: Equatable, Sendable {
+        case all
+        case claudeToday(String)
+    }
+
+    public func collect(at now: Date = Date(), scope: CollectScope = .all) async -> [CodingUsageSourceResult] {
+        if case let .claudeToday(day) = scope {
+            return await collectClaudeToday(day: day, at: now)
+        }
         let available = await availableSources()
         let includePi = Self.includePi(available: available, home: home)
         let (discovered, discoveryError) = await discoveredSources(useCache: false)
@@ -128,8 +139,22 @@ public struct CcusageCollector: Sendable {
         }
     }
 
-    private func run(source: String, section: String) async throws -> Data {
-        let arguments = commandArguments(source: source, section: section)
+    private func collectClaudeToday(day: String, at now: Date) async -> [CodingUsageSourceResult] {
+        do {
+            let dayData = try await run(source: "claude", section: "daily", since: day, until: day)
+            var report = try CcusageParser.parse(
+                sourceID: "claude", daily: dayData, sessions: Data("{\"sessions\":[]}".utf8), collectedAt: now
+            )
+            report.preservesHistory = true
+            report.sessions = []
+            return [.success(report)]
+        } catch {
+            return [.failure(sourceID: "claude", message: "ccusage claude：\(error.localizedDescription)", unavailable: false)]
+        }
+    }
+
+    private func run(source: String, section: String, since: String? = nil, until: String? = nil) async throws -> Data {
+        let arguments = commandArguments(source: source, section: section, since: since, until: until)
         if source == "antigravity" {
             let commandArguments = arguments
             return try await CcusageSQLiteAccess.run {
