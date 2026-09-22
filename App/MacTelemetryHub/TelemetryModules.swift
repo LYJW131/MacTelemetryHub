@@ -210,7 +210,10 @@ final class DesktopActivityMonitor: ObservableObject {
             return
         }
 
-        let next = WindowTitleNormalizer.normalize(Self.windowTitle(forPID: app.processIdentifier))
+        let next = WindowTitleNormalizer.normalize(
+            Self.windowTitle(forPID: app.processIdentifier),
+            applicationNames: Self.applicationNames(of: app)
+        )
         let status = judge?.resolve(
             applicationName: app.localizedName ?? "Unknown",
             bundleIdentifier: app.bundleIdentifier,
@@ -333,6 +336,18 @@ final class DesktopActivityMonitor: ObservableObject {
         }
         guard let value, CFGetTypeID(value) == AXUIElementGetTypeID() else { return nil }
         return (value as! AXUIElement)
+    }
+
+    /// 应用可能用来给标题署名的几个名字，交给归一化剥末尾那段；见 `WindowTitleNormalizer`。
+    private static func applicationNames(of app: NSRunningApplication) -> [String] {
+        var names: [String] = []
+        if let name = app.localizedName { names.append(name) }
+        if let url = app.bundleURL, let info = Bundle(url: url)?.infoDictionary {
+            for key in ["CFBundleDisplayName", "CFBundleName"] {
+                if let name = info[key] as? String { names.append(name) }
+            }
+        }
+        return names
     }
 
     private static func windowTitle(forPID processID: pid_t) -> String? {

@@ -43,6 +43,29 @@ struct WindowTitleNormalizerTests {
         #expect(WindowTitleNormalizer.normalize("● — MacTelemetryHub") == "MacTelemetryHub")
     }
 
+    @Test func stripsTrailingApplicationSignature() {
+        // Chromium 系 / Electron / Firefox 都把应用名挂在末尾，这段和应用名字段重复
+        #expect(WindowTitleNormalizer.normalize("LYJW's Homepage - Google Chrome", applicationNames: ["Google Chrome"]) == "LYJW's Homepage")
+        #expect(WindowTitleNormalizer.normalize("Noul — Mozilla Firefox", applicationNames: ["Firefox"]) == "Noul")
+        // VS Code 的本地化名是 Code，末尾写的是 Visual Studio Code：整词收尾即算署名
+        #expect(WindowTitleNormalizer.normalize("telemetry.ts - lyjwpage - Visual Studio Code", applicationNames: ["Code"]) == "telemetry.ts - lyjwpage")
+        // 大小写不敏感，只剥一次
+        #expect(WindowTitleNormalizer.normalize("Google Chrome Help - google chrome", applicationNames: ["Google Chrome"]) == "Google Chrome Help")
+        // 整段就是应用名（空白新标签页）剥完为空，按没有标题
+        #expect(WindowTitleNormalizer.normalize("Google Chrome", applicationNames: ["Google Chrome"]) == nil)
+    }
+
+    @Test func keepsTailThatIsNotTheApplication() {
+        // 最后一段不是应用名就不动，哪怕前面有分隔符
+        #expect(WindowTitleNormalizer.normalize("Claude Status - Incident History", applicationNames: ["Google Chrome"]) == "Claude Status - Incident History")
+        // 只是以应用名的字母收尾、不是整词，不算署名
+        #expect(WindowTitleNormalizer.normalize("Scanner - Barcode", applicationNames: ["Code"]) == "Scanner - Barcode")
+        // 分隔符两侧必须有空白：文件名里的连字符不是分隔
+        #expect(WindowTitleNormalizer.normalize("my-code", applicationNames: ["Code"]) == "my-code")
+        // 没给应用名就什么都不剥
+        #expect(WindowTitleNormalizer.normalize("Page - Google Chrome") == "Page - Google Chrome")
+    }
+
     @Test func emptyBecomesNil() {
         #expect(WindowTitleNormalizer.normalize(nil) == nil)
         #expect(WindowTitleNormalizer.normalize("   ") == nil)
