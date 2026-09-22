@@ -40,8 +40,7 @@ private enum SettingsCategory: String, CaseIterable, Identifiable {
         case .invalidUserID, .invalidPeripheralID: .charger
         case .invalidPort, .invalidBindAddress: .local
         case .invalidTiming, .invalidPostURL, .invalidR2Configuration: .reporting
-        case .invalidCcusagePath, .invalidCodingSessionInterval,
-             .invalidVibeCodingUsageInterval, .invalidVibeCodingYearInterval: .sources
+        case .invalidCcusagePath, .invalidVibeCodingUsageInterval, .invalidVibeCodingYearInterval: .sources
         case .invalidWindowTitleRiskThresholds,
              .invalidWindowTitleInformativeMinimum: .windowTitle
         case nil: nil

@@ -38,6 +38,8 @@ struct ClaudeActivityHookTests {
         """#.utf8)
         let command = "/Applications/Mac Telemetry Hub.app/Contents/MacOS/claude-activity-hook"
         let installed = try ClaudeActivityHook.settingsInstalling(existing: existing, command: command)
+        // settings.json belongs to the user: rewriting it must not turn every `/` into `\/`
+        #expect(!String(decoding: installed, as: UTF8.self).contains(#"\/"#))
         let again = try ClaudeActivityHook.settingsInstalling(existing: installed, command: "/tmp/new/claude-activity-hook")
         let root = try JSONSerialization.jsonObject(with: again) as! [String: Any]
         #expect(root["theme"] as? String == "dark")

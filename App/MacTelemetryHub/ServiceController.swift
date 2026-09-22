@@ -60,7 +60,6 @@ final class ServiceController: ObservableObject {
     private var tickTimer: Task<Void, Never>?
     /// vibe coding 的采集循环，跟上报循环各转各的
     private var vibeCodingCollectionTask: Task<Void, Never>?
-    private var vibeCodingSessionsTask: Task<Void, Never>?
     /// 每个模块「已经发出去的是什么」。规则和推进方式都在 TelemetryCore，有单测；
     /// 重开一轮上报会话就是 `lastPosted = .init()`。
     private var lastPosted = LastPostedState()
@@ -124,7 +123,6 @@ final class ServiceController: ObservableObject {
     deinit {
         reporterTask?.cancel()
         vibeCodingCollectionTask?.cancel()
-        vibeCodingSessionsTask?.cancel()
     }
 
     func start() {
@@ -153,9 +151,7 @@ final class ServiceController: ObservableObject {
         desktopSettleTask = nil
         icons.cancelAll()
         vibeCodingCollectionTask?.cancel()
-        vibeCodingSessionsTask?.cancel()
         vibeCodingCollectionTask = nil
-        vibeCodingSessionsTask = nil
         desktopActivity.stop()
         timeZone.stop()
         appleMusic.stop()
@@ -724,9 +720,7 @@ final class ServiceController: ObservableObject {
             vibeCodingUsageCollector.onChange = nil
             vibeCodingYearCollector.onChange = nil
             vibeCodingCollectionTask?.cancel()
-            vibeCodingSessionsTask?.cancel()
             vibeCodingCollectionTask = nil
-            vibeCodingSessionsTask = nil
             vibeCodingUsageCollector.stop()
             codingSessions.stop(removeHook: true)
             vibeCodingYearCollector.stop()
@@ -741,8 +735,6 @@ final class ServiceController: ObservableObject {
      */
     private func startVibeCodingCollection() {
         vibeCodingCollectionTask?.cancel()
-        vibeCodingSessionsTask?.cancel()
-        vibeCodingSessionsTask = nil
         vibeCodingUsageCollector.invalidateSchedule()
         vibeCodingYearCollector.invalidateSchedule()
         codingSessions.start()

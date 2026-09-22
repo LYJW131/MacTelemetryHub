@@ -34,8 +34,7 @@ final class AppSettings: ObservableObject {
         static let timezoneModuleEnabled = "timezoneModuleEnabled"
         static let vibeCodingModuleEnabled = "vibeCodingModuleEnabled"
         static let ccusageCLIPath = "codingUsageCLIPath"
-        static let codingSessionRefreshInterval = "codingSessionRefreshInterval"
-        /// 完整用量采集间隔；账号限额由独立上报器处理。
+        /// 当天用量采集间隔，只含 Claude Code；账号限额由独立上报器处理。
         static let vibeCodingUsageRefreshInterval = "vibeCodingUsageRefreshInterval"
         static let vibeCodingYearRefreshInterval = "vibeCodingYearRefreshInterval"
         static let r2Endpoint = "r2Endpoint"
@@ -99,9 +98,7 @@ final class AppSettings: ObservableObject {
     @Published var vibeCodingModuleEnabled = false
     /// ccusage 可执行文件，读取本地完整历史与会话摘要。
     @Published var ccusageCLIPath = ""
-    /// 短间隔那份：此刻在不在用
-    @Published var codingSessionRefreshInterval: Double = 60
-    /// 长间隔那份：全历史 token 与费用，限额由 NAS 独立采集。
+    /// 当天用量：只刷新 Claude Code 的当天 token 与费用，限额由 NAS 独立采集。
     @Published var vibeCodingUsageRefreshInterval: Double = 600
     /// 年度热力图：过去 53 周日合计。格子按天变，默认一小时。
     @Published var vibeCodingYearRefreshInterval: Double = 3_600
@@ -225,8 +222,6 @@ final class AppSettings: ObservableObject {
                     "/usr/local/bin/ccusage",
                 ])
                 ?? "")
-        let storedSessionInterval = defaults.double(forKey: Key.codingSessionRefreshInterval)
-        codingSessionRefreshInterval = storedSessionInterval == 0 ? 60 : storedSessionInterval
         let storedUsageInterval = defaults.double(forKey: Key.vibeCodingUsageRefreshInterval)
         vibeCodingUsageRefreshInterval = storedUsageInterval == 0 ? 600 : storedUsageInterval
         let storedYearInterval = defaults.double(forKey: Key.vibeCodingYearRefreshInterval)
@@ -406,9 +401,6 @@ final class AppSettings: ObservableObject {
             guard FileManager.default.isExecutableFile(atPath: ccusageCLIPath) else {
                 throw SettingsError.invalidCcusagePath
             }
-            guard codingSessionRefreshInterval >= 60 else {
-                throw SettingsError.invalidCodingSessionInterval
-            }
             guard vibeCodingUsageRefreshInterval >= 60 else {
                 throw SettingsError.invalidVibeCodingUsageInterval
             }
@@ -476,7 +468,6 @@ final class AppSettings: ObservableObject {
         defaults.set(timezoneModuleEnabled, forKey: Key.timezoneModuleEnabled)
         defaults.set(vibeCodingModuleEnabled, forKey: Key.vibeCodingModuleEnabled)
         defaults.set(ccusageCLIPath, forKey: Key.ccusageCLIPath)
-        defaults.set(codingSessionRefreshInterval, forKey: Key.codingSessionRefreshInterval)
         defaults.set(vibeCodingUsageRefreshInterval, forKey: Key.vibeCodingUsageRefreshInterval)
         defaults.set(vibeCodingYearRefreshInterval, forKey: Key.vibeCodingYearRefreshInterval)
         defaults.set(r2Endpoint, forKey: Key.r2Endpoint)
@@ -556,7 +547,6 @@ final class AppSettings: ObservableObject {
             timezoneModuleEnabled: timezoneModuleEnabled,
             vibeCodingModuleEnabled: vibeCodingModuleEnabled,
             ccusageCLIPath: ccusageCLIPath,
-            codingSessionRefreshInterval: codingSessionRefreshInterval,
             vibeCodingUsageRefreshInterval: vibeCodingUsageRefreshInterval,
             vibeCodingYearRefreshInterval: vibeCodingYearRefreshInterval,
             r2Endpoint: r2Endpoint,
@@ -610,7 +600,6 @@ struct SettingsDraftToken: Equatable {
     var timezoneModuleEnabled: Bool
     var vibeCodingModuleEnabled: Bool
     var ccusageCLIPath: String
-    var codingSessionRefreshInterval: Double
     var vibeCodingUsageRefreshInterval: Double
     var vibeCodingYearRefreshInterval: Double
     var r2Endpoint: String
@@ -621,7 +610,7 @@ struct SettingsDraftToken: Equatable {
 
 enum SettingsError: LocalizedError {
     case invalidUserID, invalidPeripheralID, invalidPort, invalidBindAddress, invalidTiming, invalidPostURL
-    case invalidCcusagePath, invalidCodingSessionInterval
+    case invalidCcusagePath
     case invalidVibeCodingUsageInterval
     case invalidVibeCodingYearInterval
     case invalidR2Configuration
@@ -638,7 +627,6 @@ enum SettingsError: LocalizedError {
         case .invalidTiming: "上报间隔和请求超时必须大于 0。"
         case .invalidPostURL: "上报端点必须是完整的 http:// 或 https:// URL。"
         case .invalidCcusagePath: "启用 Vibe Coding 用量时，ccusage CLI 路径必须指向可执行文件。"
-        case .invalidCodingSessionInterval: "会话状态刷新间隔不能低于 60 秒。"
         case .invalidVibeCodingUsageInterval: "用量刷新间隔不能低于 60 秒。"
         case .invalidVibeCodingYearInterval: "年度热力图刷新间隔不能低于 60 秒。"
         case .invalidR2Configuration: "R2 直传配置必须同时填写 HTTPS Endpoint、Bucket、Access Key ID 和 Secret Access Key。"

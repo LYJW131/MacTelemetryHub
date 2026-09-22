@@ -1,6 +1,5 @@
 import Foundation
 import Combine
-import CoreServices
 import Darwin
 import CodingUsageKit
 
@@ -46,8 +45,7 @@ class CodingUsageMonitor: ObservableObject {
     }
 
     func refresh<T: Encodable & Sendable>(
-        _ work: @escaping @MainActor () async throws -> (T, String?),
-        comparable: ((JSONValue) -> JSONValue)? = nil
+        _ work: @escaping @MainActor () async throws -> (T, String?)
     ) async -> Bool {
         guard !refreshing else { return false }
         refreshing = true
@@ -68,9 +66,7 @@ class CodingUsageMonitor: ObservableObject {
             guard generation == startedGeneration, !Task.isCancelled else { return false }
             // 间隔从这次结束算起。采集本身若已超过间隔，下一圈 5 秒 tick 不该立刻再开一轮。
             lastAttempt = Date()
-            let signature = comparable?(payload) ?? payload
-            let previous = uploadPayload.map { comparable?($0) ?? $0 }
-            if signature != previous {
+            if payload != uploadPayload {
                 uploadPayload = payload
                 payloadUpdatedAt = Date()
                 onChange?()
@@ -94,17 +90,16 @@ class CodingUsageMonitor: ObservableObject {
     /// Publish a payload that another refresh already collected, and start this monitor's interval from now.
     func accept<T: Encodable & Sendable>(_ value: T, warning: String?) {
         lastAttempt = Date()
-        lastSuccess = Date()
         lastError = warning
-        guard let payload = try? JSONDecoder().decode(JSONValue.self, from: JSONEncoder().encode(value)),
-              payload != uploadPayload else { return }
-        uploadPayload = payload
-        payloadUpdatedAt = Date()
-        onChange?()
+        store(value)
     }
 
     /// Same as `accept`, but a ledger republish must not postpone the next full history collect.
     func publishKeepingSchedule<T: Encodable & Sendable>(_ value: T) {
+        store(value)
+    }
+
+    private func store<T: Encodable & Sendable>(_ value: T) {
         lastSuccess = Date()
         guard let payload = try? JSONDecoder().decode(JSONValue.self, from: JSONEncoder().encode(value)),
               payload != uploadPayload else { return }
@@ -140,25 +135,24 @@ final class VibeCodingUsageMonitor: CodingUsageMonitor {
 @MainActor
 final class CodingSessionMonitor: CodingUsageMonitor {
     private var watcher: DirectoryWatch?
-    private var transcripts: TreeWatch?
+    private var expiry: Task<Void, Never>?
     private var model: String?
     private var lastActivity: Date?
     private var lastPublished: Date?
+    private var modelPublished: String?
 
     /// Register the Claude Code hook and publish whatever activity is already on disk.
     /// Publishing only Claude clears activity lights for agents this Mac no longer tracks.
     func start() {
-        let command = Bundle.main.url(forAuxiliaryExecutable: ClaudeActivityHook.helperExecutableName)?.path
-        guard let command else {
+        if let command = Bundle.main.url(forAuxiliaryExecutable: ClaudeActivityHook.helperExecutableName)?.path {
+            do {
+                try ClaudeActivityHook.install(command: command)
+                setLastError(nil)
+            } catch {
+                setLastError(error.localizedDescription)
+            }
+        } else {
             setLastError("应用里没有 claude-activity-hook，正在使用无法接收 Claude Code hook")
-            publishCurrent()
-            return
-        }
-        do {
-            try ClaudeActivityHook.install(command: command)
-            if lastError?.contains("hook") == true { setLastError(nil) }
-        } catch {
-            setLastError(error.localizedDescription)
         }
         let directory = ClaudeActivityHook.directory()
         try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
@@ -166,41 +160,7 @@ final class CodingSessionMonitor: CodingUsageMonitor {
         watcher = try? DirectoryWatch(directory: directory) { [weak self] in
             Task { @MainActor in self?.readLatest() }
         }
-        // Sessions that started before the hook was registered never call it.
-        // A transcript write is enough to keep the light on; the file itself is not read.
-        let projects = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".claude/projects")
-        transcripts?.cancel()
-        if FileManager.default.fileExists(atPath: projects.path) {
-            transcripts = TreeWatch(path: projects.path) { [weak self] in
-                Task { @MainActor in self?.noteTranscript() }
-            }
-        }
-        seedFromTranscripts()
         readLatest(force: true)
-    }
-
-    /// Newest session file's modification time. Does not open the file.
-    private func seedFromTranscripts() {
-        let root = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".claude/projects")
-        guard let enumerator = FileManager.default.enumerator(
-            at: root, includingPropertiesForKeys: [.contentModificationDateKey], options: [.skipsHiddenFiles]
-        ) else { return }
-        var newest: Date?
-        for case let url as URL in enumerator where url.pathExtension == "jsonl" {
-            guard let date = try? url.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate else { continue }
-            if newest == nil || date > newest! { newest = date }
-        }
-        if let newest, lastActivity == nil || newest > (lastActivity ?? .distantPast) {
-            lastActivity = newest
-        }
-    }
-
-    private func noteTranscript() {
-        let now = Date()
-        let due = lastPublished.map { now.timeIntervalSince($0) >= ClaudeActivityHook.publishInterval } ?? true
-        lastActivity = now
-        guard due else { return }
-        publishCurrent()
     }
 
     private func readLatest(force: Bool = false) {
@@ -218,10 +178,14 @@ final class CodingSessionMonitor: CodingUsageMonitor {
         publishCurrent()
     }
 
-    private var modelPublished: String?
+    /**
+     * `active` 是推出去的电平，没有轮询就不会自己变回 false。所以每次发亮灯时约好
+     * 窗口到期的那一刻再发一次：期间有新的 hook 就还亮着并顺延，没有就是那次熄灯。
+     */
     private func publishCurrent() {
         let now = Date()
-        let recent = lastActivity.map { now.timeIntervalSince($0) >= 0 && now.timeIntervalSince($0) <= ClaudeActivityHook.activeWindow } ?? false
+        let age = lastActivity.map { now.timeIntervalSince($0) }
+        let recent = age.map { $0 >= 0 && $0 <= ClaudeActivityHook.activeWindow } ?? false
         accept(CodingUsageNowPayload(agents: [
             CodingUsageNowAgentPayload(
                 id: "claude",
@@ -232,13 +196,23 @@ final class CodingSessionMonitor: CodingUsageMonitor {
         ]), warning: lastError)
         lastPublished = lastActivity ?? now
         modelPublished = model
+        expiry?.cancel()
+        expiry = nil
+        if recent, let age {
+            let remaining = ClaudeActivityHook.activeWindow - age + 1
+            expiry = Task { [weak self] in
+                try? await Task.sleep(for: .seconds(remaining))
+                guard !Task.isCancelled else { return }
+                self?.publishCurrent()
+            }
+        }
     }
 
     override func stop() {
         watcher?.cancel()
         watcher = nil
-        transcripts?.cancel()
-        transcripts = nil
+        expiry?.cancel()
+        expiry = nil
         model = nil
         lastActivity = nil
         lastPublished = nil
@@ -269,49 +243,6 @@ private final class DirectoryWatch: @unchecked Sendable {
     }
 
     func cancel() { source.cancel() }
-}
-
-/// Recursive file events for `~/.claude/projects`. Only the fact of a write is used.
-private final class TreeWatch: @unchecked Sendable {
-    private final class HandlerBox: @unchecked Sendable {
-        let handler: @Sendable () -> Void
-        init(_ handler: @escaping @Sendable () -> Void) { self.handler = handler }
-    }
-
-    private var stream: FSEventStreamRef?
-    private let box: HandlerBox
-
-    init(path: String, handler: @escaping @Sendable () -> Void) {
-        box = HandlerBox(handler)
-        var context = FSEventStreamContext(
-            version: 0, info: Unmanaged.passUnretained(box).toOpaque(),
-            retain: nil, release: nil, copyDescription: nil
-        )
-        stream = FSEventStreamCreate(
-            nil,
-            { _, info, _, _, _, _ in
-                guard let info else { return }
-                Unmanaged<HandlerBox>.fromOpaque(info).takeUnretainedValue().handler()
-            },
-            &context,
-            [path] as CFArray,
-            FSEventStreamEventId(kFSEventStreamEventIdSinceNow),
-            0.3,
-            FSEventStreamCreateFlags(kFSEventStreamCreateFlagFileEvents | kFSEventStreamCreateFlagNoDefer)
-        )
-        if let stream {
-            FSEventStreamSetDispatchQueue(stream, DispatchQueue.global())
-            FSEventStreamStart(stream)
-        }
-    }
-
-    func cancel() {
-        guard let stream else { return }
-        FSEventStreamStop(stream)
-        FSEventStreamInvalidate(stream)
-        FSEventStreamRelease(stream)
-        self.stream = nil
-    }
 }
 
 @MainActor

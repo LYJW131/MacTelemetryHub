@@ -124,12 +124,16 @@ endpoint produced it:
 
 | Module | Interval | Contents |
 | --- | --- | --- |
-| `vibeCodingNow` | Claude Code hook | Claude Code only. A hook writes the event and model; the app does not poll logs. The site turns the light off five minutes after the last hook |
+| `vibeCodingNow` | Claude Code hook | Claude Code only. A hook writes the event and model; the app does not poll logs. Five minutes after the last hook the app publishes `active: false` once |
 | `vibeCodingUsage` | 10 min | Claude Code's Shanghai day only: tokens, cache hit, API-equivalent cost. Other agents stay on the ledger until the year refresh |
 | `vibeCodingYear` | 1 h | full local history for every agent, then 371 days with daily totals and a compact top-5 model mix |
 
 The 10-minute and hourly intervals are configurable, with a 60-second minimum.
 “正在使用” is not on a timer: the app installs an async Claude Code hook and waits.
+The hook command is the running app's own `Contents/MacOS/claude-activity-hook`, so
+launching a Debug build from DerivedData repoints `~/.claude/settings.json` at that
+bundle; launch the installed app again to point it back. Claude Code sessions that
+were already open when the hook was registered do not call it until they restart.
 The hourly refresh is the one that downloads full history. A Claude-only today
 refresh updates that one day and does not start a second history download.
 Usage totals are assembled by the shared engine before upload.
@@ -587,12 +591,12 @@ and the hidden virtual application carries no title.
 ## Pulse window usage
 
 The live app no longer attaches `modules.vibeCodingNow.tokenUsage`. “正在使用” is a
-Claude Code hook, not a log walk, and the site turns that light off from
-`lastActivityAt`. Pulse treats a missing token window as unknown, not zero.
+Claude Code hook, not a log walk; five minutes after the last hook the app
+publishes `active: false` once. Pulse treats a missing token window as unknown, not zero.
 
-`swift run coding-usage pulse` still reads Claude Code JSONL for a local diagnostic.
-The scanner follows file offsets, handles unfinished lines, deduplicates streaming
-messages, and never writes content, paths or session IDs. `inputTokens` excludes
+`swift run coding-usage pulse` still reads Codex and Claude JSONL logs for a local
+diagnostic. The scanner follows file offsets, handles unfinished lines, deduplicates
+Codex totals and Claude streaming messages, and never writes content, paths or session IDs. `inputTokens` excludes
 cache reads; reasoning is a subset of output. `eventCount` counts usage events, not
 HTTP requests. Source status is `ok`, `partial` or `unavailable`.
 

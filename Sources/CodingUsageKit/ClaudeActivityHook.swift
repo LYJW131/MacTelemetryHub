@@ -34,11 +34,8 @@ public enum ClaudeActivityHook {
     /// Reads a hook stdin payload and keeps only the event name, model, and time.
     /// Prompt text, transcripts, and tool input are dropped before anything is written.
     public static func notice(from data: Data, at receivedAt: Date = Date()) -> Notice? {
-        if let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-           let notice = notice(from: object, at: receivedAt) {
-            return notice
-        }
-        return noticeScanningPrefix(data, at: receivedAt)
+        guard let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return nil }
+        return notice(from: object, at: receivedAt)
     }
 
     public static func record(
@@ -87,13 +84,13 @@ public enum ClaudeActivityHook {
             hooks[event] = groups
         }
         root["hooks"] = hooks
-        return try JSONSerialization.data(withJSONObject: root, options: [.prettyPrinted, .sortedKeys])
+        return try JSONSerialization.data(withJSONObject: root, options: [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes])
     }
 
     public static func settingsRemoving(existing: Data) throws -> Data {
         let root = try mutableRoot(existing)
         guard let current = root["hooks"] as? [String: Any] else {
-            return try JSONSerialization.data(withJSONObject: root, options: [.prettyPrinted, .sortedKeys])
+            return try JSONSerialization.data(withJSONObject: root, options: [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes])
         }
         let hooks = NSMutableDictionary(dictionary: current)
         for event in events {
@@ -108,7 +105,7 @@ public enum ClaudeActivityHook {
             if kept.isEmpty { hooks.removeObject(forKey: event) } else { hooks[event] = kept }
         }
         if hooks.count == 0 { root.removeObject(forKey: "hooks") } else { root["hooks"] = hooks }
-        return try JSONSerialization.data(withJSONObject: root, options: [.prettyPrinted, .sortedKeys])
+        return try JSONSerialization.data(withJSONObject: root, options: [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes])
     }
 
     public static func install(
@@ -144,27 +141,6 @@ public enum ClaudeActivityHook {
         let model = bounded(object["to_model"]) ?? bounded(object["model"])
         let at = (object["at"] as? NSNumber).map { Date(timeIntervalSince1970: $0.doubleValue) } ?? receivedAt
         return Notice(event: event, model: model, at: at)
-    }
-
-    /// A truncated stdin still counts as activity when the event name is in the prefix.
-    /// The scan window stays small so a long prompt is never retained.
-    private static func noticeScanningPrefix(_ data: Data, at receivedAt: Date) -> Notice? {
-        let prefix = data.prefix(8_192)
-        guard let text = String(data: prefix, encoding: .utf8) else { return nil }
-        guard let event = firstMatch(text, key: "hook_event_name"), events.contains(event) else { return nil }
-        let model = firstMatch(text, key: "to_model") ?? firstMatch(text, key: "model")
-        return Notice(event: event, model: model, at: receivedAt)
-    }
-
-    private static func firstMatch(_ text: String, key: String) -> String? {
-        guard let range = text.range(of: "\"\(key)\"") else { return nil }
-        let tail = text[range.upperBound...]
-        guard let colon = tail.firstIndex(of: ":") else { return nil }
-        var rest = tail[tail.index(after: colon)...].drop(while: { $0 == " " || $0 == "\n" || $0 == "\t" })
-        guard rest.first == "\"" else { return nil }
-        rest = rest.dropFirst()
-        guard let end = rest.firstIndex(of: "\"") else { return nil }
-        return bounded(String(rest[..<end]))
     }
 
     private static func bounded(_ value: Any?) -> String? {

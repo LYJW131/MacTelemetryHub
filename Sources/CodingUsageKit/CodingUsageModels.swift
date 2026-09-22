@@ -253,18 +253,6 @@ public struct CodingUsageNowPayload: Codable, Equatable, Sendable {
         self.agents = agents
         self.tokenUsage = tokenUsage
     }
-
-    enum CodingKeys: String, CodingKey { case agents, tokenUsage }
-    public func encode(to encoder: Encoder) throws {
-        var container = encoder.container(keyedBy: CodingKeys.self)
-        try container.encode(agents, forKey: .agents)
-        try container.encodeIfPresent(tokenUsage, forKey: .tokenUsage)
-    }
-    public init(from decoder: Decoder) throws {
-        let container = try decoder.container(keyedBy: CodingKeys.self)
-        agents = try container.decode([CodingUsageNowAgentPayload].self, forKey: .agents)
-        tokenUsage = try container.decodeIfPresent(CodingTokenUsage.self, forKey: .tokenUsage)
-    }
 }
 public struct CodingUsageYearPayload: Codable, Equatable, Sendable {
     public let origin: String
