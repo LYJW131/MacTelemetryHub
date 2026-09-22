@@ -19,8 +19,8 @@ final class ServiceController: ObservableObject {
     let timeZone = TimeZoneMonitor()
     let appleMusic = AppleMusicMonitor()
     let appleMusicAuthorization = AppleMusicAuthorizationManager()
-    /// 一个模块一个采集器：当天只刷新 Claude Code，年度才采集全部 agent。
-    /// 正在使用不轮询，等 Claude Code 的 hook。
+    /// 一个模块一个采集器：长间隔那份（token / 费用）和
+    /// 短间隔那份（此刻在不在用）。年度热力图另走一块，间隔更长、按周切片。
     let vibeCodingUsageCollector = VibeCodingUsageMonitor()
     let codingSessions = CodingSessionMonitor()
     let vibeCodingYearCollector = VibeCodingYearMonitor()
@@ -60,6 +60,7 @@ final class ServiceController: ObservableObject {
     private var tickTimer: Task<Void, Never>?
     /// vibe coding 的采集循环，跟上报循环各转各的
     private var vibeCodingCollectionTask: Task<Void, Never>?
+    private var vibeCodingSessionsTask: Task<Void, Never>?
     /// 每个模块「已经发出去的是什么」。规则和推进方式都在 TelemetryCore，有单测；
     /// 重开一轮上报会话就是 `lastPosted = .init()`。
     private var lastPosted = LastPostedState()
@@ -123,6 +124,7 @@ final class ServiceController: ObservableObject {
     deinit {
         reporterTask?.cancel()
         vibeCodingCollectionTask?.cancel()
+        vibeCodingSessionsTask?.cancel()
     }
 
     func start() {
@@ -151,7 +153,9 @@ final class ServiceController: ObservableObject {
         desktopSettleTask = nil
         icons.cancelAll()
         vibeCodingCollectionTask?.cancel()
+        vibeCodingSessionsTask?.cancel()
         vibeCodingCollectionTask = nil
+        vibeCodingSessionsTask = nil
         desktopActivity.stop()
         timeZone.stop()
         appleMusic.stop()
@@ -287,6 +291,7 @@ final class ServiceController: ObservableObject {
         CodingScheduleKey(
             enabled: settings.vibeCodingModuleEnabled,
             cliPath: settings.ccusageCLIPath,
+            sessionInterval: settings.codingSessionRefreshInterval,
             usageInterval: settings.vibeCodingUsageRefreshInterval,
             yearInterval: settings.vibeCodingYearRefreshInterval
         )
@@ -316,8 +321,8 @@ final class ServiceController: ObservableObject {
     /**
      * 两个采集器各自的「立刻重取」，互不牵连。
      *
-     * 正在使用等 Claude Code 的 hook，不扫日志。当天用量只刷新 Claude Code。
-     * 年度图那一轮才采集全部本机 agent。限额仍由 NAS 上的容器上报器负责。
+     * 会话刷新只读本地元数据，年度图只从持久账本生成。
+     * 各 agent 的限额已拆由 NAS 上的容器上报器负责，这里只管用量。
      *
      * 采集器自己带单飞门闩，这里的标志只管按钮状态。即时上报仍是一次：
      * 信封只有一个，`requestImmediateReport` 也只按模块开关走一遍。
@@ -329,7 +334,7 @@ final class ServiceController: ObservableObject {
         guard await vibeCodingUsageCollector.refreshNow(
             ccusageCLIPath: settings.ccusageCLIPath
         ) else { return }
-        await vibeCodingYearCollector.republishFromLedger()
+        await vibeCodingYearCollector.refreshNow()
         _ = requestImmediateReport(.vibeCoding)
     }
 
@@ -337,18 +342,15 @@ final class ServiceController: ObservableObject {
         guard settings.vibeCodingModuleEnabled, !isRefreshingVibeCodingYear else { return }
         isRefreshingVibeCodingYear = true
         defer { isRefreshingVibeCodingYear = false }
-        guard await vibeCodingYearCollector.refreshNow(
-            ccusageCLIPath: settings.ccusageCLIPath, usage: vibeCodingUsageCollector
-        ) else { return }
+        guard await vibeCodingYearCollector.refreshNow() else { return }
         _ = requestImmediateReport(.vibeCodingYear)
-        _ = requestImmediateReport(.vibeCoding)
     }
 
     func refreshVibeCodingSessionsNow() async {
         guard settings.vibeCodingModuleEnabled, !isRefreshingVibeCodingSessions else { return }
         isRefreshingVibeCodingSessions = true
         defer { isRefreshingVibeCodingSessions = false }
-        codingSessions.start()
+        await codingSessions.refreshNow(ccusageCLIPath: settings.ccusageCLIPath)
         _ = requestImmediateReport(.vibeCoding)
     }
 
@@ -535,6 +537,7 @@ final class ServiceController: ObservableObject {
     private struct CodingScheduleKey: Equatable {
         var enabled: Bool
         var cliPath: String
+        var sessionInterval: Double
         var usageInterval: Double
         var yearInterval: Double
     }
@@ -720,39 +723,51 @@ final class ServiceController: ObservableObject {
             vibeCodingUsageCollector.onChange = nil
             vibeCodingYearCollector.onChange = nil
             vibeCodingCollectionTask?.cancel()
+            vibeCodingSessionsTask?.cancel()
             vibeCodingCollectionTask = nil
+            vibeCodingSessionsTask = nil
             vibeCodingUsageCollector.stop()
-            codingSessions.stop(removeHook: true)
+            codingSessions.stop()
             vibeCodingYearCollector.stop()
         }
     }
 
     /**
-     * 年度采集和当天采集共用一个循环，年度优先：它到期时已经把 Claude 的今天算进账本，
-     * 当天那一轮就不必再开。正在使用不在这个循环里，它只等 Claude Code 的 hook。
+     * 全历史采集与会话采集独立运行，云端分页不会阻塞会话或设备遥测。
      *
-     * 采集完由各自的 onChange 叫醒上报循环。这里按 tickInterval 转只是问一句该不该采。
+     * 现在采集完由各自的 onChange 叫醒循环，跟前台应用、音乐同一条路：循环只读
+     * 它们留下的载荷，唯一还会阻塞的就是那次 POST 本身。
+     *
+     * 这里按 tickInterval 转只是「问一句该不该采」，真正的节流是采集器自己的
+     * 间隔门闩；单飞门闩也在采集器里，所以问得勤一点是安全的。
      */
     private func startVibeCodingCollection() {
         vibeCodingCollectionTask?.cancel()
+        vibeCodingSessionsTask?.cancel()
         vibeCodingUsageCollector.invalidateSchedule()
+        codingSessions.invalidateSchedule()
         vibeCodingYearCollector.invalidateSchedule()
-        codingSessions.start()
         vibeCodingCollectionTask = Task { [weak self] in
             while !Task.isCancelled {
                 guard let self, settings.vibeCodingModuleEnabled else { return }
-                if self.vibeCodingYearCollector.isDue(settings.vibeCodingYearRefreshInterval) {
-                    await self.vibeCodingYearCollector.refreshIfNeeded(
-                        ccusageCLIPath: settings.ccusageCLIPath,
-                        interval: settings.vibeCodingYearRefreshInterval,
-                        usage: self.vibeCodingUsageCollector
-                    )
-                } else {
-                    await self.vibeCodingUsageCollector.refreshIfNeeded(
-                        ccusageCLIPath: settings.ccusageCLIPath,
-                        interval: settings.vibeCodingUsageRefreshInterval
-                    )
-                }
+                // 先刷新持久账本，再从同一份数据生成年度图。
+                await self.vibeCodingUsageCollector.refreshIfNeeded(
+                    ccusageCLIPath: settings.ccusageCLIPath,
+                    interval: settings.vibeCodingUsageRefreshInterval
+                )
+                await self.vibeCodingYearCollector.refreshIfNeeded(
+                    interval: settings.vibeCodingYearRefreshInterval
+                )
+                try? await Task.sleep(for: Self.tickInterval)
+            }
+        }
+        vibeCodingSessionsTask = Task { [weak self] in
+            while !Task.isCancelled {
+                guard let self, settings.vibeCodingModuleEnabled else { return }
+                await self.codingSessions.refreshIfNeeded(
+                    ccusageCLIPath: settings.ccusageCLIPath,
+                    interval: settings.codingSessionRefreshInterval
+                )
                 try? await Task.sleep(for: Self.tickInterval)
             }
         }

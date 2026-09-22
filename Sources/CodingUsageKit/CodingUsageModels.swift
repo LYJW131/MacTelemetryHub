@@ -88,23 +88,18 @@ public struct CodingUsageSourceReport: Sendable {
     /// Missing historical dates are otherwise preserved and surfaced as a coverage error.
     public var authoritative: Bool
     public var diagnosticError: String?
-    /// A today-only Claude refresh. Returned days replace those dates, including a lower recount.
-    /// Days the report does not mention stay, and the previous health status stays with them.
-    public var preservesHistory: Bool
 
     public init(sourceID: String, accountID: String? = nil, days: [CodingUsageDayRecord],
                 sessions: [CodingUsageSessionRecord] = [], collectedAt: Date = Date(),
                 coverageStart: String? = nil, coverageEnd: String? = nil,
                 precision: CodingUsagePrecision = .measured, costComplete: Bool = false,
-                completeDates: Set<String> = [], authoritative: Bool = true, diagnosticError: String? = nil,
-                preservesHistory: Bool = false) {
+                completeDates: Set<String> = [], authoritative: Bool = true, diagnosticError: String? = nil) {
         self.sourceID = sourceID; self.accountID = accountID; self.days = days
         self.sessions = sessions; self.collectedAt = collectedAt
         self.coverageStart = coverageStart; self.coverageEnd = coverageEnd
         self.precision = precision; self.costComplete = costComplete
         self.completeDates = completeDates; self.authoritative = authoritative
         self.diagnosticError = diagnosticError
-        self.preservesHistory = preservesHistory
     }
 }
 
@@ -131,10 +126,6 @@ public enum CodingUsageDates {
     public static func day(_ date: Date) -> String {
         let c = calendar.dateComponents([.year, .month, .day], from: date)
         return String(format: "%04d-%02d-%02d", c.year!, c.month!, c.day!)
-    }
-    /// ccusage `--since` / `--until` take `YYYYMMDD` in the same Shanghai day as `day(_:)`.
-    public static func compactDay(_ date: Date) -> String {
-        day(date).replacingOccurrences(of: "-", with: "")
     }
     public static func parseDay(_ value: String) -> Date? {
         guard value.count == 10 else { return nil }
@@ -231,13 +222,6 @@ public struct CodingUsageNowAgentPayload: Codable, Equatable, Sendable {
     public let currentModel: String?
     public let lastActivityAt: String?
     public let active: Bool
-
-    public init(id: String, currentModel: String?, lastActivityAt: String?, active: Bool) {
-        self.id = id
-        self.currentModel = currentModel
-        self.lastActivityAt = lastActivityAt
-        self.active = active
-    }
     enum CodingKeys: String, CodingKey { case id, currentModel, lastActivityAt, active }
     public func encode(to encoder: Encoder) throws {
         var c = encoder.container(keyedBy: CodingKeys.self)
@@ -248,11 +232,6 @@ public struct CodingUsageNowAgentPayload: Codable, Equatable, Sendable {
 public struct CodingUsageNowPayload: Codable, Equatable, Sendable {
     public let agents: [CodingUsageNowAgentPayload]
     public var tokenUsage: CodingTokenUsage? = nil
-
-    public init(agents: [CodingUsageNowAgentPayload], tokenUsage: CodingTokenUsage? = nil) {
-        self.agents = agents
-        self.tokenUsage = tokenUsage
-    }
 }
 public struct CodingUsageYearPayload: Codable, Equatable, Sendable {
     public let origin: String

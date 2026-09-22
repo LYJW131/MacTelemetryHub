@@ -7,13 +7,11 @@ let package = Package(
     platforms: [.macOS(.v14)],
     products: [
         .executable(name: "coding-usage", targets: ["CodingUsageDiagnostic"]),
-        .executable(name: "claude-activity-hook", targets: ["ClaudeActivityHookCLI"]),
         .library(name: "ChargerTelemetryKit", targets: ["ChargerTelemetryKit"]),
         .library(name: "CodingUsageKit", targets: ["CodingUsageKit"]),
     ],
     targets: [
         .executableTarget(name: "CodingUsageDiagnostic", dependencies: ["CodingUsageKit"]),
-        .executableTarget(name: "ClaudeActivityHookCLI", dependencies: ["CodingUsageKit"]),
         .target(name: "ChargerTelemetryKit"),
         /**
          * 上报信封、上传指纹、SigV4 直传这些纯逻辑。
