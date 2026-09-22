@@ -2,49 +2,6 @@ import CryptoKit
 import Foundation
 import UserNotifications
 
-/// 一条窗口标题此刻停在哪一步。仪表盘、菜单栏、设置页都按它显示。
-enum WindowTitleStatus: String, Equatable, Sendable {
-    /// 没有标题：窗口没标题、应用没窗口，或者前台应用采集关着。
-    case none
-    /// 应用在标题黑名单里：从头到尾不读、不判、不报。
-    case blacklisted
-    /// 命中远端隐藏黑名单。本机照旧显示，但绝不送去 TypeSafe，也不上报。
-    case hidden
-    /// 没有辅助功能权限，读不到标题。
-    case noAccess
-    /// 免判放行名单里的应用，标题直接上报。
-    case trusted
-    case published
-    case locked
-    case needsConfirmation
-    /// 能公开但没什么可公开的：标题只是应用名或者通用占位。不报，也不打扰。
-    case omitted
-    case judging
-    /// 没配 API key，或者判断失败。按锁定处理。
-    case unavailable
-
-    var displayName: String {
-        switch self {
-        case .none: "无标题"
-        case .blacklisted: "黑名单"
-        case .hidden: "远端已隐藏"
-        case .noAccess: "缺少辅助功能权限"
-        case .trusted: "免判"
-        case .published: "已公开"
-        case .locked: "已锁定"
-        case .needsConfirmation: "待确认"
-        case .omitted: "已省略"
-        case .judging: "判断中"
-        case .unavailable: "无法判断"
-        }
-    }
-
-    /// 这一档的标题能不能进信封。界面之外别再各自判一遍。
-    var isReportable: Bool {
-        self == .published || self == .trusted
-    }
-}
-
 /**
  * 窗口标题的「能不能公开」判断。
  *
@@ -364,7 +321,7 @@ final class WindowTitleJudge: ObservableObject {
         failureCounts[key] = nil
         lastError = nil
         let now = Date()
-        cache.store(WindowTitleJudgmentEntry(
+        let entry = WindowTitleJudgmentEntry(
             bundleIdentifier: bundleIdentifier,
             applicationName: applicationName,
             title: title,
@@ -374,11 +331,21 @@ final class WindowTitleJudge: ObservableObject {
             lockedBy: outcome.lockedBy,
             judgedAt: now,
             lastSeenAt: now
-        ))
+        )
+        cache.store(entry)
         persist()
         lastResolvedKey = nil
         if outcome.verdict == .needsConfirmation {
-            Task { await askForConfirmation(key: key, applicationName: applicationName, title: title) }
+            // 理由从条目上取，和设置页那行概率同一份算法 —— 通知里说的和点进去看到的对得上。
+            let reason = entry.reasonDetailText
+            Task {
+                await askForConfirmation(
+                    key: key,
+                    applicationName: applicationName,
+                    title: title,
+                    reason: reason
+                )
+            }
         }
         onVerdict?()
     }
@@ -475,7 +442,12 @@ final class WindowTitleJudge: ObservableObject {
             || settings.authorizationStatus == .provisional
     }
 
-    private func askForConfirmation(key: String, applicationName: String, title: String) async {
+    private func askForConfirmation(
+        key: String,
+        applicationName: String,
+        title: String,
+        reason: String?
+    ) async {
         await refreshNotificationAuthorization()
         if !notificationAuthorizationRequested {
             // 第一条待确认才要权限。要不到也不算错：条目仍然留在设置页里等人看。
@@ -487,9 +459,11 @@ final class WindowTitleJudge: ObservableObject {
         guard notificationAuthorizationGranted else { return }
 
         let content = UNMutableNotificationContent()
-        // 标题一行把应用名和要办的事说完，正文就只剩那条窗口标题本身 ——
-        // 通知里唯一需要读的就是它，副标题和「关闭即锁定」那句都在挤它的地方。
+        // 标题一行把应用名和要办的事说完，副标题放「是哪道题拦下来的、概率多少」，
+        // 正文只剩那条窗口标题本身。三行各说一件事，不用点开设置页就能决定 ——
+        // 「关闭即锁定」那句话仍然不进通知，它挤掉的是真正要读的标题。
         content.title = "\(applicationName) 窗口标题公开确认"
+        if let reason { content.subtitle = reason }
         content.body = title
         content.categoryIdentifier = WindowTitleNotification.categoryIdentifier
         content.userInfo = ["cacheKey": key]

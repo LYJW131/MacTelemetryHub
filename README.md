@@ -532,8 +532,11 @@ default unless you trust the whole network.
   later instead of giving up until restart; failures also go to the unified log under
   category `desktop-icon`. `windowTitle` carries the focused title's judgment
   `status` (`published`, `locked`, `needsConfirmation`, `judging`, `trusted`,
-  `blacklisted`, `hidden`, `noAccess`, `unavailable`, `none`), whether it is
-  `reportable`, and the `title` itself only when it is.
+  `blacklisted`, `hidden`, `noAccess`, `unavailable`, `none`), whether a title is
+  going out right now (`reportable`), and that `title`. While a new title is
+  `judging`, the previous **published** title of the same application keeps being
+  reported for up to 20 seconds, so `judging` can legitimately come with
+  `reportable: true` and the older title.
 - `GET /apple-music/authorization` — Apple Music authorization state, see above.
 - `GET /sse/charger` and `GET /sse/powerbank` — Server-Sent Events. The first
   event is the current snapshot; later events follow the device's BLE push

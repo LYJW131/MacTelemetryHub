@@ -48,6 +48,22 @@ struct WindowTitleJudgmentCache: Equatable, Sendable {
         entries.first { $0.key == key }
     }
 
+    /**
+     * 设置页那份列表的顺序：先按四档排，同一档里最近见到的在前。
+     *
+     * `entries` 是 LRU 顺序，淘汰要用它，给人看不合适 —— 需要过目的条目会被
+     * 一串早就放行的标题挤到后面。这里按 `reviewOrder` 分档，档内仍然是新的
+     * 在前，所以刚判出来的那条不会跑到同档老条目的后面。
+     */
+    var entriesByReviewOrder: [WindowTitleJudgmentEntry] {
+        entries.sorted { lhs, rhs in
+            let left = lhs.verdict.reviewOrder
+            let right = rhs.verdict.reviewOrder
+            if left != right { return left < right }
+            return lhs.lastSeenAt > rhs.lastSeenAt
+        }
+    }
+
     /// 查表并把这一条顶到最近使用。命中才更新 `lastSeenAt`。
     mutating func lookup(key: String, at now: Date) -> WindowTitleJudgmentEntry? {
         guard let index = entries.firstIndex(where: { $0.key == key }) else { return nil }

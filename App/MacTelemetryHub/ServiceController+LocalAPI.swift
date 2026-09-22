@@ -53,7 +53,9 @@ extension ServiceController {
                 },
                 windowTitle: .init(
                     status: desktopActivity.windowTitleStatus.rawValue,
-                    reportable: desktopActivity.windowTitleStatus.isReportable,
+                    // 「此刻有没有标题发出去」，不是「这一档准不准发」——判断中接力
+                    // 上一条放行标题时，status 是 judging 而标题确实在信封里。
+                    reportable: desktopActivity.reportableWindowTitle != nil,
                     title: desktopActivity.reportableWindowTitle
                 ),
                 charger: .init(

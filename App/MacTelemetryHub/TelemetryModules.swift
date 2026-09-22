@@ -35,6 +35,8 @@ final class DesktopActivityMonitor: ObservableObject {
     private var observedApplicationElement: AXUIElement?
     private var observedWindowElement: AXUIElement?
     private var observedApplicationPID: pid_t?
+    /// 判断中那几秒继续挂着上一条放行标题。只在同一个应用里接得上。
+    private var titleHold = WindowTitleHold()
     /**
      * 标题的三档规则、缓存和通知都归它。
      *
@@ -102,12 +104,18 @@ final class DesktopActivityMonitor: ObservableObject {
         windowTitle = nil
         windowTitleStatus = .none
         windowTitleReason = nil
+        reportableWindowTitle = nil
+        titleHold.clear()
     }
 
-    /// 判断放行之后才允许进信封的那一份。判断中、锁定、待确认、失败一律为 nil。
-    var reportableWindowTitle: String? {
-        windowTitleStatus.isReportable ? windowTitle : nil
-    }
+    /**
+     * 能进信封的那一份。
+     *
+     * 放行和免判是它本身；判断中可能是上一条还在接力的标题，见 `WindowTitleHold`；
+     * 锁定、待确认、已省略、失败一律为 nil。判断是异步的，所以这里是存储属性 ——
+     * 每次采集由 `setWindowTitle` 一处算出来，界面和快照不各算一遍。
+     */
+    private(set) var reportableWindowTitle: String?
 
     /// 规则或判断结论变了，重采一次让快照跟上。
     func refreshAfterJudgment() {
@@ -222,18 +230,32 @@ final class DesktopActivityMonitor: ObservableObject {
         setWindowTitle(
             next,
             status: status,
-            reason: judge?.reason(bundleIdentifier: app.bundleIdentifier, normalizedTitle: next)
+            reason: judge?.reason(bundleIdentifier: app.bundleIdentifier, normalizedTitle: next),
+            bundleIdentifier: app.bundleIdentifier
         )
     }
 
+    /**
+     * 本机那一份和可上报那一份一起定下来。
+     *
+     * `bundleIdentifier` 是接力要用的：判断中的标题只能接同一个应用上一条放行过
+     * 的字。黑名单、缺权限这些档传不传都一样 —— 它们不是「判断中」，接力当场断。
+     */
     private func setWindowTitle(
         _ title: String?,
         status: WindowTitleStatus,
-        reason: String? = nil
+        reason: String? = nil,
+        bundleIdentifier: String? = nil
     ) {
         if windowTitle != title { windowTitle = title }
         if windowTitleStatus != status { windowTitleStatus = status }
         if windowTitleReason != reason { windowTitleReason = reason }
+        let reportable = titleHold.reportableTitle(
+            status: status,
+            bundleIdentifier: bundleIdentifier,
+            title: title
+        )
+        if reportableWindowTitle != reportable { reportableWindowTitle = reportable }
     }
 
     private func attachAccessibilityObserver(to app: NSRunningApplication) {

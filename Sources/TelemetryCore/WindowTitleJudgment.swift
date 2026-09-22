@@ -24,6 +24,24 @@ enum WindowTitleVerdict: String, Codable, Equatable, Sendable {
     case omitted
 }
 
+extension WindowTitleVerdict {
+    /**
+     * 复核列表里的先后：锁定、待确认、已省略、已公开。
+     *
+     * 按最近使用排的话，需要过目的条目会被一串早就放行的标题冲到看不见的地方。
+     * 拦下来的排最前 —— 误锁一条标题，站点上就一直缺着它；紧随其后的是等人
+     * 拍板的那些，再往后两档都已经有定论，只是留着备查。
+     */
+    var reviewOrder: Int {
+        switch self {
+        case .locked: 0
+        case .needsConfirmation: 1
+        case .omitted: 2
+        case .published: 3
+        }
+    }
+}
+
 /// 结论是谁给的。用户拍过板的那条永远压过模型。
 enum WindowTitleJudgmentSource: String, Codable, Equatable, Sendable {
     case jev
@@ -289,21 +307,146 @@ struct WindowTitleJudgmentEntry: Codable, Equatable, Sendable {
     }
 
     /**
-     * 这一档的理由，给界面用。
+     * 把标题拦下来的是哪几道题。
      *
      * 锁定说的是落盘的 `lockedBy`，待确认说的是此刻卡在两条线中间的那几道。
      * 放行和省略没有理由可说 —— 前者哪道都没越线，后者的理由就是「已省略」
      * 这三个字本身。
      */
-    var reasonText: String? {
-        let dimensions: [WindowTitleDimension]
+    var reasonDimensions: [WindowTitleDimension] {
         switch verdict {
-        case .locked: dimensions = lockedBy
+        case .locked: return lockedBy
         case .needsConfirmation:
-            dimensions = WindowTitleJudgmentThresholds.unsettledDimensions(dimensionProbabilities)
-        case .published, .omitted: return nil
+            return WindowTitleJudgmentThresholds.unsettledDimensions(dimensionProbabilities)
+        case .published, .omitted: return []
         }
+    }
+
+    /// 这一档的理由，给界面用。概率表就在同一行里，这里只报维度名。
+    var reasonText: String? {
+        let dimensions = reasonDimensions
         guard !dimensions.isEmpty else { return nil }
         return dimensions.map(\.displayName).joined(separator: "、")
+    }
+
+    /**
+     * 同一份理由带上概率，给通知用。
+     *
+     * 通知里没有那张六个数的概率表，光说「政治敏感」看不出是 0.11 还是 0.58 ——
+     * 前者随手点公开，后者得先把标题看清楚。数字必须跟着理由一起进通知。
+     */
+    var reasonDetailText: String? {
+        let dimensions = reasonDimensions
+        guard !dimensions.isEmpty else { return nil }
+        let probabilities = dimensionProbabilities
+        return dimensions.map { dimension in
+            guard let value = probabilities[dimension] else { return dimension.displayName }
+            return String(format: "%@ %.2f", dimension.displayName, value)
+        }.joined(separator: "、")
+    }
+}
+
+/// 一条窗口标题此刻停在哪一步。仪表盘、菜单栏、设置页都按它显示。
+enum WindowTitleStatus: String, Equatable, Sendable {
+    /// 没有标题：窗口没标题、应用没窗口，或者前台应用采集关着。
+    case none
+    /// 应用在标题黑名单里：从头到尾不读、不判、不报。
+    case blacklisted
+    /// 命中远端隐藏黑名单。本机照旧显示，但绝不送去 TypeSafe，也不上报。
+    case hidden
+    /// 没有辅助功能权限，读不到标题。
+    case noAccess
+    /// 免判放行名单里的应用，标题直接上报。
+    case trusted
+    case published
+    case locked
+    case needsConfirmation
+    /// 能公开但没什么可公开的：标题只是应用名或者通用占位。不报，也不打扰。
+    case omitted
+    case judging
+    /// 没配 API key，或者判断失败。按锁定处理。
+    case unavailable
+
+    var displayName: String {
+        switch self {
+        case .none: "无标题"
+        case .blacklisted: "黑名单"
+        case .hidden: "远端已隐藏"
+        case .noAccess: "缺少辅助功能权限"
+        case .trusted: "免判"
+        case .published: "已公开"
+        case .locked: "已锁定"
+        case .needsConfirmation: "待确认"
+        case .omitted: "已省略"
+        case .judging: "判断中"
+        case .unavailable: "无法判断"
+        }
+    }
+
+    /// 这一档的标题能不能进信封。界面之外别再各自判一遍。
+    var isReportable: Bool {
+        self == .published || self == .trusted
+    }
+}
+
+/**
+ * 判断中的标题接力。
+ *
+ * 切一个没判过的标签页时，新标题要等 Jev 回话才知道能不能公开；这几秒里把
+ * 上一条**已经放行过**的标题继续挂着，而不是先清空再补上 —— 站点上那行字
+ * 不会闪一下，看起来就是「换了一下」。挂出去的是站长已经放行过的那条，不是
+ * 还没判的新标题，所以这不是抢跑。
+ *
+ * 三条边界：
+ * - 只有「判断中」这一档接力。锁定、待确认、已省略、无标题、黑名单、缺权限、
+ *   无法判断都当场清空 —— 这几档说的是这条标题不该出去，而接力只是在等结论。
+ *   短暂读到空标题也会断掉接力，这是故意的：空标题配着上一条旧字才是真的错。
+ * - 应用必须还是同一个。Cmd-Tab 走到别的应用时，旧标题配新应用名就成了假消息。
+ * - 最长 `maximumDuration`。429 退避能让「判断中」挂上好几分钟，那时候站点上
+ *   这条标题已经和屏幕差得太远。到点清空，宁可空着。
+ *
+ * 过期只在有人来问的时候才生效：问它的是 AX 事件、5 秒兜底轮询和判断回调，
+ * 所以最坏情况下超时会晚一个轮询周期才被抹掉。
+ */
+struct WindowTitleHold: Equatable, Sendable {
+    private struct Held: Equatable, Sendable {
+        let bundleIdentifier: String?
+        let title: String
+    }
+
+    static let maximumDuration: TimeInterval = 20
+
+    private var held: Held?
+    private var holdingSince: Date?
+
+    /// 此刻能进信封的那一条：放行的就是它本身，判断中的可能是上一条。
+    mutating func reportableTitle(
+        status: WindowTitleStatus,
+        bundleIdentifier: String?,
+        title: String?,
+        now: Date = Date()
+    ) -> String? {
+        if status.isReportable, let title, !title.isEmpty {
+            held = Held(bundleIdentifier: bundleIdentifier, title: title)
+            holdingSince = nil
+            return title
+        }
+        guard status == .judging, let current = held,
+              current.bundleIdentifier == bundleIdentifier else {
+            clear()
+            return nil
+        }
+        let since = holdingSince ?? now
+        holdingSince = since
+        guard now.timeIntervalSince(since) < Self.maximumDuration else {
+            clear()
+            return nil
+        }
+        return current.title
+    }
+
+    mutating func clear() {
+        held = nil
+        holdingSince = nil
     }
 }

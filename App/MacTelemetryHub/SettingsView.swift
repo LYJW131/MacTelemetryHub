@@ -578,7 +578,7 @@ struct SettingsView: View {
                     .font(.caption)
                     .foregroundStyle(.secondary)
             } else {
-                ForEach(judge.cache.entries.reversed(), id: \.key) { entry in
+                ForEach(judge.cache.entriesByReviewOrder, id: \.key) { entry in
                     windowTitleRow(entry) {
                         Menu("改档") {
                             Button("公开") { judge.decide(key: entry.key, verdict: .published) }

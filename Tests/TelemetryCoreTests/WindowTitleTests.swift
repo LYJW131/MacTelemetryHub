@@ -489,6 +489,62 @@ struct WindowTitleJudgmentCacheTests {
         )
     }
 
+    /// 通知里那行理由自带概率：光说维度名看不出是随手放行还是得先看清标题。
+    @Test func notificationReasonCarriesTheProbabilities() {
+        let pending = entry(
+            title: "Interview notes.txt",
+            verdict: .needsConfirmation,
+            probabilities: [
+                "exposesSecret": 0.03,
+                "exposesPrivateMatter": 0.13,
+                "exposesConfidentialWork": 0.07,
+                "isAdultContent": 0.01,
+                "isPoliticallySensitive": 0.22,
+                "isInformative": 0.97,
+            ]
+        )
+        // 顺序跟着 allCases，和设置页那行概率对得上
+        #expect(pending.reasonDetailText == "私人事务 0.13、政治敏感 0.22")
+        // 锁定的理由是落盘的 lockedBy，数字照样带上
+        let locked = entry(
+            title: "secret",
+            verdict: .locked,
+            probabilities: [
+                "exposesSecret": 0.81,
+                "exposesPrivateMatter": 0.05,
+                "exposesConfidentialWork": 0.07,
+                "isAdultContent": 0.01,
+                "isPoliticallySensitive": 0.04,
+                "isInformative": 0.97,
+            ],
+            lockedBy: [.exposesSecret]
+        )
+        #expect(locked.reasonDetailText == "密钥凭据 0.81")
+        #expect(entry(title: "A").reasonDetailText == nil)
+        #expect(entry(title: "Claude", verdict: .omitted).reasonDetailText == nil)
+        // 用户拍板那条没有概率：退回只报维度名，不印 0.00
+        #expect(
+            entry(title: "B", verdict: .locked, source: .user, probabilities: [:], lockedBy: [.isAdultContent])
+                .reasonDetailText == "成人内容"
+        )
+    }
+
+    /// 列表按四档排：锁定、待确认、已省略、已公开；同一档里新的在前。
+    @Test func reviewOrderPutsTheOnesNeedingAnEyeFirst() {
+        let cache = WindowTitleJudgmentCache(entries: [
+            entry(title: "老放行", at: 0),
+            entry(title: "锁定", verdict: .locked, lockedBy: [.isPoliticallySensitive], at: 10),
+            entry(title: "省略", verdict: .omitted, at: 20),
+            entry(title: "新放行", at: 30),
+            entry(title: "待确认", verdict: .needsConfirmation, at: 40),
+        ])
+        #expect(
+            cache.entriesByReviewOrder.map(\.title) == ["锁定", "待确认", "省略", "新放行", "老放行"]
+        )
+        // 淘汰还得看 LRU 那份，排序没把它换掉
+        #expect(cache.entries.map(\.title) == ["老放行", "锁定", "省略", "新放行", "待确认"])
+    }
+
     @Test func rejectsForeignFormatInsteadOfCrashing() {
         #expect(WindowTitleJudgmentCache.decoded(from: Data("not json".utf8)).entries.isEmpty)
         // 版本号对不上就整份丢掉重判，不做迁移
@@ -773,6 +829,118 @@ struct JevWindowTitleQuestionTests {
                 apiKey: "   "
             )
         }
+    }
+}
+
+/**
+ * 判断中的标题接力。
+ *
+ * 钉住的是三条边界：只接「判断中」、只接同一个应用、最长 20 秒。三条里任意一条
+ * 松掉，站点上就会挂着一条不该出去或者早就过时的标题。
+ */
+struct WindowTitleHoldTests {
+    private let t0 = Date(timeIntervalSince1970: 1_700_000_000)
+    private let chrome = "com.google.Chrome"
+
+    @Test func judgingKeepsThePreviousPublishedTitle() {
+        var hold = WindowTitleHold()
+        #expect(
+            hold.reportableTitle(
+                status: .published, bundleIdentifier: chrome, title: "上一个标签页", now: t0
+            ) == "上一个标签页"
+        )
+        // 切到没判过的标签页：新标题在判，旧标题继续挂着
+        #expect(
+            hold.reportableTitle(
+                status: .judging, bundleIdentifier: chrome, title: "新标签页", now: t0.addingTimeInterval(1)
+            ) == "上一个标签页"
+        )
+        // 判完放行，直接换成新的
+        #expect(
+            hold.reportableTitle(
+                status: .published, bundleIdentifier: chrome, title: "新标签页", now: t0.addingTimeInterval(2)
+            ) == "新标签页"
+        )
+    }
+
+    /// 判断中之外的每一档都当场断掉接力，空标题也算。
+    @Test func everyOtherStatusDropsTheHold() {
+        for status in [
+            WindowTitleStatus.locked, .needsConfirmation, .omitted, .none,
+            .blacklisted, .hidden, .noAccess, .unavailable,
+        ] {
+            var hold = WindowTitleHold()
+            _ = hold.reportableTitle(
+                status: .published, bundleIdentifier: chrome, title: "放行过的", now: t0
+            )
+            #expect(
+                hold.reportableTitle(
+                    status: status, bundleIdentifier: chrome, title: nil, now: t0.addingTimeInterval(1)
+                ) == nil
+            )
+            // 断了就不会在下一次判断中又冒出来
+            #expect(
+                hold.reportableTitle(
+                    status: .judging, bundleIdentifier: chrome, title: "新的", now: t0.addingTimeInterval(2)
+                ) == nil
+            )
+        }
+    }
+
+    /// 换应用不接：旧标题配新应用名就是假消息。
+    @Test func holdDoesNotCrossApplications() {
+        var hold = WindowTitleHold()
+        _ = hold.reportableTitle(
+            status: .published, bundleIdentifier: chrome, title: "Chrome 那条", now: t0
+        )
+        #expect(
+            hold.reportableTitle(
+                status: .judging,
+                bundleIdentifier: "com.apple.dt.Xcode",
+                title: "Xcode 那条",
+                now: t0.addingTimeInterval(1)
+            ) == nil
+        )
+    }
+
+    /// 接力有上限：429 退避能把「判断中」挂上几分钟，到点就得空着。
+    @Test func holdExpires() {
+        var hold = WindowTitleHold()
+        _ = hold.reportableTitle(status: .published, bundleIdentifier: chrome, title: "旧的", now: t0)
+        // 计时从接力开始算，不是从放行那一刻算：先放着不动很久也不该吃掉配额
+        let idle = t0.addingTimeInterval(600)
+        #expect(
+            hold.reportableTitle(status: .judging, bundleIdentifier: chrome, title: "新的", now: idle) == "旧的"
+        )
+        #expect(
+            hold.reportableTitle(
+                status: .judging,
+                bundleIdentifier: chrome,
+                title: "新的",
+                now: idle.addingTimeInterval(WindowTitleHold.maximumDuration - 1)
+            ) == "旧的"
+        )
+        #expect(
+            hold.reportableTitle(
+                status: .judging,
+                bundleIdentifier: chrome,
+                title: "新的",
+                now: idle.addingTimeInterval(WindowTitleHold.maximumDuration)
+            ) == nil
+        )
+    }
+
+    /// 免判放行的标题一样能当接力的底；判断中不会把它顶掉。
+    @Test func trustedTitlesAlsoCountAsPublished() {
+        var hold = WindowTitleHold()
+        #expect(
+            hold.reportableTitle(status: .trusted, bundleIdentifier: chrome, title: "免判的", now: t0) == "免判的"
+        )
+        #expect(
+            hold.reportableTitle(
+                status: .judging, bundleIdentifier: chrome, title: "新的", now: t0.addingTimeInterval(1)
+            ) == "免判的"
+        )
     }
 }
 
