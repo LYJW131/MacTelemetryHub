@@ -83,8 +83,8 @@ public actor CodingUsageEngine {
         return (CodingUsageSnapshot(usage: saved.usage, now: current, year: saved.year), errors)
     }
 
-    public func snapshot(at now: Date = Date()) throws -> CodingUsageSnapshot {
-        try CodingUsageLedger(url: ledgerURL).snapshot(at: now)
+    public func snapshot(omitting: Set<String> = [], at now: Date = Date()) throws -> CodingUsageSnapshot {
+        try CodingUsageLedger(url: ledgerURL).snapshot(at: now, omitting: omitting)
     }
 
     private static func value(of task: Task<CodingUsageSnapshot, Error>) async throws -> CodingUsageSnapshot {
