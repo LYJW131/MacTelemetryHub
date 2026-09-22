@@ -616,7 +616,7 @@ struct SettingsView: View {
                 .foregroundStyle(.secondary)
                 .lineLimit(2)
             if let probabilities = windowTitleProbabilityDetail(entry) {
-                Text(probabilities)
+                probabilities
                     .font(.caption2.monospacedDigit())
                     .foregroundStyle(.tertiary)
                     .lineLimit(2)
@@ -640,17 +640,27 @@ struct SettingsView: View {
     }
 
     /**
-     * 六个概率排成一行。
+     * 六个概率排成一行，越线的那几个加重点。
      *
      * 全列出来而不是只列越线的那几个：调题面时要看的正是那些没越线的数
-     * 离线有多远，只印理由的话这张表就没法对账。
+     * 离线有多远，只印理由的话这张表就没法对账。但一行六个灰字扫一眼分不出
+     * 是哪道题把标题拦下来的，所以越过锁定线的标红、卡在灰区的标橙、信息量
+     * 没到线的加深，其余照旧淡显。
      */
-    private func windowTitleProbabilityDetail(_ entry: WindowTitleJudgmentEntry) -> String? {
-        let parts = WindowTitleDimension.allCases.compactMap { dimension -> String? in
-            guard let probability = entry.probabilities[dimension.rawValue] else { return nil }
-            return String(format: "%@ %.2f", dimension.displayName, probability)
+    private func windowTitleProbabilityDetail(_ entry: WindowTitleJudgmentEntry) -> Text? {
+        let probabilities = entry.dimensionProbabilities
+        let pieces = WindowTitleDimension.allCases.compactMap { dimension -> Text? in
+            guard let probability = probabilities[dimension] else { return nil }
+            let label = Text(String(format: "%@ %.2f", dimension.displayName, probability))
+            switch WindowTitleJudgmentThresholds.emphasis(for: dimension, in: probabilities) {
+            case .locking: return label.fontWeight(.semibold).foregroundStyle(.red)
+            case .unsettled: return label.fontWeight(.semibold).foregroundStyle(.orange)
+            case .uninformative: return label.fontWeight(.semibold).foregroundStyle(.secondary)
+            case .none: return label
+            }
         }
-        return parts.isEmpty ? nil : parts.joined(separator: " · ")
+        guard let first = pieces.first else { return nil }
+        return pieces.dropFirst().reduce(first) { $0 + Text(" · ") + $1 }
     }
 
     /// 「已锁定 · 政治敏感」。待确认的理由是此刻卡在两条线中间的那几道。

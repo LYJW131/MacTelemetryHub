@@ -189,6 +189,26 @@ enum WindowTitleJudgmentThresholds {
         }
     }
 
+    /**
+     * 这一维在这份概率里扮演的角色，给界面加重点用。
+     *
+     * 六个数排成一行时，落在线内的那几个和其它的长得一样，扫一眼分不出是
+     * 哪道题把标题拦下来的。规则和 `judge` 同一套：风险题越过锁定线是
+     * `locking`，卡在两线之间是 `unsettled`，信息量没到线是 `uninformative`。
+     */
+    static func emphasis(
+        for dimension: WindowTitleDimension,
+        in probabilities: [WindowTitleDimension: Double]
+    ) -> WindowTitleDimensionEmphasis {
+        guard let value = probabilities[dimension] else { return .none }
+        if dimension.isRisk {
+            if value >= riskLockMinimum { return .locking }
+            if value > riskClearMaximum { return .unsettled }
+            return .none
+        }
+        return value < informativeMinimum ? .uninformative : .none
+    }
+
     static func judge(
         _ probabilities: [WindowTitleDimension: Double]
     ) -> (verdict: WindowTitleVerdict, lockedBy: [WindowTitleDimension]) {
@@ -198,6 +218,18 @@ enum WindowTitleJudgmentThresholds {
         if unsettledDimensions(probabilities).isEmpty { return (.published, []) }
         return (.needsConfirmation, [])
     }
+}
+
+/// 一个维度在一行概率里该不该被标出来，以及为什么。见 `WindowTitleJudgmentThresholds.emphasis`。
+public enum WindowTitleDimensionEmphasis: Equatable, Sendable {
+    /// 没越任何线，照常淡显。
+    case none
+    /// 风险题卡在放行线和锁定线之间，是「待确认」的由头。
+    case unsettled
+    /// 风险题越过锁定线，是「已锁定」的由头。
+    case locking
+    /// 信息量没到线，是「已省略」的由头。
+    case uninformative
 }
 
 /**

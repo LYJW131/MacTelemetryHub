@@ -87,6 +87,20 @@ struct WindowTitleThresholdTests {
         ]
     }
 
+    @Test func emphasisMarksOnlyTheDimensionsThatCrossedALine() {
+        // 实测：Claude Status - Incident History - Google Chrome，只有工作机密 0.20 卡在灰区
+        let grey = probabilities(secret: 0.03, privateMatter: 0.04, work: 0.20, adult: 0.01, political: 0.04, informative: 0.96)
+        #expect(WindowTitleJudgmentThresholds.emphasis(for: .exposesConfidentialWork, in: grey) == .unsettled)
+        #expect(WindowTitleJudgmentThresholds.emphasis(for: .exposesSecret, in: grey) == .none)
+        #expect(WindowTitleJudgmentThresholds.emphasis(for: .isInformative, in: grey) == .none)
+
+        // 锁定线以上标 locking；信息量没到线标 uninformative；缺答案不标
+        let locked = probabilities(political: 0.98, informative: 0.3)
+        #expect(WindowTitleJudgmentThresholds.emphasis(for: .isPoliticallySensitive, in: locked) == .locking)
+        #expect(WindowTitleJudgmentThresholds.emphasis(for: .isInformative, in: locked) == .uninformative)
+        #expect(WindowTitleJudgmentThresholds.emphasis(for: .exposesSecret, in: [:]) == .none)
+    }
+
     @Test func cleanAndInformativeIsPublished() {
         // 实测：ReportDecision.swift — MacTelemetryHub（Xcode）
         let judged = WindowTitleJudgmentThresholds.judge(
