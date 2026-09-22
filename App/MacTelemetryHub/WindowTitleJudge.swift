@@ -487,10 +487,10 @@ final class WindowTitleJudge: ObservableObject {
         guard notificationAuthorizationGranted else { return }
 
         let content = UNMutableNotificationContent()
-        content.title = "窗口标题待确认"
-        content.subtitle = applicationName
-        // 正文还是那条标题，末尾补一句去处：只有「公开」是按钮，别的都靠关闭。
-        content.body = "\(title)\n关闭这条通知即锁定。"
+        // 标题一行把应用名和要办的事说完，正文就只剩那条窗口标题本身 ——
+        // 通知里唯一需要读的就是它，副标题和「关闭即锁定」那句都在挤它的地方。
+        content.title = "\(applicationName) 窗口标题公开确认"
+        content.body = title
         content.categoryIdentifier = WindowTitleNotification.categoryIdentifier
         content.userInfo = ["cacheKey": key]
         // 通知 ID 用键的哈希：键里有换行、还可能有两百个字符，直接当标识符不稳。

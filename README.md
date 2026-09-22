@@ -349,8 +349,9 @@ pause land in 320–490 ms, application switches in 560–620 ms.
      reported, no notification, but listed in **设置 › 窗口标题** where it can
      be published by hand); all five risks `≤ 0.10` publishes; anything left — a
      title the model is genuinely unsure about — raises a user notification
-     carrying the app name and the title, and the UI names the dimensions that
-     are still in the middle band. The notification has exactly one
+     titled *<app> 窗口标题公开确认* whose body is the title itself, and the UI
+     names the dimensions that are still in the middle band. The notification
+     has exactly one
      action, 公开: macOS folds two or more actions into an 选项 submenu, so a
      second button would cost two clicks. Closing the notification
      (X / Clear / Clear All) locks the title instead, but only while that title is still pending, so
