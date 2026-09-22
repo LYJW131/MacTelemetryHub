@@ -150,7 +150,7 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 			shellPath = /bin/sh;
-			shellScript = "set -euo pipefail\nCONFIG=debug\nif [ \"${CONFIGURATION}\" = \"Release\" ]; then CONFIG=release; fi\nBUILD_PATH=\"${SRCROOT}/.build/hook-cli\"\nswift build --product claude-activity-hook -c \"$CONFIG\" --package-path \"${SRCROOT}\" --build-path \"$BUILD_PATH\"\nBIN=\"$BUILD_PATH/out/Products/${CONFIGURATION}/claude-activity-hook\"\nDEST=\"${TARGET_BUILD_DIR}/${CONTENTS_FOLDER_PATH}/MacOS/claude-activity-hook\"\nmkdir -p \"${DEST%/*}\"\ncp \"$BIN\" \"$DEST\"\nchmod 755 \"$DEST\"\nif [ -n \"${EXPANDED_CODE_SIGN_IDENTITY:-}\" ] && [ \"${EXPANDED_CODE_SIGN_IDENTITY}\" != \"-\" ]; then\n  codesign --force --sign \"${EXPANDED_CODE_SIGN_IDENTITY}\" --timestamp=none \"$DEST\"\nfi\n";
+			shellScript = "set -euo pipefail\nCONFIG=debug\nif [ \"${CONFIGURATION}\" = \"Release\" ]; then CONFIG=release; fi\nBUILD_PATH=\"${SRCROOT}/.build/hook-cli\"\nswift build --product claude-activity-hook -c \"$CONFIG\" --package-path \"${SRCROOT}\" --build-path \"$BUILD_PATH\"\nBIN_DIR=`swift build --product claude-activity-hook -c \"$CONFIG\" --package-path \"${SRCROOT}\" --build-path \"$BUILD_PATH\" --show-bin-path`\nBIN=\"$BIN_DIR/claude-activity-hook\"\ntest -x \"$BIN\"\nDEST=\"${TARGET_BUILD_DIR}/${CONTENTS_FOLDER_PATH}/MacOS/claude-activity-hook\"\nmkdir -p \"${DEST%/*}\"\ncp \"$BIN\" \"$DEST\"\nchmod 755 \"$DEST\"\nif [ -n \"${EXPANDED_CODE_SIGN_IDENTITY:-}\" ] && [ \"${EXPANDED_CODE_SIGN_IDENTITY}\" != \"-\" ]; then\n  codesign --force --sign \"${EXPANDED_CODE_SIGN_IDENTITY}\" --timestamp=none \"$DEST\"\nfi\n";
 		};
 /* End PBXShellScriptBuildPhase section */
 
