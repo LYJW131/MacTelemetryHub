@@ -123,9 +123,13 @@ public struct CodingUsageLedger: Sendable {
         }
     }
 
-    public func snapshot(at now: Date = Date(), agents specs: [CodingUsageAgentSpec] = CodingUsageAgentSpec.defaults) throws -> CodingUsageSnapshot {
+    public func snapshot(
+        at now: Date = Date(),
+        agents specs: [CodingUsageAgentSpec] = CodingUsageAgentSpec.defaults,
+        omitting omittedSourceIDs: Set<String> = []
+    ) throws -> CodingUsageSnapshot {
         var allSpecs = specs
-        for id in disk.selectedAccounts.keys.sorted() where !allSpecs.contains(where: { $0.id == id }) {
+        for id in disk.selectedAccounts.keys.sorted() where !allSpecs.contains(where: { $0.id == id }) && !omittedSourceIDs.contains(id) {
             allSpecs.append(CodingUsageAgentSpec(id: id, label: id, icon: id))
         }
         let today = CodingUsageDates.day(now)
@@ -137,7 +141,7 @@ public struct CodingUsageLedger: Sendable {
         var agentPayloads: [CodingUsageAgentPayload] = []
         var nowPayloads: [CodingUsageNowAgentPayload] = []
         var lastCollection: String?
-        for spec in allSpecs {
+        for spec in allSpecs where !omittedSourceIDs.contains(spec.id) {
             let source = state(for: spec.id)
             var models: [String: Int64] = [:]
             // A reproducible order matters for floating-point cost sums and change detection.
@@ -223,7 +227,8 @@ public struct CodingUsageLedger: Sendable {
         }
         return CodingUsageSnapshot(
             usage: CodingUsagePayload(agents: agentPayloads, totals: totals, topModels: Array(Self.ranked(allModels).prefix(3)),
-                                      collectedAt: lastCollection ?? CodingUsageDates.instant(now)),
+                                      collectedAt: lastCollection ?? CodingUsageDates.instant(now),
+                                      omittedSources: omittedSourceIDs.sorted()),
             now: CodingUsageNowPayload(agents: nowPayloads),
             year: CodingUsageYearPayload(origin: CodingUsageDates.day(origin), days: yearDays, models: yearModels, mix: mix)
         )

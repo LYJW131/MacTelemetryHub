@@ -213,6 +213,9 @@ public struct CodingUsagePayload: Codable, Equatable, Sendable {
     public let totals: CodingUsageTotalsPayload
     public let topModels: [CodingUsageModelPayload]
     public let collectedAt: String
+    /// Sources left out of `totals`, `agents`, and the year window. Empty means this
+    /// build included every source it knows. Older builds omit the field entirely.
+    public var omittedSources: [String] = []
 }
 public struct CodingUsageNowAgentPayload: Codable, Equatable, Sendable {
     public let id: String

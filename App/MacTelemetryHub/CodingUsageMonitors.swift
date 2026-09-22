@@ -4,6 +4,9 @@ import CodingUsageKit
 
 private let usageEngine = CodingUsageEngine(ledgerURL: CodingUsageEngine.defaultLedgerURL)
 
+/// Cursor 的云端历史由常驻的 agent-limits-reporter 上报。这里再拉一遍，Mac 合盖时站点就停更。
+private let cursorOwnedElsewhere: Set<String> = ["cursor"]
+
 /// Monitoring only schedules work and publishes display payloads. Collection lives in CodingUsageKit.
 @MainActor
 class CodingUsageMonitor: ObservableObject {
@@ -94,7 +97,11 @@ final class VibeCodingUsageMonitor: CodingUsageMonitor {
     @discardableResult
     func refreshNow(ccusageCLIPath: String) async -> Bool {
         await refresh {
-            let snapshot = try await usageEngine.refresh(executableURL: URL(fileURLWithPath: ccusageCLIPath))
+            let snapshot = try await usageEngine.refresh(
+                executableURL: URL(fileURLWithPath: ccusageCLIPath),
+                includeCursor: false,
+                omitting: cursorOwnedElsewhere
+            )
             let errors = snapshot.usage.agents.compactMap { agent in
                 agent.usageStatus.error.map { "\(agent.label)：\($0)" }
             }
@@ -141,6 +148,6 @@ final class VibeCodingYearMonitor: CodingUsageMonitor {
 
     @discardableResult
     func refreshNow() async -> Bool {
-        await refresh { (try await usageEngine.snapshot().year, nil) }
+        await refresh { (try await usageEngine.snapshot(omitting: cursorOwnedElsewhere).year, nil) }
     }
 }

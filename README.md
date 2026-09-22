@@ -144,25 +144,25 @@ Every module is sent only when its own display content changes.
 
 采集实现位于 `Sources/CodingUsageKit/`，App 只负责调度和显示状态。应用无需运行
 TokenTracker，也不连接它的 HTTP 面板，不读取或导入它的 queue、缓存和汇总文件。
-首次历史重建只使用本机仍存在的原始数据与 Cursor 云端目前可返回的记录。
+首次历史重建只使用本机仍存在的原始数据。Cursor 云端记录不在这次重建里。
 
 | 来源 | 用量历史 | 会话与此刻状态 |
 | --- | --- | --- |
 | Claude、Codex、Grok、Antigravity | 固定版本的 `ccusage` 读取本机原始日志或数据库；Antigravity 使用其本地 SQLite 用量记录 | `ccusage <source> session` 的本机会话元数据 |
 | 其他被 `ccusage` 发现且支持的来源 | 同样读取本机原始历史，动态纳入按来源统计 | 同样读取本机会话元数据 |
-| Cursor | 独立 Swift reader 分页读取 Cursor 账号云端历史 | 当前没有本机会话适配器，不把云端历史冒充正在使用状态 |
+| Cursor | 不采集。云端历史由 agent-limits-reporter 用它自己的登录态上报；本机快照把 `cursor` 放进 `omittedSources`，合计和年度图都不含它 | 当前没有本机会话适配器，不把云端历史冒充正在使用状态 |
 
 本地采集先通过 `ccusage daily --by-agent --json --offline` 发现来源，再按来源读取
 `daily` 和 `session`。所有日桶统一为 `Asia/Shanghai`，命令不传 `--since` 或 `--until`，
 不把“今日”或“近一年”当成累计用量的历史范围。年度图是完整账本的一个窗口。
 活动天数按所有来源中 token 大于零的日期取并集；会话数只统计实际读到且去重的本机会话。
 
-Cursor 的 `state.vscdb` 只提供本机登录态；历史来自
-`POST https://cursor.com/api/dashboard/get-filtered-usage-events`。采集器固定本次查询的
-起止时刻，从 epoch 起请求所有可见记录，核对每一页的服务端总数。缺页、总数变化、
-异常格式、重复整页、鉴权失败或分页上限均会报错，不能作为完整历史写入。
-没有稳定事件 ID 时，只剔除服务端总数能够证明重复的相邻页边界记录。
-账号只保留基于身份的哈希，重新登录换 token 不会生成新账号；切换账号则隔离历史。
+Cursor 云端历史不再由这台 Mac 拉取。`state.vscdb` 里的登录态和
+`POST https://cursor.com/api/dashboard/get-filtered-usage-events` 那套分页还在
+`CursorUsage.swift`，诊断命令 `collect` 默认仍会用本机登录态拉一次；App 的定时采集
+传 `includeCursor: false`，快照 `omitting: ["cursor"]`。旧账本里已经收下的 Cursor
+日子留在盘上，但不会再进上报的合计和年度图。装这版 App 之前，Worker 和
+agent-limits-reporter 得先认 `omittedSources` 和 `cursorUsage`，否则 Cursor 会从总数里消失。
 
 用量账本默认位于
 `~/Library/Application Support/MacTelemetryHub/CodingUsage/history.json`，按来源、账号和日期

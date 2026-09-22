@@ -22,7 +22,7 @@ public actor CodingUsageEngine {
 
     public func refresh(
         executableURL: URL, environment: [String: String] = [:], offline: Bool = false,
-        includeCursor: Bool = true, at now: Date = Date()
+        includeCursor: Bool = true, omitting: Set<String> = [], at now: Date = Date()
     ) async throws -> CodingUsageSnapshot {
         if let inFlight, !inFlight.task.isCancelled { return try await Self.value(of: inFlight.task) }
         let ledgerURL = self.ledgerURL
@@ -33,8 +33,13 @@ public actor CodingUsageEngine {
             let collector = CcusageCollector(executableURL: executableURL, environment: environment,
                                             sourceIDs: knownSources, offline: offline)
             async let local = collector.collect(at: now)
-            async let cloud = Self.collectCursor(home: home, enabled: includeCursor, at: now)
-            let results = await local + [cloud]
+            let results: [CodingUsageSourceResult]
+            if includeCursor {
+                async let cloud = Self.collectCursor(home: home, enabled: true, at: now)
+                results = await local + [cloud]
+            } else {
+                results = await local
+            }
             try Task.checkCancellation()
             var ledger = try CodingUsageLedger(url: ledgerURL)
             for result in results {
@@ -45,7 +50,7 @@ public actor CodingUsageEngine {
                     try ledger.recordFailure(sourceID: sourceID, error: message, unavailable: unavailable)
                 }
             }
-            return try ledger.snapshot(at: now)
+            return try ledger.snapshot(at: now, omitting: omitting)
         }
         let id = UUID()
         inFlight = (id, task)
