@@ -153,7 +153,11 @@ TokenTracker，也不连接它的 HTTP 面板，不读取或导入它的 queue�
 | 其他被 `ccusage` 发现且支持的来源 | 同样读取本机原始历史，动态纳入按来源统计 | 同上，最多 5 分钟一次 |
 | Cursor | 不采集。云端历史由 agent-limits-reporter 用它自己的登录态上报；本机快照把 `cursor` 放进 `omittedSources`，合计和年度图都不含它 | 当前没有本机会话适配器，不把云端历史冒充正在使用状态 |
 
-本地采集先通过 `ccusage daily --by-agent --json --offline` 发现来源，再按来源读取
+用量历史分两档刷新：卡片上只有 Claude Code 要看当天的实时用量，所以「Claude 今日用量刷新」
+（默认 10 分钟）每轮只读 Claude；「全部来源与热力图刷新」（默认 1 小时）读全部来源，跑完立刻重算
+年度热力图。两次完整采集之间，其余来源在账本里原样保留（日桶、状态、采集时刻都不动）。手动刷新总是完整的。
+
+完整采集先通过 `ccusage daily --by-agent --json --offline` 发现来源，再按来源读取
 `daily` 和 `session`。`pi` 的默认目录只有 `~/.pi/agent/sessions`，全来源发现也不接受
 `--pi-path`，所以看不到 `~/.omp/agent/sessions`。omp 会话目录里有 jsonl 且 ccusage 提供
 `pi` 时，采集会把 `pi` 加进来。`pi` 的 `daily` 和 `session` 传 `--pi-path`，同时包含

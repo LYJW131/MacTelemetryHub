@@ -10,7 +10,8 @@ public actor CodingUsageEngine {
     public static let ccusageSessionInterval: TimeInterval = 300
     private var lastCcusageSessions: Date?
     private var ccusageSessionErrors: [String] = []
-    private var inFlight: (id: UUID, task: Task<CodingUsageSnapshot, Error>)?
+    /// `only` 为 nil 是完整刷新；完整那一轮也覆盖只刷几家的请求，反过来不行
+    private var inFlight: (id: UUID, only: Set<String>?, task: Task<CodingUsageSnapshot, Error>)?
 
     public init(ledgerURL: URL, home: URL = FileManager.default.homeDirectoryForCurrentUser) {
         self.ledgerURL = ledgerURL
@@ -25,11 +26,19 @@ public actor CodingUsageEngine {
             .appendingPathComponent("MacTelemetryHub/CodingUsage/history.json")
     }
 
+    /**
+     * 刷新用量账本并出快照。`only` 限定这一轮只采哪几家，其余来源在账本里原样留着
+     * （日桶、状态、采集时刻都不动）；nil 是全部来源的完整刷新。
+     */
     public func refresh(
         executableURL: URL, environment: [String: String] = [:], offline: Bool = false,
-        includeCursor: Bool = true, omitting: Set<String> = [], at now: Date = Date()
+        includeCursor: Bool = true, omitting: Set<String> = [], only: Set<String>? = nil, at now: Date = Date()
     ) async throws -> CodingUsageSnapshot {
-        if let inFlight, !inFlight.task.isCancelled { return try await Self.value(of: inFlight.task) }
+        if let inFlight, !inFlight.task.isCancelled {
+            if inFlight.only == nil || inFlight.only == only { return try await Self.value(of: inFlight.task) }
+            // 正在跑的只刷了几家，这次要的更多：等它跑完再开自己那一轮
+            _ = try? await Self.value(of: inFlight.task)
+        }
         let ledgerURL = self.ledgerURL
         let home = self.home
         let task = Task {
@@ -37,9 +46,9 @@ public actor CodingUsageEngine {
                 .filter { $0 != "cursor" }
             let collector = CcusageCollector(executableURL: executableURL, environment: environment,
                                             sourceIDs: knownSources, offline: offline)
-            async let local = collector.collect(at: now)
+            async let local = collector.collect(at: now, only: only)
             let results: [CodingUsageSourceResult]
-            if includeCursor {
+            if includeCursor, only?.contains("cursor") ?? true {
                 async let cloud = Self.collectCursor(home: home, enabled: true, at: now)
                 results = await local + [cloud]
             } else {
@@ -58,7 +67,7 @@ public actor CodingUsageEngine {
             return try ledger.snapshot(at: now, omitting: omitting)
         }
         let id = UUID()
-        inFlight = (id, task)
+        inFlight = (id, only, task)
         defer { if inFlight?.id == id { inFlight = nil } }
         return try await Self.value(of: task)
     }

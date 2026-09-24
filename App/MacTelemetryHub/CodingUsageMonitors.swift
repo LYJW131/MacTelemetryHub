@@ -88,25 +88,45 @@ class CodingUsageMonitor: ObservableObject {
     }
 }
 
+/**
+ * 两档节奏：卡片上只有 Claude Code 要看当天的实时用量，所以每轮（`interval`，默认 10 分钟）
+ * 只刷 Claude；所有来源的完整采集给年度热力图和累计用，按 `fullInterval`（默认 1 小时）
+ * 跑一次。其余来源在两次完整采集之间原样留在账本里。手动刷新总是完整的。
+ */
 @MainActor
 final class VibeCodingUsageMonitor: CodingUsageMonitor {
-    func refreshIfNeeded(ccusageCLIPath: String, interval: Double) async {
-        if isDue(interval) { _ = await refreshNow(ccusageCLIPath: ccusageCLIPath) }
+    static let everyRoundSources: Set<String> = ["claude"]
+    private var lastFullRefresh: Date?
+
+    override func invalidateSchedule() {
+        super.invalidateSchedule()
+        lastFullRefresh = nil
+    }
+
+    /// 返回这一轮是不是成功的完整采集：是的话年度热力图该跟着重算
+    @discardableResult
+    func refreshIfNeeded(ccusageCLIPath: String, interval: Double, fullInterval: Double) async -> Bool {
+        guard isDue(interval) else { return false }
+        let full = lastFullRefresh.map { Date().timeIntervalSince($0) >= fullInterval } ?? true
+        return await refreshNow(ccusageCLIPath: ccusageCLIPath, full: full) && full
     }
 
     @discardableResult
-    func refreshNow(ccusageCLIPath: String) async -> Bool {
-        await refresh {
+    func refreshNow(ccusageCLIPath: String, full: Bool = true) async -> Bool {
+        let succeeded = await refresh {
             let snapshot = try await usageEngine.refresh(
                 executableURL: URL(fileURLWithPath: ccusageCLIPath),
                 includeCursor: false,
-                omitting: cursorOwnedElsewhere
+                omitting: cursorOwnedElsewhere,
+                only: full ? nil : Self.everyRoundSources
             )
             let errors = snapshot.usage.agents.compactMap { agent in
                 agent.usageStatus.error.map { "\(agent.label)：\($0)" }
             }
             return (snapshot.usage, errors.isEmpty ? nil : errors.joined(separator: "；"))
         }
+        if succeeded && full { lastFullRefresh = Date() }
+        return succeeded
     }
 }
 

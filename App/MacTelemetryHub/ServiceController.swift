@@ -750,14 +750,20 @@ final class ServiceController: ObservableObject {
         vibeCodingCollectionTask = Task { [weak self] in
             while !Task.isCancelled {
                 guard let self, settings.vibeCodingModuleEnabled else { return }
-                // 先刷新持久账本，再从同一份数据生成年度图。
-                await self.vibeCodingUsageCollector.refreshIfNeeded(
+                // 先刷新持久账本，再从同一份数据生成年度图：完整采集一跑完就重算，
+                // 不必再等年度图自己的间隔
+                let fullRound = await self.vibeCodingUsageCollector.refreshIfNeeded(
                     ccusageCLIPath: settings.ccusageCLIPath,
-                    interval: settings.vibeCodingUsageRefreshInterval
+                    interval: settings.vibeCodingUsageRefreshInterval,
+                    fullInterval: settings.vibeCodingYearRefreshInterval
                 )
-                await self.vibeCodingYearCollector.refreshIfNeeded(
-                    interval: settings.vibeCodingYearRefreshInterval
-                )
+                if fullRound {
+                    await self.vibeCodingYearCollector.refreshNow()
+                } else {
+                    await self.vibeCodingYearCollector.refreshIfNeeded(
+                        interval: settings.vibeCodingYearRefreshInterval
+                    )
+                }
                 try? await Task.sleep(for: Self.tickInterval)
             }
         }

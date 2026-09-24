@@ -359,8 +359,8 @@ struct SettingsView: View {
                         placeholder: "应用内置 ccusage 的绝对路径"
                     )
                     NumericField(title: "会话状态刷新", unit: "秒（最少 60）", placeholder: "60", value: $settings.codingSessionRefreshInterval)
-                    NumericField(title: "用量刷新", unit: "秒（最少 60）", placeholder: "600", value: $settings.vibeCodingUsageRefreshInterval)
-                    NumericField(title: "年度热力图刷新", unit: "秒（最少 60）", placeholder: "3600", value: $settings.vibeCodingYearRefreshInterval)
+                    NumericField(title: "Claude 今日用量刷新", unit: "秒（最少 60）", placeholder: "600", value: $settings.vibeCodingUsageRefreshInterval)
+                    NumericField(title: "全部来源与热力图刷新", unit: "秒（最少 60）", placeholder: "3600", value: $settings.vibeCodingYearRefreshInterval)
                 }
                 .padding(.top, 5)
             }

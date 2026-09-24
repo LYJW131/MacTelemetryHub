@@ -104,4 +104,43 @@ struct CcusageConcurrencyTests {
         // 发现一次、daily 一次、session 一次：后到的那条 session 命中输入未变的缓存
         #expect(operations.count == 3)
     }
+
+    @Test func limitedRefreshOnlyTouchesTheRequestedSourcesAndSkipsDiscovery() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent("ccusage-only-" + UUID().uuidString)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let executable = directory.appendingPathComponent("ccusage")
+        let script = """
+        #!\(testPython)
+        import sys,json,pathlib
+        folder=pathlib.Path(__file__).parent
+        args=sys.argv[1:]
+        if args==['--help']:
+            print('  claude    Show Claude usage'); print('  grok    Show Grok usage')
+            raise SystemExit
+        with open(folder/'operations.log','a') as log:log.write(args[0]+':'+args[1]+'\\n')
+        if args[0]=='daily':
+            print(json.dumps({'daily':[{'agents':[{'agent':'claude'},{'agent':'grok'}]}]}))
+        elif args[1]=='daily':
+            print(json.dumps({'daily':[{'date':'2026-09-05','inputTokens':3,'outputTokens':1,'cacheReadTokens':0,'cacheCreationTokens':0,'totalTokens':4,'totalCost':1,'modelBreakdowns':[{'modelName':'test','inputTokens':3,'outputTokens':1,'cacheReadTokens':0,'cacheCreationTokens':0,'cost':1}]}]}))
+        else:
+            print(json.dumps({'sessions':[]}))
+        """
+        try Data(script.utf8).write(to: executable)
+        try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: executable.path)
+        let engine = CodingUsageEngine(ledgerURL: directory.appendingPathComponent("history.json"), home: directory)
+        let first = CodingUsageDates.parseInstant("2026-09-05T04:00:00Z")!
+        _ = try await engine.refresh(executableURL: executable, includeCursor: false, at: first)
+        let log = directory.appendingPathComponent("operations.log")
+        try Data().write(to: log)
+        let later = first.addingTimeInterval(600)
+        let snapshot = try await engine.refresh(executableURL: executable, includeCursor: false,
+                                                only: ["claude"], at: later)
+        let operations = try String(contentsOf: log, encoding: .utf8).split(separator: "\n").map(String.init)
+        // 只刷 Claude：不跑全来源发现，也不碰 Grok
+        #expect(Set(operations) == ["claude:daily", "claude:session"])
+        let status = { (id: String) in snapshot.usage.agents.first { $0.id == id }?.usageStatus.collectedAt }
+        #expect(status("claude") == CodingUsageDates.instant(later))
+        #expect(status("grok") == CodingUsageDates.instant(first))
+    }
 }

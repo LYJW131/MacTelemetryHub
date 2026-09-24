@@ -61,11 +61,20 @@ public struct CcusageCollector: Sendable {
 
 
 
-    public func collect(at now: Date = Date()) async -> [CodingUsageSourceResult] {
+    /// `only` 限定这一轮只刷哪几家（比如只要 Claude 的当天用量）：不跑全来源发现，那一步要把每家都解析一遍。
+    public func collect(at now: Date = Date(), only: Set<String>? = nil) async -> [CodingUsageSourceResult] {
         let available = await availableSources()
-        let includePi = Self.includePi(available: available, home: home)
-        let (discovered, discoveryError) = await discoveredSources(useCache: true)
-        let requested = Self.sources(requested: sourceIDs, discovered: discovered, includePi: includePi)
+        let requested: [String]
+        let discoveryError: String?
+        if let only {
+            requested = only.subtracting(["cursor"]).sorted()
+            discoveryError = nil
+        } else {
+            let includePi = Self.includePi(available: available, home: home)
+            let discovery = await discoveredSources(useCache: true)
+            requested = Self.sources(requested: sourceIDs, discovered: discovery.0, includePi: includePi)
+            discoveryError = discovery.1
+        }
         return await withTaskGroup(of: CodingUsageSourceResult.self, returning: [CodingUsageSourceResult].self) { group in
             for source in requested {
                 group.addTask {
