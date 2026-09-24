@@ -49,8 +49,10 @@ struct CodingUsageLedgerTests {
         #expect(try ledger.snapshot(at: now).usage.totals.totalTokens == 40)
         try ledger.apply(report("cursor", [day("2026-09-05", 12)]))
         let cursor = try ledger.snapshot(at: now).usage.agents.first { $0.id == "cursor" }!
-        #expect(cursor.usageStatus.state == .error)
-        #expect(cursor.usageStatus.error?.contains("缩短") == true)
+        // 失败之后又采到了：回到 ok，历史变短是提醒不是错误
+        #expect(cursor.usageStatus.state == .ok)
+        #expect(cursor.usageStatus.error == nil)
+        #expect(cursor.usageStatus.warning?.contains("缩短") == true)
         #expect(try ledger.snapshot(at: now).usage.totals.totalTokens == 42)
         #expect(try ledger.snapshot(at: now).usage.totals.activeDays == 2)
     }
@@ -178,7 +180,23 @@ struct CodingUsageLedgerTests {
         let snapshot = try ledger.snapshot(at: now)
         #expect(snapshot.usage.totals.totalTokens == 30)
         #expect(snapshot.usage.agents.first { $0.id == "claude" }?.today?.totalTokens == 20)
-        #expect(snapshot.usage.agents.first { $0.id == "claude" }?.usageStatus.state == .error)
+        // 数据采到了、只是少了旧日子：状态仍是 ok，缺口进 warning，费用不再算完整
+        let status = try #require(snapshot.usage.agents.first { $0.id == "claude" }?.usageStatus)
+        #expect(status.state == .ok)
+        #expect(status.error == nil)
+        #expect(status.warning == "1 个既有活动日未返回，已保留")
+        #expect(!status.costComplete)
+    }
+    @Test func failureClearsTheWarningOfTheLastSuccessfulScan() throws {
+        let url = try location(); defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
+        var ledger = try CodingUsageLedger(url: url)
+        try ledger.apply(report("claude", [day("2026-09-04", 10), day("2026-09-05", 20)]))
+        try ledger.apply(report("claude", [day("2026-09-04", 10)]))
+        try ledger.recordFailure(sourceID: "claude", error: "ccusage claude：采集超时")
+        let status = try #require(try ledger.snapshot(at: now).usage.agents.first { $0.id == "claude" }?.usageStatus)
+        #expect(status.state == .error)
+        #expect(status.error == "ccusage claude：采集超时")
+        #expect(status.warning == nil)
     }
     @Test func successfulSparseScanRecordsOnlyNewEmptyToday() throws {
         let url = try location(); defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }

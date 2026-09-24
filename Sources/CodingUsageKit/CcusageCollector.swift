@@ -49,7 +49,9 @@ public struct CcusageCollector: Sendable {
     func commandArguments(source: String, section: String) -> [String] {
         var arguments = [source, section, "--json", "--no-color", "--timezone", "Asia/Shanghai"]
         if source != "codex" { arguments += ["--mode", "calculate"] }
-        if offline { arguments.append("--offline") }
+        // Antigravity 在线模式慢三倍：ccusage 20.0.21 实测 CPU 100 秒对离线 35 秒，算出的 token 与
+        // 费用逐行相同（它的模型名多是占位符，在线价目表也对不上）。所以这一家固定走离线价目表。
+        if offline || source == "antigravity" { arguments.append("--offline") }
         if source == "pi" { arguments += ["--pi-path", Self.piSessionPaths(home: home).joined(separator: ",")] }
         return arguments
     }
@@ -62,7 +64,7 @@ public struct CcusageCollector: Sendable {
     public func collect(at now: Date = Date()) async -> [CodingUsageSourceResult] {
         let available = await availableSources()
         let includePi = Self.includePi(available: available, home: home)
-        let (discovered, discoveryError) = await discoveredSources(useCache: false)
+        let (discovered, discoveryError) = await discoveredSources(useCache: true)
         let requested = Self.sources(requested: sourceIDs, discovered: discovered, includePi: includePi)
         return await withTaskGroup(of: CodingUsageSourceResult.self, returning: [CodingUsageSourceResult].self) { group in
             for source in requested {
@@ -130,13 +132,57 @@ public struct CcusageCollector: Sendable {
         }
     }
 
+    /// Antigravity 一次要把几百 MB 的对话库整个解析一遍（离线也要 35 秒 CPU），机器忙时会被挤到
+    /// 能效核上慢三四倍。它串行执行、没人在等，给足余量。
+    static let antigravityTimeout: TimeInterval = 300
+
+    /// ccusage 读 Antigravity 的这几个数据目录（`ANTIGRAVITY_DATA_DIR` 没设时的默认值）
+    static let antigravityRoots = [".gemini/antigravity", ".gemini/antigravity-cli", ".gemini/antigravity-ide",
+                                   ".gemini/antigravity-backup", ".config/antigravity"]
+
+    /**
+     * Antigravity 输入的指纹：各数据目录下 `conversations` 里每个文件的路径、大小、修改时间，
+     * 加上 ccusage 可执行文件本身。只 stat 不读内容，几百个文件十毫秒。
+     * 设了 `ANTIGRAVITY_DATA_DIR` 就不知道它读哪里，返回 nil，不走缓存。
+     */
+    static func antigravityFingerprint(home: URL, executableURL: URL, environment: [String: String]) -> String? {
+        let merged = ProcessInfo.processInfo.environment.merging(environment) { _, replacement in replacement }
+        if merged["ANTIGRAVITY_DATA_DIR"] != nil { return nil }
+        let manager = FileManager.default
+        let keys: [URLResourceKey] = [.fileSizeKey, .contentModificationDateKey, .isRegularFileKey]
+        func line(_ url: URL) -> String? {
+            guard let values = try? url.resourceValues(forKeys: Set(keys)), values.isRegularFile == true else { return nil }
+            let modified = values.contentModificationDate?.timeIntervalSince1970 ?? 0
+            return "\(url.path)|\(values.fileSize ?? -1)|\(modified)"
+        }
+        var lines = [line(executableURL) ?? executableURL.path]
+        for root in antigravityRoots {
+            let directory = home.appendingPathComponent(root).appendingPathComponent("conversations")
+            guard let files = manager.enumerator(at: directory, includingPropertiesForKeys: keys) else { continue }
+            for case let url as URL in files { if let entry = line(url) { lines.append(entry) } }
+        }
+        let digest = SHA256.hash(data: Data(lines.sorted().joined(separator: "\n").utf8))
+        return digest.map { String(format: "%02x", $0) }.joined()
+    }
+
     private func run(source: String, section: String) async throws -> Data {
         let arguments = commandArguments(source: source, section: section)
         if source == "antigravity" {
             let commandArguments = arguments
+            let (executableURL, environment, home) = (executableURL, environment, home)
+            let timeout = max(timeout, Self.antigravityTimeout)
+            let key = ([executableURL.path] + arguments).joined(separator: "\u{0}")
             return try await CcusageSQLiteAccess.run {
-                try await CodingUsageProcess.run(executableURL: executableURL, arguments: commandArguments,
-                                                 environment: environment, timeout: timeout)
+                // 进了闸再算：排在前面的那一轮可能刚把同一份结果放进缓存
+                let fingerprint = Self.antigravityFingerprint(home: home, executableURL: executableURL,
+                                                              environment: environment)
+                if let fingerprint, let data = await CcusageUnchangedInputCache.shared.data(for: key, fingerprint: fingerprint) {
+                    return data
+                }
+                let data = try await CodingUsageProcess.run(executableURL: executableURL, arguments: commandArguments,
+                                                            environment: environment, timeout: timeout)
+                if let fingerprint { await CcusageUnchangedInputCache.shared.store(data, for: key, fingerprint: fingerprint) }
+                return data
             }
         }
         return try await CodingUsageProcess.run(executableURL: executableURL, arguments: arguments,
@@ -166,7 +212,8 @@ public struct CcusageCollector: Sendable {
                     try await CodingUsageProcess.run(
                         executableURL: executableURL,
                         arguments: ["daily", "--by-agent", "--json", "--no-color", "--offline", "--timezone", "Asia/Shanghai"],
-                        environment: environment, timeout: timeout)
+                        // 全来源发现里也有 Antigravity 那一段
+                        environment: environment, timeout: max(timeout, Self.antigravityTimeout))
                 }
                 guard let root = try JSONSerialization.jsonObject(with: data) as? [String: Any],
                       let days = root["daily"] as? [[String: Any]] else {

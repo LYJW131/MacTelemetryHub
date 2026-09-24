@@ -68,7 +68,8 @@ struct CodingUsageDiagnostic {
             "sources": snapshot.usage.agents.map { agent -> [String: Any] in
                 ["id": agent.id, "state": agent.usageStatus.state.rawValue,
                  "from": agent.usageStatus.coverageStart ?? "", "to": agent.usageStatus.coverageEnd ?? "",
-                 "costComplete": agent.usageStatus.costComplete, "error": agent.usageStatus.error ?? ""]
+                 "costComplete": agent.usageStatus.costComplete, "error": agent.usageStatus.error ?? "",
+                 "warning": agent.usageStatus.warning ?? ""]
             },
         ]
         let data = try JSONSerialization.data(withJSONObject: summary, options: [.prettyPrinted, .sortedKeys])

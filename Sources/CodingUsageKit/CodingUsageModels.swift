@@ -4,28 +4,35 @@ public enum CodingUsagePrecision: String, Codable, Sendable {
     case measured, estimated, mixed
 }
 
+/// `error` 只放真正采集失败的原因（这一轮什么都没拿到，数据停在 `collectedAt`）；
+/// 采集成功但数据有缺口（token 未分列、云端或本地历史变短、会话元数据失败……）
+/// 时 `state` 仍是 ok，缺口写进 `warning`。
 public struct CodingUsageStatus: Codable, Equatable, Sendable {
     public enum State: String, Codable, Sendable { case ok, error, unavailable }
     public var state: State
     public var collectedAt: String?
     public var error: String?
+    public var warning: String?
     public var coverageStart: String?
     public var coverageEnd: String?
     public var precision: CodingUsagePrecision
     public var costComplete: Bool
 
-    public init(state: State, collectedAt: String? = nil, error: String? = nil,
+    public init(state: State, collectedAt: String? = nil, error: String? = nil, warning: String? = nil,
                 coverageStart: String? = nil, coverageEnd: String? = nil,
                 precision: CodingUsagePrecision = .measured, costComplete: Bool = false) {
-        self.state = state; self.collectedAt = collectedAt; self.error = error
+        self.state = state; self.collectedAt = collectedAt; self.error = error; self.warning = warning
         self.coverageStart = coverageStart; self.coverageEnd = coverageEnd
         self.precision = precision; self.costComplete = costComplete
     }
-    enum CodingKeys: String, CodingKey { case state, collectedAt, error, coverageStart, coverageEnd, precision, costComplete }
+    enum CodingKeys: String, CodingKey {
+        case state, collectedAt, error, warning, coverageStart, coverageEnd, precision, costComplete
+    }
     public func encode(to encoder: Encoder) throws {
         var c = encoder.container(keyedBy: CodingKeys.self)
         try c.encode(state, forKey: .state); try c.encode(collectedAt, forKey: .collectedAt)
-        try c.encode(error, forKey: .error); try c.encode(coverageStart, forKey: .coverageStart)
+        try c.encode(error, forKey: .error); try c.encode(warning, forKey: .warning)
+        try c.encode(coverageStart, forKey: .coverageStart)
         try c.encode(coverageEnd, forKey: .coverageEnd); try c.encode(precision, forKey: .precision)
         try c.encode(costComplete, forKey: .costComplete)
     }

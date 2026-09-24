@@ -19,6 +19,43 @@ struct CcusageParserTests {
         #expect(CcusageCollector.sources(requested: ["claude"], discovered: [], includePi: true) == ["claude", "pi"])
         #expect(!CcusageCollector.includePi(available: ["claude"], home: home))
     }
+    @Test func antigravityAlwaysUsesTheOfflinePriceTable() {
+        let collector = CcusageCollector(executableURL: URL(fileURLWithPath: "/usr/bin/false"), offline: false)
+        #expect(collector.commandArguments(source: "antigravity", section: "daily").contains("--offline"))
+        #expect(!collector.commandArguments(source: "claude", section: "daily").contains("--offline"))
+    }
+    @Test func antigravityFingerprintFollowsItsConversationFiles() throws {
+        let home = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: home) }
+        let cli = URL(fileURLWithPath: "/usr/bin/false")
+        let print = { CcusageCollector.antigravityFingerprint(home: home, executableURL: cli, environment: [:]) }
+        let empty = try #require(print())
+        let db = home.appendingPathComponent(".gemini/antigravity-cli/conversations/a.db")
+        try FileManager.default.createDirectory(at: db.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try Data("one".utf8).write(to: db)
+        let first = try #require(print())
+        #expect(first != empty)
+        #expect(print() == first)
+        // 别的目录（worktrees、brain……）变了不算
+        let other = home.appendingPathComponent(".gemini/antigravity/brain/x.md")
+        try FileManager.default.createDirectory(at: other.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try Data("x".utf8).write(to: other)
+        #expect(print() == first)
+        try Data("one more".utf8).write(to: db)
+        #expect(print() != first)
+        #expect(CcusageCollector.antigravityFingerprint(home: home, executableURL: cli,
+                                                        environment: ["ANTIGRAVITY_DATA_DIR": "/x"]) == nil)
+    }
+    @Test func unchangedInputCacheOnlyAnswersTheSameFingerprintWhileFresh() async {
+        let cache = CcusageUnchangedInputCache()
+        let start = Date(timeIntervalSince1970: 1_790_000_000)
+        await cache.store(Data("a".utf8), for: "k", fingerprint: "f1", now: start)
+        #expect(await cache.data(for: "k", fingerprint: "f1", now: start) == Data("a".utf8))
+        #expect(await cache.data(for: "k", fingerprint: "f2", now: start) == nil)
+        #expect(await cache.data(for: "other", fingerprint: "f1", now: start) == nil)
+        #expect(await cache.data(for: "k", fingerprint: "f1",
+                                 now: start.addingTimeInterval(CcusageUnchangedInputCache.maxAge)) == nil)
+    }
     @Test func ompSessionsArePresentOnlyWhenALogExists() throws {
         let home = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: home) }

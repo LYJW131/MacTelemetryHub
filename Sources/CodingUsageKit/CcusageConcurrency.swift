@@ -61,6 +61,8 @@ enum CcusageSQLiteAccess {
 /// final subscriber leaves; a late result from that flight cannot overwrite a replacement flight.
 actor CcusageSourceDiscovery {
     static let shared = CcusageSourceDiscovery()
+    /// 发现要跑一遍全来源（含 Antigravity 那 35 秒），新来源一小时内出现就够
+    static let ttl: TimeInterval = 3_600
     private struct Flight {
         let id: UUID
         let task: Task<Void, Never>
@@ -70,7 +72,7 @@ actor CcusageSourceDiscovery {
     private var flights: [String: Flight] = [:]
 
     func get(_ key: String, allowExpired: Bool = false) -> Set<String>? {
-        guard let entry = entries[key], allowExpired || Date().timeIntervalSince(entry.date) < 600 else { return nil }
+        guard let entry = entries[key], allowExpired || Date().timeIntervalSince(entry.date) < Self.ttl else { return nil }
         return entry.sources
     }
 
@@ -116,5 +118,25 @@ actor CcusageSourceDiscovery {
             flights[key] = nil
             flight.task.cancel()
         } else { flights[key] = flight }
+    }
+}
+
+/**
+ * 输入没变就不重跑：key 是命令行，fingerprint 是这条命令读的那些文件的指纹。
+ * 只在内存里，Hub 重启后第一轮照常跑。放久了也重跑一次，免得哪天指纹漏掉了什么输入。
+ */
+actor CcusageUnchangedInputCache {
+    static let shared = CcusageUnchangedInputCache()
+    static let maxAge: TimeInterval = 6 * 3_600
+    private var entries: [String: (fingerprint: String, data: Data, date: Date)] = [:]
+
+    func data(for key: String, fingerprint: String, now: Date = Date()) -> Data? {
+        guard let entry = entries[key], entry.fingerprint == fingerprint,
+              now.timeIntervalSince(entry.date) < Self.maxAge else { return nil }
+        return entry.data
+    }
+
+    func store(_ data: Data, for key: String, fingerprint: String, now: Date = Date()) {
+        entries[key] = (fingerprint, data, now)
     }
 }

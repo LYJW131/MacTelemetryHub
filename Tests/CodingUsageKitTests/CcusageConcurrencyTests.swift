@@ -83,8 +83,11 @@ struct CcusageConcurrencyTests {
         """
         try Data(script.utf8).write(to: executable)
         try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: executable.path)
-        let usageCollector = CcusageCollector(executableURL: executable, sourceIDs: ["antigravity"], offline: true)
-        let sessionCollector = CcusageCollector(executableURL: executable, sourceIDs: ["antigravity"], offline: true)
+        // 空的 home：Antigravity 输入指纹固定，两边同一条 session 命令只真跑一次
+        let usageCollector = CcusageCollector(executableURL: executable, sourceIDs: ["antigravity"], offline: true,
+                                              home: directory)
+        let sessionCollector = CcusageCollector(executableURL: executable, sourceIDs: ["antigravity"], offline: true,
+                                                home: directory)
         async let usage = usageCollector.collect(at: CodingUsageDates.parseInstant("2026-09-05T04:00:00Z")!)
         async let sessions = sessionCollector.collectSessions()
         let (usageResults, sessionResults) = await (usage, sessions)
@@ -98,6 +101,7 @@ struct CcusageConcurrencyTests {
         let operations = try String(contentsOf: directory.appendingPathComponent("operations.log"), encoding: .utf8)
             .split(separator: "\n")
         #expect(operations.filter { $0.hasPrefix("daily:") }.count == 1)
-        #expect(operations.count == 4)
+        // 发现一次、daily 一次、session 一次：后到的那条 session 命中输入未变的缓存
+        #expect(operations.count == 3)
     }
 }

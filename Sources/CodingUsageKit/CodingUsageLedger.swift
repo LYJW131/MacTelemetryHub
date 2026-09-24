@@ -87,10 +87,11 @@ public struct CodingUsageLedger: Sendable {
                 }
             }
             Self.mergeSessions(report.sessions, into: &source)
+            // 走到这里就是采到了：缺口只是提醒，不算失败
             source.status = CodingUsageStatus(
-                state: problems.isEmpty ? .ok : .error,
+                state: .ok,
                 collectedAt: CodingUsageDates.instant(report.collectedAt),
-                error: problems.isEmpty ? nil : Array(Set(problems)).sorted().joined(separator: "；"),
+                warning: problems.isEmpty ? nil : Array(Set(problems)).sorted().joined(separator: "；"),
                 coverageStart: source.days.keys.min(),
                 coverageEnd: [source.days.keys.max(), report.coverageEnd].compactMap { $0 }.max(),
                 precision: report.precision,
@@ -107,6 +108,8 @@ public struct CodingUsageLedger: Sendable {
             var source = disk.accounts[sourceID]?[account] ?? SourceState()
             source.status.state = unavailable ? .unavailable : .error
             source.status.error = error
+            // 上一轮的缺口提醒说的是那份数据，这一轮什么都没拿到，不再挂着
+            source.status.warning = nil
             disk.accounts[sourceID, default: [:]][account] = source
             disk.selectedAccounts[sourceID] = account
         }
