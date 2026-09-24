@@ -36,6 +36,9 @@ struct CcusageParserTests {
         let first = try #require(print())
         #expect(first != empty)
         #expect(print() == first)
+        // 读库时 SQLite 会刷新 -shm 的修改时间，不算输入变化
+        try Data("index".utf8).write(to: db.deletingLastPathComponent().appendingPathComponent("a.db-shm"))
+        #expect(print() == first)
         // 别的目录（worktrees、brain……）变了不算
         let other = home.appendingPathComponent(".gemini/antigravity/brain/x.md")
         try FileManager.default.createDirectory(at: other.deletingLastPathComponent(), withIntermediateDirectories: true)

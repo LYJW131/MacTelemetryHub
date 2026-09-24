@@ -143,6 +143,8 @@ public struct CcusageCollector: Sendable {
     /**
      * Antigravity 输入的指纹：各数据目录下 `conversations` 里每个文件的路径、大小、修改时间，
      * 加上 ccusage 可执行文件本身。只 stat 不读内容，几百个文件十毫秒。
+     * `-shm` 不算：那是 SQLite 读的时候也会碰的共享内存索引，ccusage 自己跑一遍就会刷新它们的
+     * 修改时间；真有写入会落在 `.db` 和 `-wal` 上。
      * 设了 `ANTIGRAVITY_DATA_DIR` 就不知道它读哪里，返回 nil，不走缓存。
      */
     static func antigravityFingerprint(home: URL, executableURL: URL, environment: [String: String]) -> String? {
@@ -159,7 +161,9 @@ public struct CcusageCollector: Sendable {
         for root in antigravityRoots {
             let directory = home.appendingPathComponent(root).appendingPathComponent("conversations")
             guard let files = manager.enumerator(at: directory, includingPropertiesForKeys: keys) else { continue }
-            for case let url as URL in files { if let entry = line(url) { lines.append(entry) } }
+            for case let url as URL in files where !url.lastPathComponent.hasSuffix("-shm") {
+                if let entry = line(url) { lines.append(entry) }
+            }
         }
         let digest = SHA256.hash(data: Data(lines.sorted().joined(separator: "\n").utf8))
         return digest.map { String(format: "%02x", $0) }.joined()
