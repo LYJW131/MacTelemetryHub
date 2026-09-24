@@ -149,7 +149,7 @@ TokenTracker，也不连接它的 HTTP 面板，不读取或导入它的 queue�
 | 来源 | 用量历史 | 会话与此刻状态 |
 | --- | --- | --- |
 | Claude、Codex | 固定版本的 `ccusage` 读取本机原始日志 | 每分钟增量扫描 JSONL 日志，只读上次之后追加的部分；最近一条用量事件的时刻和模型就是此刻状态，同一次扫描也产出五分钟用量窗口。会话数仍随用量刷新由 `ccusage session` 更新 |
-| Grok、Antigravity | 固定版本的 `ccusage` 读取本机原始日志或数据库；Antigravity 使用其本地 SQLite 用量记录 | `ccusage <source> session` 的本机会话元数据，最多 5 分钟一次（每次都要重读全部历史） |
+| Grok、Antigravity | 固定版本的 `ccusage` 读取本机原始日志或数据库；Antigravity 使用其本地 SQLite 用量记录 | `ccusage <source> session` 的本机会话元数据，最多 5 分钟一次（每次都要重读全部历史）。Antigravity 一次要解析几百 MB 的对话库：固定走离线价目表（在线模式慢三倍、结果相同），超时 300 秒，`conversations` 里的文件没变就沿用上次输出 |
 | 其他被 `ccusage` 发现且支持的来源 | 同样读取本机原始历史，动态纳入按来源统计 | 同上，最多 5 分钟一次 |
 | Cursor | 不采集。云端历史由 agent-limits-reporter 用它自己的登录态上报；本机快照把 `cursor` 放进 `omittedSources`，合计和年度图都不含它 | 当前没有本机会话适配器，不把云端历史冒充正在使用状态 |
 
@@ -181,8 +181,10 @@ Token 分列互斥：`inputTokens` 不包含缓存读写，`cacheReadTokens` 与
 四项。Cursor JSON 的 `cacheWriteTokens` 直接映射缓存创建量。CSV 只用于严格对账，
 当前导出中的 `Input (w/ Cache Write)` 也是独立的缓存创建列，不与另一输入列相减。
 
-每个 agent 的 `usageStatus` 包含状态、上次采集时间、覆盖日期、`precision` 和
-`costComplete`。旧版 Cursor 按请求计量记录可能没有 token 分列：保留诊断，并展示已计量
+每个 agent 的 `usageStatus` 包含状态、上次采集时间、覆盖日期、`precision`、
+`costComplete`，以及 `error` 和 `warning` 两种说明：`error` 只在这一轮什么都没采到时出现
+（`state` 为 `error`，数据停在 `collectedAt`）；采到了但有缺口（token 未分列、历史变短而保留
+旧日子、会话元数据失败等）时 `state` 仍是 `ok`，缺口写进 `warning`，同时 `costComplete` 为 false。旧版 Cursor 按请求计量记录可能没有 token 分列：保留诊断，并展示已计量
 部分，不推算出虚构 token。`precision` 描述 token 的测量口径，费用本身始终是
 `apiEquivalentCostUSD`，不是订阅费、剩余额度或实际账单扣款。Cursor 按内置公开 API
 价格快照估值，不使用导出 `Cost`、`chargedCents` 或套餐扣费替代；本地来源使用 ccusage
