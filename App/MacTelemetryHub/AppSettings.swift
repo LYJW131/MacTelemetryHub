@@ -44,6 +44,9 @@ final class AppSettings: ObservableObject {
         static let r2SecretAccessKeyAccount = "r2-secret-access-key"
         static let userIDAccount = "anker-user-id"
         static let telemetrySecretAccount = "telemetry-ingest-secret"
+        /// Cloudflare Access service token 的 Client ID。它不是秘密，放 UserDefaults；
+        /// 配对的 Client Secret 沿用上面那个钥匙串条目。
+        static let telemetryClientID = "telemetryAccessClientID"
         static let ankerAccount = "ankerAccount"
         static let ankerPasswordAccount = "anker-password"
         static let ankerAuthTokenAccount = "anker-auth-token"
@@ -67,6 +70,7 @@ final class AppSettings: ObservableObject {
     @Published var postInterval: Double = 10
     @Published var postTimeout: Double = 10
     @Published var deviceID = ""
+    @Published var telemetryClientID = ""
     @Published var telemetrySecret = ""
     @Published var chargerModuleEnabled = true
     @Published var powerBankModuleEnabled = false
@@ -180,7 +184,13 @@ final class AppSettings: ObservableObject {
         deviceID = storedDeviceID.isEmpty
             ? (deviceID.isEmpty ? UUID().uuidString.lowercased() : deviceID)
             : storedDeviceID
-        telemetrySecret = environment["TELEMETRY_INGEST_SECRET"]
+        // 过渡期两套鉴权并存：填了 Client ID 走 Cloudflare Access，钥匙串里那条就是
+        // Client Secret；没填则照旧当 Bearer 发。旧的 TELEMETRY_INGEST_SECRET 环境变量仍认。
+        telemetryClientID = environment["ACCESS_CLIENT_ID"]
+            ?? defaults.string(forKey: Key.telemetryClientID)
+            ?? ""
+        telemetrySecret = environment["ACCESS_CLIENT_SECRET"]
+            ?? environment["TELEMETRY_INGEST_SECRET"]
             ?? keychain.read(account: Key.telemetrySecretAccount)
             ?? ""
         chargerModuleEnabled = defaults.object(forKey: Key.chargerModuleEnabled) as? Bool ?? true
@@ -435,6 +445,7 @@ final class AppSettings: ObservableObject {
         peripheralID = peripheralID.trimmingCharacters(in: .whitespacesAndNewlines)
         powerBankPeripheralID = powerBankPeripheralID.trimmingCharacters(in: .whitespacesAndNewlines)
         postURL = postURL.trimmingCharacters(in: .whitespacesAndNewlines)
+        telemetryClientID = telemetryClientID.trimmingCharacters(in: .whitespacesAndNewlines)
         telemetrySecret = telemetrySecret.trimmingCharacters(in: .whitespacesAndNewlines)
         ccusageCLIPath = (ccusageCLIPath as NSString).expandingTildeInPath
         r2Endpoint = r2Endpoint.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -458,6 +469,7 @@ final class AppSettings: ObservableObject {
         defaults.set(httpPort, forKey: Key.httpPort)
         defaults.set(postEnabled, forKey: Key.postEnabled)
         defaults.set(postURL, forKey: Key.postURL)
+        defaults.set(telemetryClientID, forKey: Key.telemetryClientID)
         defaults.set(postInterval, forKey: Key.postInterval)
         defaults.set(postTimeout, forKey: Key.postTimeout)
         defaults.set(deviceID, forKey: Key.deviceID)
@@ -537,6 +549,7 @@ final class AppSettings: ObservableObject {
             httpPort: httpPort,
             postEnabled: postEnabled,
             postURL: postURL,
+            telemetryClientID: telemetryClientID,
             telemetrySecret: telemetrySecret,
             postInterval: postInterval,
             postTimeout: postTimeout,
@@ -591,6 +604,7 @@ struct SettingsDraftToken: Equatable {
     var httpPort: Int
     var postEnabled: Bool
     var postURL: String
+    var telemetryClientID: String
     var telemetrySecret: String
     var postInterval: Double
     var postTimeout: Double

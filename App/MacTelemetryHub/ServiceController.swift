@@ -274,6 +274,7 @@ final class ServiceController: ObservableObject {
         ReporterRestartKey(
             postEnabled: settings.postEnabled,
             postURL: settings.postURL,
+            telemetryClientID: settings.telemetryClientID,
             telemetrySecret: settings.telemetrySecret,
             postInterval: settings.postInterval,
             postTimeout: settings.postTimeout,
@@ -522,6 +523,7 @@ final class ServiceController: ObservableObject {
     private struct ReporterRestartKey: Equatable {
         var postEnabled: Bool
         var postURL: String
+        var telemetryClientID: String
         var telemetrySecret: String
         var postInterval: Double
         var postTimeout: Double
@@ -924,6 +926,7 @@ final class ServiceController: ObservableObject {
                         let request = TelemetryPoster.request(
                             url: url,
                             body: try JSONCoding.encoder().encode(envelope),
+                            clientID: settings.telemetryClientID,
                             secret: settings.telemetrySecret,
                             timeout: timeout
                         )
@@ -1150,6 +1153,7 @@ final class ServiceController: ObservableObject {
         let request = TelemetryPoster.request(
             url: url,
             body: body,
+            clientID: settings.telemetryClientID,
             secret: settings.telemetrySecret,
             timeout: 3
         )

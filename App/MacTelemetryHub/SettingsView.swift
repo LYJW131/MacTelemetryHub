@@ -894,8 +894,16 @@ struct SettingsView: View {
                         TextField("https://example.com/api/ingest/mac", text: $settings.postURL)
                             .textFieldStyle(.roundedBorder)
 
-                        fieldTitle("Bearer 密钥", detail: "保存在钥匙串")
-                        SecureField("与网站 TELEMETRY_INGEST_SECRET 一致", text: $settings.telemetrySecret)
+                        fieldTitle(
+                            "Access Client ID",
+                            detail: "Cloudflare Access 里 lyjwpage-mac 那把 service token；留空则按旧 Bearer 发"
+                        )
+                        TextField("xxxxxxxx.access", text: $settings.telemetryClientID)
+                            .font(.body.monospaced())
+                            .textFieldStyle(.roundedBorder)
+
+                        fieldTitle("Client Secret", detail: "保存在钥匙串；Client ID 留空时填旧的 TELEMETRY_INGEST_SECRET")
+                        SecureField("Access service token 的 Client Secret", text: $settings.telemetrySecret)
                             .font(.body.monospaced())
                             .textFieldStyle(.roundedBorder)
 

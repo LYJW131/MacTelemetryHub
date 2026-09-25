@@ -3,19 +3,30 @@ import Foundation
 /**
  * 心跳和数据包共用的 ingest POST。
  *
- * 编码、User-Agent、Bearer 只在这里写一次。数据包走 `post`，失败不推进门闩。
+ * 编码、User-Agent、鉴权头只在这里写一次。数据包走 `post`，失败不推进门闩。
  * 心跳的阻塞发送仍是信号量：睡眠和退出的观察者返回之后进程就停了。
  */
 enum TelemetryPoster {
     static let userAgent = "mac-telemetry-hub/4"
 
-    static func request(url: URL, body: Data, secret: String, timeout: TimeInterval) -> URLRequest {
+    static func request(
+        url: URL,
+        body: Data,
+        clientID: String,
+        secret: String,
+        timeout: TimeInterval
+    ) -> URLRequest {
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
         request.httpBody = body
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.setValue(userAgent, forHTTPHeaderField: "User-Agent")
-        if !secret.isEmpty {
+        // 有 Client ID 就走 Cloudflare Access service token，边缘验过才放行，不再带
+        // Bearer；没有则是迁移前的共享密钥。过渡期结束后删掉 else 这一支。
+        if !clientID.isEmpty {
+            request.setValue(clientID, forHTTPHeaderField: "CF-Access-Client-Id")
+            request.setValue(secret, forHTTPHeaderField: "CF-Access-Client-Secret")
+        } else if !secret.isEmpty {
             request.setValue("Bearer \(secret)", forHTTPHeaderField: "Authorization")
         }
         request.timeoutInterval = timeout
