@@ -80,6 +80,9 @@ struct SettingsView: View {
     @State private var messageClearTask: Task<Void, Never>?
     /// 打开窗口时的落盘内容。登录自启和配对不在里面，它们当场就写下去了。
     @State private var baseline: SettingsDraftToken
+    @StateObject private var pairing = PairingLogin()
+    /// 登录 Cloudflare 那一行结果。和底栏分开：它说的是上报凭据，不是整页保存。
+    @State private var pairingResult: (text: String, tone: PairingResultTone)?
 
     // 这些对象的 @Published 不在这一层订阅。封面传输、前台应用、本机 HTTP
     // 各自包在自己那一页里，否则切到上报页也会跟着重绘。
@@ -890,13 +893,15 @@ struct SettingsView: View {
 
                 if settings.postEnabled {
                     VStack(alignment: .leading, spacing: 12) {
+                        pairingControls
+
                         fieldTitle("上报端点", detail: "HTTP / HTTPS")
                         TextField("https://example.com/api/ingest/mac", text: $settings.postURL)
                             .textFieldStyle(.roundedBorder)
 
                         fieldTitle(
                             "Access Client ID",
-                            detail: "Cloudflare Access 里 lyjwpage-mac 那把 service token；留空则按旧 Bearer 发"
+                            detail: "登录后自动填好，也可手填 lyjwpage-mac 那把 service token；留空则按旧 Bearer 发"
                         )
                         TextField("xxxxxxxx.access", text: $settings.telemetryClientID)
                             .font(.body.monospaced())
@@ -938,6 +943,40 @@ struct SettingsView: View {
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
+            }
+        }
+    }
+
+    private var pairingControls: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 10) {
+                Button {
+                    // 点下去这一刻设置窗口是 key window；等回调时可能已经换成浏览器了。
+                    let window = NSApp.keyWindow
+                    Task { await pairWithCloudflare(anchor: window) }
+                } label: {
+                    Label("登录 Cloudflare 获取上报凭据", systemImage: "person.badge.key")
+                }
+                .buttonStyle(.bordered)
+                .disabled(pairing.isRunning)
+
+                if pairing.isRunning {
+                    ProgressView()
+                        .controlSize(.small)
+                    Text("等待浏览器里确认…")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+            }
+            Text("在浏览器里用 Cloudflare Access 登录并确认，自动填好下面的端点、Client ID 和 Client Secret 并当场生效。重新登录会让旧 Secret 立即作废。")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+            if let pairingResult {
+                Label(pairingResult.text, systemImage: pairingResult.tone.icon)
+                    .font(.caption)
+                    .foregroundStyle(pairingResult.tone.color)
+                    .fixedSize(horizontal: false, vertical: true)
             }
         }
     }
@@ -1066,6 +1105,55 @@ struct SettingsView: View {
         }
     }
 
+    /**
+     * 登录、兑换、落盘、重开上报会话，一次做完。
+     *
+     * 兑换成功时服务端已经把旧 Secret 作废，所以不等「保存」：只落这几栏，
+     * 并把 baseline 里对应的几栏一起挪过去，别让关窗口时把它们当成未保存的改动。
+     * 其它栏目的草稿原样留着，不替用户保存。
+     */
+    private func pairWithCloudflare(anchor: NSWindow?) async {
+        pairingResult = nil
+        let credentials: PairingProtocol.Credentials
+        do {
+            switch try await pairing.pair(anchor: anchor) {
+            case .cancelled:
+                pairingResult = ("已取消登录，原有凭据不变。", .neutral)
+                return
+            case let .paired(paired):
+                credentials = paired
+            }
+        } catch {
+            pairingResult = ("失败：\(error.localizedDescription)", .failure)
+            return
+        }
+
+        do {
+            try service.applyPairingCredentials(credentials)
+        } catch {
+            pairingResult = (
+                "已签发新凭据但没能保存（\(error.localizedDescription)），旧 Secret 已作废，请重新登录。",
+                .failure
+            )
+            return
+        }
+        baseline.postEnabled = settings.postEnabled
+        baseline.postURL = settings.postURL
+        baseline.telemetryClientID = settings.telemetryClientID
+        baseline.telemetrySecret = settings.telemetrySecret
+
+        let overrides = settings.accessCredentialEnvironmentOverrides
+        if overrides.isEmpty {
+            pairingResult = ("成功：已获取 \(credentials.source) 的上报凭据，已保存并生效。", .success)
+        } else {
+            // 本次进程已经换上新钥匙；但下次启动时环境变量里那把旧的（已作废）会盖回来。
+            pairingResult = (
+                "已获取 \(credentials.source) 的上报凭据并生效，但环境变量 \(overrides.joined(separator: "、")) 会在下次启动时覆盖它，请删掉这些环境变量。",
+                .warning
+            )
+        }
+    }
+
     private func saveSettings() async {
         do {
             try service.applySettings()
@@ -1129,6 +1217,28 @@ struct SettingsView: View {
         guard settings.draftToken != baseline else { return }
         settings.reload()
         baseline = settings.draftToken
+    }
+}
+
+private enum PairingResultTone {
+    case success, warning, failure, neutral
+
+    var icon: String {
+        switch self {
+        case .success: "checkmark.circle.fill"
+        case .warning: "exclamationmark.triangle.fill"
+        case .failure: "xmark.circle.fill"
+        case .neutral: "info.circle"
+        }
+    }
+
+    var color: Color {
+        switch self {
+        case .success: .green
+        case .warning: .orange
+        case .failure: .red
+        case .neutral: .secondary
+        }
     }
 }
 

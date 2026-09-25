@@ -525,6 +525,32 @@ final class AppSettings: ObservableObject {
      * 一个跟它无关的字段没填好就会把这一步顶回来，而开关早就改进内存里了。
      * `save()` 里照样写它一次，幂等。
      */
+    /**
+     * 只落配对登录换来的那三样：Client ID、Client Secret、上报端点，外加上报开关。
+     *
+     * 和配对 UUID 同一个理由不走整页 `save()`：服务端在兑换那一刻已经把旧 secret
+     * 作废了，这时候一个无关字段没填好把保存顶回来，本机就只剩一把死钥匙。整页保存
+     * 也会把用户别处没打算保存的草稿一起写下去。上报开关一并打开落盘：登录按钮只在
+     * 开关打开时出现，拿到凭据就是要上报；不落的话上报会话按内存里的「开」重启，
+     * 点「取消」回滚成「关」时会话却还在跑。
+     */
+    func persistPairingCredentials(clientID: String, secret: String, ingestURL: String) throws {
+        try keychain.write(secret, account: Key.telemetrySecretAccount)
+        telemetryClientID = clientID
+        telemetrySecret = secret
+        postURL = ingestURL
+        postEnabled = true
+        defaults.set(true, forKey: Key.postEnabled)
+        defaults.set(clientID, forKey: Key.telemetryClientID)
+        defaults.set(ingestURL, forKey: Key.postURL)
+    }
+
+    /// 启动时会盖过设置页那两栏的环境变量。配对结果照样落盘，但下次启动又会被它们顶掉。
+    var accessCredentialEnvironmentOverrides: [String] {
+        ["ACCESS_CLIENT_ID", "ACCESS_CLIENT_SECRET", "TELEMETRY_INGEST_SECRET"]
+            .filter { environment[$0] != nil }
+    }
+
     func persistWindowTitleReporting(_ enabled: Bool) {
         windowTitleReportingEnabled = enabled
         defaults.set(enabled, forKey: Key.windowTitleReportingEnabled)

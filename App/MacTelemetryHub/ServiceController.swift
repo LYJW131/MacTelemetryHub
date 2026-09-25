@@ -269,6 +269,24 @@ final class ServiceController: ObservableObject {
         }
     }
 
+    /**
+     * 配对登录拿到新凭据后当场生效。
+     *
+     * 只落这三样，然后按 `applySettings` 的同一个判据重开上报会话 —— 旧 secret
+     * 已经在服务端作废，不能等用户再点一次「保存」。
+     */
+    func applyPairingCredentials(_ credentials: PairingProtocol.Credentials) throws {
+        let previousReporter = reporterRestartKey
+        try settings.persistPairingCredentials(
+            clientID: credentials.clientId,
+            secret: credentials.clientSecret,
+            ingestURL: credentials.ingestUrl
+        )
+        if previousReporter != reporterRestartKey {
+            restartReporter()
+        }
+    }
+
     /// 改了这些才需要把上报会话从头发一遍。
     private var reporterRestartKey: ReporterRestartKey {
         ReporterRestartKey(
