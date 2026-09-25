@@ -396,6 +396,11 @@ final class AppSettings: ObservableObject {
                 throw SettingsError.invalidBindAddress
             }
         }
+        // 填了 Client ID 却没填 Secret，Access 会把每一封都拒在边缘，站点日志里连痕迹都没有
+        if !telemetryClientID.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+           telemetrySecret.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            throw SettingsError.missingAccessClientSecret
+        }
         guard postInterval > 0, postTimeout > 0 else { throw SettingsError.invalidTiming }
         // 放行线严格低于锁定线：两条线相等的话中间那档没了，「问一句」这条路
         // 就此消失，一条模型也拿不准的标题会被直接归进公开或锁定。
@@ -641,6 +646,7 @@ enum SettingsError: LocalizedError {
     case invalidR2Configuration
     case invalidWindowTitleRiskThresholds
     case invalidWindowTitleInformativeMinimum
+    case missingAccessClientSecret
 
     var errorDescription: String? {
         switch self {
@@ -658,6 +664,7 @@ enum SettingsError: LocalizedError {
         case .invalidR2Configuration: "R2 直传配置必须同时填写 HTTPS Endpoint、Bucket、Access Key ID 和 Secret Access Key。"
         case .invalidWindowTitleRiskThresholds: "放行线必须大于 0 且小于锁定线，锁定线不能超过 1。"
         case .invalidWindowTitleInformativeMinimum: "值得展示线必须在 0 到 1 之间。"
+        case .missingAccessClientSecret: "填了 Access Client ID 就必须同时填 Client Secret。"
         }
     }
 }

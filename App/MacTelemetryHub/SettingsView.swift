@@ -39,7 +39,7 @@ private enum SettingsCategory: String, CaseIterable, Identifiable {
         switch error as? SettingsError {
         case .invalidUserID, .invalidPeripheralID: .charger
         case .invalidPort, .invalidBindAddress: .local
-        case .invalidTiming, .invalidPostURL, .invalidR2Configuration: .reporting
+        case .invalidTiming, .invalidPostURL, .invalidR2Configuration, .missingAccessClientSecret: .reporting
         case .invalidCcusagePath, .invalidCodingSessionInterval,
              .invalidVibeCodingUsageInterval, .invalidVibeCodingYearInterval: .sources
         case .invalidWindowTitleRiskThresholds,
