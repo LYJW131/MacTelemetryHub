@@ -21,14 +21,9 @@ enum TelemetryPoster {
         request.httpBody = body
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.setValue(userAgent, forHTTPHeaderField: "User-Agent")
-        // 有 Client ID 就走 Cloudflare Access service token，边缘验过才放行，不再带
-        // Bearer；没有则是迁移前的共享密钥。过渡期结束后删掉 else 这一支。
-        if !clientID.isEmpty {
-            request.setValue(clientID, forHTTPHeaderField: "CF-Access-Client-Id")
-            request.setValue(secret, forHTTPHeaderField: "CF-Access-Client-Secret")
-        } else if !secret.isEmpty {
-            request.setValue("Bearer \(secret)", forHTTPHeaderField: "Authorization")
-        }
+        // Cloudflare Access service token：边缘验过才放行，Worker 再验 Access 签的 JWT
+        request.setValue(clientID, forHTTPHeaderField: "CF-Access-Client-Id")
+        request.setValue(secret, forHTTPHeaderField: "CF-Access-Client-Secret")
         request.timeoutInterval = timeout
         return request
     }

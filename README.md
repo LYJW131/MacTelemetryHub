@@ -61,10 +61,7 @@ Keychain). Requests then carry `CF-Access-Client-Id` / `CF-Access-Client-Secret`
 and no `Authorization` header. `ACCESS_CLIENT_ID` / `ACCESS_CLIENT_SECRET`
 environment variables override both fields.
 
-During the migration, leaving the Client ID empty keeps the old behavior: the
-secret field is sent as `Authorization: Bearer <secret>` and must match the
-site's `TELEMETRY_INGEST_SECRET` (the `TELEMETRY_INGEST_SECRET` environment
-variable still works too). Every request uses a versioned envelope and may
+Every request uses a versioned envelope and may
 contain only the modules that have fresh data:
 
 ```json

@@ -184,13 +184,11 @@ final class AppSettings: ObservableObject {
         deviceID = storedDeviceID.isEmpty
             ? (deviceID.isEmpty ? UUID().uuidString.lowercased() : deviceID)
             : storedDeviceID
-        // 过渡期两套鉴权并存：填了 Client ID 走 Cloudflare Access，钥匙串里那条就是
-        // Client Secret；没填则照旧当 Bearer 发。旧的 TELEMETRY_INGEST_SECRET 环境变量仍认。
+        // Cloudflare Access service token：Client ID 进 UserDefaults，Client Secret 进钥匙串。
         telemetryClientID = environment["ACCESS_CLIENT_ID"]
             ?? defaults.string(forKey: Key.telemetryClientID)
             ?? ""
         telemetrySecret = environment["ACCESS_CLIENT_SECRET"]
-            ?? environment["TELEMETRY_INGEST_SECRET"]
             ?? keychain.read(account: Key.telemetrySecretAccount)
             ?? ""
         chargerModuleEnabled = defaults.object(forKey: Key.chargerModuleEnabled) as? Bool ?? true
@@ -396,9 +394,10 @@ final class AppSettings: ObservableObject {
                 throw SettingsError.invalidBindAddress
             }
         }
-        // 填了 Client ID 却没填 Secret，Access 会把每一封都拒在边缘，站点日志里连痕迹都没有
-        if !telemetryClientID.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
-           telemetrySecret.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+        // 缺一样，Access 会把每一封都拒在边缘，站点日志里连痕迹都没有
+        if postEnabled,
+           telemetryClientID.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            || telemetrySecret.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             throw SettingsError.missingAccessClientSecret
         }
         guard postInterval > 0, postTimeout > 0 else { throw SettingsError.invalidTiming }
@@ -547,7 +546,7 @@ final class AppSettings: ObservableObject {
 
     /// 启动时会盖过设置页那两栏的环境变量。配对结果照样落盘，但下次启动又会被它们顶掉。
     var accessCredentialEnvironmentOverrides: [String] {
-        ["ACCESS_CLIENT_ID", "ACCESS_CLIENT_SECRET", "TELEMETRY_INGEST_SECRET"]
+        ["ACCESS_CLIENT_ID", "ACCESS_CLIENT_SECRET"]
             .filter { environment[$0] != nil }
     }
 
@@ -690,7 +689,7 @@ enum SettingsError: LocalizedError {
         case .invalidR2Configuration: "R2 直传配置必须同时填写 HTTPS Endpoint、Bucket、Access Key ID 和 Secret Access Key。"
         case .invalidWindowTitleRiskThresholds: "放行线必须大于 0 且小于锁定线，锁定线不能超过 1。"
         case .invalidWindowTitleInformativeMinimum: "值得展示线必须在 0 到 1 之间。"
-        case .missingAccessClientSecret: "填了 Access Client ID 就必须同时填 Client Secret。"
+        case .missingAccessClientSecret: "开着远端上报时，Access Client ID 和 Client Secret 都要填（或者点「登录 Cloudflare 获取上报凭据」）。"
         }
     }
 }

@@ -901,13 +901,13 @@ struct SettingsView: View {
 
                         fieldTitle(
                             "Access Client ID",
-                            detail: "登录后自动填好，也可手填 lyjwpage-mac 那把 service token；留空则按旧 Bearer 发"
+                            detail: "登录后自动填好，也可手填 lyjwpage-mac 那把 service token"
                         )
                         TextField("xxxxxxxx.access", text: $settings.telemetryClientID)
                             .font(.body.monospaced())
                             .textFieldStyle(.roundedBorder)
 
-                        fieldTitle("Client Secret", detail: "保存在钥匙串；Client ID 留空时填旧的 TELEMETRY_INGEST_SECRET")
+                        fieldTitle("Client Secret", detail: "保存在钥匙串")
                         SecureField("Access service token 的 Client Secret", text: $settings.telemetrySecret)
                             .font(.body.monospaced())
                             .textFieldStyle(.roundedBorder)
