@@ -80,8 +80,10 @@ final class EngineTests: XCTestCase, @unchecked Sendable {
             let snapshot = try ledger.snapshot(at: now)
             let cursor = try XCTUnwrap(snapshot.usage.agents.first { $0.id == "cursor" })
             XCTAssertEqual(snapshot.usage.totals.totalTokens, 650)
-            XCTAssertEqual(cursor.usageStatus.state, .error)
-            XCTAssertTrue(cursor.usageStatus.error?.contains("1891") == true)
+            // 采到了但有缺口：状态仍是 ok，缺口进 warning（error 只留给真失败）
+            XCTAssertEqual(cursor.usageStatus.state, .ok)
+            XCTAssertNil(cursor.usageStatus.error)
+            XCTAssertTrue(cursor.usageStatus.warning?.contains("1891") == true)
             XCTAssertFalse(cursor.usageStatus.costComplete)
         }
     }
@@ -107,7 +109,9 @@ final class EngineTests: XCTestCase, @unchecked Sendable {
             var snapshot = try ledger.snapshot(at: now)
             XCTAssertEqual(snapshot.usage.totals.totalTokens, 1_300)
             XCTAssertEqual(snapshot.usage.totals.activeDays, 2)
-            XCTAssertEqual(snapshot.usage.agents.first { $0.id == "cursor" }?.usageStatus.state, .error)
+            let status = snapshot.usage.agents.first { $0.id == "cursor" }?.usageStatus
+            XCTAssertEqual(status?.state, .ok)
+            XCTAssertNotNil(status?.warning)
             try ledger.recordFailure(sourceID: "cursor", error: "fixture timeout")
             snapshot = try ledger.snapshot(at: now)
             XCTAssertEqual(snapshot.usage.totals.totalTokens, 1_300)
