@@ -33,11 +33,13 @@ struct CcusageConcurrencyTests {
         let discovery = CcusageSourceDiscovery()
         let counter = Counter()
         let entered = AsyncStream<Void>.makeStream()
+        // 共享的那次发现由测试放行，而不是睡固定时长：CI 上一慢，「先取消再完成」的顺序就保不住
+        let release = AsyncStream<Void>.makeStream()
         let first = Task {
             try await discovery.resolve("source-key", useCache: false) {
                 await counter.increment()
                 entered.continuation.yield(())
-                try await Task.sleep(for: .milliseconds(150))
+                for await _ in release.stream { break }
                 return ["claude", "opencode"]
             }
         }
@@ -51,6 +53,7 @@ struct CcusageConcurrencyTests {
         try await Task.sleep(for: .milliseconds(20))
         first.cancel()
         await #expect(throws: CancellationError.self) { try await first.value }
+        release.continuation.yield(())
         #expect(try await second.value == ["claude", "opencode"])
         #expect(await counter.value == 1)
         #expect(await discovery.get("source-key") == ["claude", "opencode"])
