@@ -45,7 +45,7 @@ final class AppSettings: ObservableObject {
         static let userIDAccount = "anker-user-id"
         static let telemetrySecretAccount = "telemetry-ingest-secret"
         /// Cloudflare Access service token 的 Client ID。它不是秘密，放 UserDefaults；
-        /// 配对的 Client Secret 沿用上面那个钥匙串条目。
+        /// 与它成对的 Client Secret 沿用上面那个钥匙串条目。
         static let telemetryClientID = "telemetryAccessClientID"
         static let ankerAccount = "ankerAccount"
         static let ankerPasswordAccount = "anker-password"
@@ -524,32 +524,6 @@ final class AppSettings: ObservableObject {
      * 一个跟它无关的字段没填好就会把这一步顶回来，而开关早就改进内存里了。
      * `save()` 里照样写它一次，幂等。
      */
-    /**
-     * 只落配对登录换来的那三样：Client ID、Client Secret、上报端点，外加上报开关。
-     *
-     * 和配对 UUID 同一个理由不走整页 `save()`：服务端在兑换那一刻已经把旧 secret
-     * 作废了，这时候一个无关字段没填好把保存顶回来，本机就只剩一把死钥匙。整页保存
-     * 也会把用户别处没打算保存的草稿一起写下去。上报开关一并打开落盘：登录按钮只在
-     * 开关打开时出现，拿到凭据就是要上报；不落的话上报会话按内存里的「开」重启，
-     * 点「取消」回滚成「关」时会话却还在跑。
-     */
-    func persistPairingCredentials(clientID: String, secret: String, ingestURL: String) throws {
-        try keychain.write(secret, account: Key.telemetrySecretAccount)
-        telemetryClientID = clientID
-        telemetrySecret = secret
-        postURL = ingestURL
-        postEnabled = true
-        defaults.set(true, forKey: Key.postEnabled)
-        defaults.set(clientID, forKey: Key.telemetryClientID)
-        defaults.set(ingestURL, forKey: Key.postURL)
-    }
-
-    /// 启动时会盖过设置页那两栏的环境变量。配对结果照样落盘，但下次启动又会被它们顶掉。
-    var accessCredentialEnvironmentOverrides: [String] {
-        ["ACCESS_CLIENT_ID", "ACCESS_CLIENT_SECRET"]
-            .filter { environment[$0] != nil }
-    }
-
     func persistWindowTitleReporting(_ enabled: Bool) {
         windowTitleReportingEnabled = enabled
         defaults.set(enabled, forKey: Key.windowTitleReportingEnabled)
@@ -689,7 +663,7 @@ enum SettingsError: LocalizedError {
         case .invalidR2Configuration: "R2 直传配置必须同时填写 HTTPS Endpoint、Bucket、Access Key ID 和 Secret Access Key。"
         case .invalidWindowTitleRiskThresholds: "放行线必须大于 0 且小于锁定线，锁定线不能超过 1。"
         case .invalidWindowTitleInformativeMinimum: "值得展示线必须在 0 到 1 之间。"
-        case .missingAccessClientSecret: "开着远端上报时，Access Client ID 和 Client Secret 都要填（或者点「登录 Cloudflare 获取上报凭据」）。"
+        case .missingAccessClientSecret: "开着远端上报时，Access Client ID 和 Client Secret 都要填。"
         }
     }
 }
