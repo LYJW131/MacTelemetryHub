@@ -10,17 +10,15 @@ struct TelemetryModulesPayload: Encodable, Sendable {
     let appleMusic: AppleMusicSnapshot?
     let appleMusicCredentials: AppleMusicCredentialsPayload?
     let timezone: TimeZoneSnapshot?
-    /// 三份摘要来自同一历史账本；now 的会话元数据独立按分钟刷新。
-    /// 套餐与限额由 NAS 走 /api/ingest/agents 上报。
-    let vibeCodingUsage: JSONValue?
-    let vibeCodingNow: JSONValue?
-    let vibeCodingYear: JSONValue?
+    /// 这一封带的 coding 模块（键见 `CodingModule`）。用量来自本机账本，活动和五分钟桶
+    /// 来自每分钟的会话扫描；套餐与限额不在这里，由容器里的上报器走 /api/ingest/agents。
+    let coding: [CodingModule: JSONValue]
     let includeDesktop: Bool
     let includeAppleMusic: Bool
 
     private enum CodingKeys: String, CodingKey {
         case chargingDevices, desktop, appleMusic, appleMusicCredentials, timezone
-        case vibeCodingUsage, vibeCodingNow, vibeCodingYear
+        case codingUsage, codingActivity, codingTokenBuckets
     }
 
     func encode(to encoder: Encoder) throws {
@@ -30,9 +28,9 @@ struct TelemetryModulesPayload: Encodable, Sendable {
         if includeAppleMusic { try container.encode(appleMusic, forKey: .appleMusic) }
         try container.encodeIfPresent(appleMusicCredentials, forKey: .appleMusicCredentials)
         try container.encodeIfPresent(timezone, forKey: .timezone)
-        try container.encodeIfPresent(vibeCodingUsage, forKey: .vibeCodingUsage)
-        try container.encodeIfPresent(vibeCodingNow, forKey: .vibeCodingNow)
-        try container.encodeIfPresent(vibeCodingYear, forKey: .vibeCodingYear)
+        try container.encodeIfPresent(coding[.usage], forKey: .codingUsage)
+        try container.encodeIfPresent(coding[.activity], forKey: .codingActivity)
+        try container.encodeIfPresent(coding[.buckets], forKey: .codingTokenBuckets)
     }
 }
 
@@ -74,9 +72,7 @@ extension TelemetryEnvelope {
         timezone: TimeZoneSnapshot? = nil,
         appleMusic: AppleMusicSnapshot? = nil,
         appleMusicCredentials: AppleMusicCredentialsPayload? = nil,
-        vibeCodingUsage: JSONValue? = nil,
-        vibeCodingNow: JSONValue? = nil,
-        vibeCodingYear: JSONValue? = nil,
+        coding: [CodingModule: JSONValue] = [:],
         includeDesktop: Bool,
         includeAppleMusic: Bool,
         activeModules: [String],
@@ -92,9 +88,7 @@ extension TelemetryEnvelope {
                 appleMusic: appleMusic,
                 appleMusicCredentials: appleMusicCredentials,
                 timezone: timezone,
-                vibeCodingUsage: vibeCodingUsage,
-                vibeCodingNow: vibeCodingNow,
-                vibeCodingYear: vibeCodingYear,
+                coding: coding,
                 includeDesktop: includeDesktop,
                 includeAppleMusic: includeAppleMusic
             ),
@@ -104,9 +98,28 @@ extension TelemetryEnvelope {
 }
 
 struct TelemetryIngestResponse: Decodable {
+    /// 回执里一条拒收：哪个模块、哪条校验没过
+    struct Rejection: Decodable, Equatable, Sendable {
+        let module: String
+        let error: String
+    }
+
     struct Result: Decodable {
         let desktopIconAvailable: Bool?
         let chargerCoverIconAvailable: Bool?
+        /// 信封里站点不认识的模块名，原样回来
+        var ignored: [String]? = nil
+        /// 校验不过、站点只丢了它自己的 coding 模块（其余模块照常收下）
+        var rejected: [Rejection]? = nil
+
+        /// 站点没收下这一格的原因；收下了是 nil
+        func refusal(of module: String) -> String? {
+            if let rejection = rejected?.first(where: { $0.module == module }) {
+                return "站点拒收：\(rejection.error)"
+            }
+            if ignored?.contains(module) == true { return "站点不认识这个模块，没有收下" }
+            return nil
+        }
     }
 
     let data: Result
@@ -127,7 +140,7 @@ enum ReporterError: LocalizedError {
     }
 
     /// 站点 4xx 的 JSON 是 `{ ok: false, error: "…" }`。只显示状态码的话，
-    /// 年度热力图校验失败会看起来像信封改坏了。
+    /// 某个模块校验失败会看起来像信封改坏了。
     static func ingestErrorDetail(_ data: Data) -> String? {
         if let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
            let error = (object["error"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines),

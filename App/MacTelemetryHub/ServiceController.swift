@@ -19,11 +19,10 @@ final class ServiceController: ObservableObject {
     let timeZone = TimeZoneMonitor()
     let appleMusic = AppleMusicMonitor()
     let appleMusicAuthorization = AppleMusicAuthorizationManager()
-    /// 一个模块一个采集器：长间隔那份（token / 费用）和
-    /// 短间隔那份（此刻在不在用）。年度热力图另走一块，间隔更长、按周切片。
+    /// coding 的两个采集器：长间隔那份出 `codingUsage`（本机账本的日行），
+    /// 短间隔那份每分钟扫一次会话，出 `codingActivity` 和 `codingTokenBuckets`。
     let vibeCodingUsageCollector = VibeCodingUsageMonitor()
     let codingSessions = CodingSessionMonitor()
-    let vibeCodingYearCollector = VibeCodingYearMonitor()
     /// 本机推流的订阅者。ServiceController+LocalAPI 要用，所以不是 private。
     let chargingSSE = ChargingSSEBroker()
     lazy private(set) var httpServer = LocalHTTPServer { [weak self] request in
@@ -39,7 +38,9 @@ final class ServiceController: ObservableObject {
     /// 那个两百多次请求的用量按钮也一起变灰。
     @Published private(set) var isRefreshingVibeCodingUsage = false
     @Published private(set) var isRefreshingVibeCodingSessions = false
-    @Published private(set) var isRefreshingVibeCodingYear = false
+    /// 站点没收下的 coding 模块和原因（回执的 rejected / ignored），显示在对应的卡片上；
+    /// 那一格之后被收下就清掉
+    @Published private(set) var codingDeliveryErrors: [CodingModule: String] = [:]
     @Published private(set) var appleMusicCredentialsUploadAt: Date?
     @Published private(set) var appleMusicCredentialsUploadError: String?
     @Published private(set) var isUploadingAppleMusicCredentials = false
@@ -94,7 +95,7 @@ final class ServiceController: ObservableObject {
 
     /// 循环的常规周期。前台应用、音乐、充电器插拔都会提前叫醒它，所以这个只
     /// 用来照顾没有事件放行的活：充电器功率滚动这类按节流窗口发的变化、
-    /// 心跳、vibe coding 三份采集的刷新间隔检查。
+    /// 心跳、coding 载荷的保活重发。
     private static let tickInterval = Duration.seconds(5)
     /// 心跳间隔、追发节奏、进度容差都跟着判断逻辑搬进了 `ReportDecision`：
     /// 它们只被那段纯计算读，留在这里就得两处对照着看。
@@ -161,7 +162,6 @@ final class ServiceController: ObservableObject {
         appleMusic.stop()
         vibeCodingUsageCollector.stop()
         codingSessions.stop()
-        vibeCodingYearCollector.stop()
         chargingSSE.closeAll()
         httpServer.stop()
         for link in chargingLinks { link.shutdown() }
@@ -294,7 +294,7 @@ final class ServiceController: ObservableObject {
             cliPath: settings.ccusageCLIPath,
             sessionInterval: settings.codingSessionRefreshInterval,
             usageInterval: settings.vibeCodingUsageRefreshInterval,
-            yearInterval: settings.vibeCodingYearRefreshInterval
+            fullInterval: settings.codingFullRefreshInterval
         )
     }
 
@@ -322,8 +322,8 @@ final class ServiceController: ObservableObject {
     /**
      * 两个采集器各自的「立刻重取」，互不牵连。
      *
-     * 会话刷新只读本地元数据，年度图只从持久账本生成。
-     * 各 agent 的限额已拆由 NAS 上的容器上报器负责，这里只管用量。
+     * 用量那个做一次全部来源的完整采集，会话那个只读本地会话与日志。
+     * 各 agent 的限额由容器里的上报器负责，这里只管用量。
      *
      * 采集器自己带单飞门闩，这里的标志只管按钮状态。即时上报仍是一次：
      * 信封只有一个，`requestImmediateReport` 也只按模块开关走一遍。
@@ -335,16 +335,7 @@ final class ServiceController: ObservableObject {
         guard await vibeCodingUsageCollector.refreshNow(
             ccusageCLIPath: settings.ccusageCLIPath
         ) else { return }
-        await vibeCodingYearCollector.refreshNow()
-        _ = requestImmediateReport(.vibeCoding)
-    }
-
-    func refreshVibeCodingYearNow() async {
-        guard settings.vibeCodingModuleEnabled, !isRefreshingVibeCodingYear else { return }
-        isRefreshingVibeCodingYear = true
-        defer { isRefreshingVibeCodingYear = false }
-        guard await vibeCodingYearCollector.refreshNow() else { return }
-        _ = requestImmediateReport(.vibeCodingYear)
+        _ = requestImmediateReport(.coding)
     }
 
     func refreshVibeCodingSessionsNow() async {
@@ -352,7 +343,12 @@ final class ServiceController: ObservableObject {
         isRefreshingVibeCodingSessions = true
         defer { isRefreshingVibeCodingSessions = false }
         await codingSessions.refreshNow(ccusageCLIPath: settings.ccusageCLIPath)
-        _ = requestImmediateReport(.vibeCoding)
+        _ = requestImmediateReport(.coding)
+    }
+
+    /// 两个采集器手上的 coding 载荷并在一起：用量归一个，活动和桶归另一个，键不重叠
+    private var codingPayloads: [CodingModule: CodingPayload] {
+        vibeCodingUsageCollector.payloads.merging(codingSessions.payloads) { current, _ in current }
     }
 
     func canRequestImmediateReport(_ module: TelemetryModule) -> Bool {
@@ -435,7 +431,7 @@ final class ServiceController: ObservableObject {
         case .charger: settings.chargerModuleEnabled
         case .powerBank: settings.powerBankModuleEnabled
         case .timezone: settings.timezoneModuleEnabled
-        case .vibeCoding, .vibeCodingYear: settings.vibeCodingModuleEnabled
+        case .coding: settings.vibeCodingModuleEnabled
         }
     }
 
@@ -448,12 +444,8 @@ final class ServiceController: ObservableObject {
         case .charger: chargerLink.hasTelemetry
         case .powerBank: powerBankLink.hasTelemetry
         case .timezone: timeZone.snapshot != nil
-        // 两个模块任一有值就能发：用量还没采到时，「此刻在不在用」也值得单独发
-        case .vibeCoding:
-            vibeCodingUsageCollector.uploadPayload != nil
-                || codingSessions.uploadPayload != nil
-        case .vibeCodingYear:
-            vibeCodingYearCollector.uploadPayload != nil
+        // 三份任一有值就能发：用量还没采到时，此刻的活动和五分钟桶也值得单独发
+        case .coding: !codingPayloads.isEmpty
         }
     }
 
@@ -541,7 +533,7 @@ final class ServiceController: ObservableObject {
         var cliPath: String
         var sessionInterval: Double
         var usageInterval: Double
-        var yearInterval: Double
+        var fullInterval: Double
     }
 
     private struct IconUploadKey: Equatable {
@@ -716,26 +708,24 @@ final class ServiceController: ObservableObject {
         if settings.vibeCodingModuleEnabled {
             codingSessions.onChange = { [weak self] in self?.wakeReporter() }
             vibeCodingUsageCollector.onChange = { [weak self] in self?.wakeReporter() }
-            vibeCodingYearCollector.onChange = { [weak self] in self?.wakeReporter() }
             if restartCodingCollection || vibeCodingCollectionTask == nil {
                 startVibeCodingCollection()
             }
         } else {
             codingSessions.onChange = nil
             vibeCodingUsageCollector.onChange = nil
-            vibeCodingYearCollector.onChange = nil
             vibeCodingCollectionTask?.cancel()
             vibeCodingSessionsTask?.cancel()
             vibeCodingCollectionTask = nil
             vibeCodingSessionsTask = nil
             vibeCodingUsageCollector.stop()
             codingSessions.stop()
-            vibeCodingYearCollector.stop()
+            codingDeliveryErrors.removeAll()
         }
     }
 
     /**
-     * 全历史采集与会话采集独立运行，云端分页不会阻塞会话或设备遥测。
+     * 全历史采集与会话采集独立运行，最慢的那一家也不会阻塞会话或设备遥测。
      *
      * 现在采集完由各自的 onChange 叫醒循环，跟前台应用、音乐同一条路：循环只读
      * 它们留下的载荷，唯一还会阻塞的就是那次 POST 本身。
@@ -748,24 +738,14 @@ final class ServiceController: ObservableObject {
         vibeCodingSessionsTask?.cancel()
         vibeCodingUsageCollector.invalidateSchedule()
         codingSessions.invalidateSchedule()
-        vibeCodingYearCollector.invalidateSchedule()
         vibeCodingCollectionTask = Task { [weak self] in
             while !Task.isCancelled {
                 guard let self, settings.vibeCodingModuleEnabled else { return }
-                // 先刷新持久账本，再从同一份数据生成年度图：完整采集一跑完就重算，
-                // 不必再等年度图自己的间隔
-                let fullRound = await self.vibeCodingUsageCollector.refreshIfNeeded(
+                await self.vibeCodingUsageCollector.refreshIfNeeded(
                     ccusageCLIPath: settings.ccusageCLIPath,
                     interval: settings.vibeCodingUsageRefreshInterval,
-                    fullInterval: settings.vibeCodingYearRefreshInterval
+                    fullInterval: settings.codingFullRefreshInterval
                 )
-                if fullRound {
-                    await self.vibeCodingYearCollector.refreshNow()
-                } else {
-                    await self.vibeCodingYearCollector.refreshIfNeeded(
-                        interval: settings.vibeCodingYearRefreshInterval
-                    )
-                }
                 try? await Task.sleep(for: Self.tickInterval)
             }
         }
@@ -794,6 +774,7 @@ final class ServiceController: ObservableObject {
         pendingWake = false
         reporterLastError = nil
         lastPosted = .init()
+        codingDeliveryErrors.removeAll()
         icons.reset()
         // 每个上报会话都完整发一次，之后两个 token 才分别判变。
         appleMusicCredentialStore.resetPostedTokens()
@@ -820,9 +801,9 @@ final class ServiceController: ObservableObject {
                     // 的激活通知驱动，后者由 Music.app 的 playerInfo 跨进程通知驱动、
                     // 另带一个兜底重读补上不发通知的 seek。循环只管读它们留下的
                     // snapshot —— 变化时它们会把循环叫醒，没事件时按 tickInterval 转。
-                    // vibe coding 那三条 CLI 不在这里采：它们在 startVibeCodingCollection
-                    // 里自己转，采完叫醒这条循环。最慢那条要 25 秒，等它跑完的话这
-                    // 25 秒内切换的应用会被合并掉。
+                    // coding 的两个采集器不在这里采：它们在 startVibeCodingCollection
+                    // 里自己转，内容变了叫醒这条循环。最慢那条要几十秒，等它跑完的话
+                    // 这段时间里切换的应用会被合并掉。
 
                     // token 检测属于这条主循环，但用五分钟闸门避免每圈都问 MusicKit。
                     await refreshAppleMusicCredentialsIfNeeded()
@@ -848,7 +829,7 @@ final class ServiceController: ObservableObject {
                         now: Date(),
                         suspended: suspended,
                         appleMusicModuleEnabled: settings.appleMusicModuleEnabled,
-                        vibeCodingModuleEnabled: settings.vibeCodingModuleEnabled,
+                        codingModuleEnabled: settings.vibeCodingModuleEnabled,
                         charger: chargingDevicesPayload,
                         capturedDesktop: capturedDesktop,
                         desktopBlocked: isDesktopReportingBlocked(capturedDesktop),
@@ -858,12 +839,7 @@ final class ServiceController: ObservableObject {
                             AppleMusicCredentialsSnapshot(musicUserToken: $0.musicUserToken)
                         },
                         musicUserTokenChanged: appleMusicCredentialStore.musicUserTokenChanged,
-                        vibeCodingUsagePayload: vibeCodingUsageCollector.uploadPayload,
-                        vibeCodingNowPayload: codingSessions.uploadPayload,
-                        vibeCodingYearPayload: vibeCodingYearCollector.uploadPayload,
-                        vibeCodingUsageUpdatedAt: vibeCodingUsageCollector.payloadUpdatedAt,
-                        vibeCodingNowUpdatedAt: codingSessions.payloadUpdatedAt,
-                        vibeCodingYearUpdatedAt: vibeCodingYearCollector.payloadUpdatedAt,
+                        coding: settings.vibeCodingModuleEnabled ? codingPayloads : [:],
                         manualModules: pendingManualReports
                     )
                     let decision = ReportDecision(
@@ -907,7 +883,7 @@ final class ServiceController: ObservableObject {
                         }
                         // 封面不再由这边送：网页那边为了拿曲目链接本来就要查一次
                         // Apple Music 目录，那次查询的结果自带封面 URL。
-                        // 三份 vibe coding 载荷和它们的更新时刻都在 inputs 里 ——
+                        // 三份 coding 载荷和它们的变化时刻都在 inputs 里 ——
                         // POST 等待期间可以继续采集，成功只确认这封信实际携带的版本。
                         let envelope = TelemetryEnvelope.make(
                             chargingDevices: decision.chargerToSend ? inputs.charger : nil,
@@ -915,9 +891,9 @@ final class ServiceController: ObservableObject {
                             timezone: decision.timezoneToSend ? inputs.timezone : nil,
                             appleMusic: decision.musicToSend ? inputs.music : nil,
                             appleMusicCredentials: decision.credentialsToSend,
-                            vibeCodingUsage: decision.usageToSend ? inputs.vibeCodingUsagePayload : nil,
-                            vibeCodingNow: decision.nowToSend ? inputs.vibeCodingNowPayload : nil,
-                            vibeCodingYear: decision.yearToSend ? inputs.vibeCodingYearPayload : nil,
+                            coding: inputs.coding
+                                .filter { decision.codingToSend.contains($0.key) }
+                                .mapValues(\.value),
                             includeDesktop: decision.desktopToSend,
                             includeAppleMusic: decision.musicToSend,
                             activeModules: activeModuleNames,
@@ -982,6 +958,13 @@ final class ServiceController: ObservableObject {
                         }
                         if let iconHash = effects.desktopIconConfirmed?.iconHash {
                             icons.remember(iconHash)
+                        }
+                        for module in effects.codingAccepted { codingDeliveryErrors[module] = nil }
+                        codingDeliveryErrors.merge(effects.codingRefused) { _, refusal in refusal }
+                        // coding 以外的模块被站点忽略：多半是站点没跟上，这里没有别的地方可挂
+                        let ignored = (responsePayload.data.ignored ?? []).filter { CodingModule(rawValue: $0) == nil }
+                        if !ignored.isEmpty {
+                            reporterLastError = "站点不认识这些模块，没有收下：\(ignored.joined(separator: "、"))"
                         }
                         if decision.credentialsToSend != nil {
                             appleMusicCredentialStore.notePosted(credentials)
@@ -1172,7 +1155,7 @@ final class ServiceController: ObservableObject {
      * 信封里的 `activeModules`：站点拿它决定这一轮心跳该给哪些模块续期。
      *
      * 充电头和充电宝比别的模块多一道连接判断。其余模块的数据源和上报器是同一个
-     * 进程 —— 这份信封能发出去，就说明前台应用、时区、Vibe Coding 的来源都还在，
+     * 进程 —— 这份信封能发出去，就说明前台应用、时区、coding 的来源都还在，
      * 开关本身已经是充分的存活证明。这两个不是：读数从 BLE 那头来，链路断了 App
      * 照样活着、照样发心跳，于是「开关开着」被站点读成「设备在线」，`charger:latest`
      * 早就过期了，`charger:lastPush` 还在被每一轮心跳顶新，断流那条判断永远不成立。
@@ -1192,10 +1175,7 @@ final class ServiceController: ObservableObject {
         if settings.desktopModuleEnabled { names.append(TelemetryModule.desktop.rawValue) }
         if settings.appleMusicModuleEnabled { names.append(TelemetryModule.appleMusic.rawValue) }
         if settings.timezoneModuleEnabled { names.append(TelemetryModule.timezone.rawValue) }
-        if settings.vibeCodingModuleEnabled {
-            names.append(TelemetryModule.vibeCoding.rawValue)
-            names.append(TelemetryModule.vibeCodingYear.rawValue)
-        }
+        if settings.vibeCodingModuleEnabled { names.append(TelemetryModule.coding.rawValue) }
         return names
     }
 }

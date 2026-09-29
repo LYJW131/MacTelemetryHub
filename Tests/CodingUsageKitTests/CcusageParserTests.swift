@@ -88,8 +88,23 @@ struct CcusageParserTests {
         let report = try CcusageParser.parse(sourceID: "claude", daily: data(["daily": [day]]), sessions: noSessions, collectedAt: now)
         #expect(report.days[0].totalTokens == 37)
         #expect(report.days[0].models["model-a"] == 37)
-        #expect(report.costComplete == false)
+        #expect(report.days[0].costComplete == false)
         #expect(report.completeDates.contains("2026-09-05"))
+    }
+    /// 费用估没估全按天判：一天漏了价，不连累别的日子
+    @Test func costCompletenessIsJudgedPerDay() throws {
+        let priced = rawDay()
+        var unpriced = rawDay(); unpriced["date"] = "2026-09-04"
+        var model = (unpriced["modelBreakdowns"] as! [[String: Any]])[0]
+        model["cost"] = 0
+        unpriced["modelBreakdowns"] = [model]
+        var idle = rawDay(); idle["date"] = "2026-09-03"
+        for key in ["inputTokens", "outputTokens", "cacheReadTokens", "cacheCreationTokens", "totalTokens", "totalCost"] { idle[key] = 0 }
+        idle["modelBreakdowns"] = []
+        let report = try CcusageParser.parse(sourceID: "claude", daily: data(["daily": [priced, unpriced, idle]]),
+                                             sessions: noSessions, collectedAt: now)
+        #expect(report.days.map(\.date) == ["2026-09-03", "2026-09-04", "2026-09-05"])
+        #expect(report.days.map(\.costComplete) == [true, false, true])
     }
     @Test func preservesCodexReasoningAsOutputSubsetAndNeverDoubleCountsCache() throws {
         var day = rawDay()
@@ -102,7 +117,7 @@ struct CcusageParserTests {
         #expect(report.days[0].outputTokens == 4)
         #expect(report.days[0].reasoningTokens == 2)
         #expect(report.days[0].totalTokens == 37)
-        #expect(report.costComplete == false)
+        #expect(report.days[0].costComplete == false)
     }
     @Test func antigravityThinkingResidualBelongsToOutputWithoutInventingModelAttribution() throws {
         var day = rawDay(); day["totalTokens"] = 40
@@ -111,8 +126,7 @@ struct CcusageParserTests {
         #expect(report.days[0].reasoningTokens == 3)
         #expect(report.days[0].totalTokens == 40)
         #expect(report.days[0].models["model-a"] == 37)
-        #expect(report.precision == .measured)
-        #expect(report.costComplete == false)
+        #expect(report.days[0].costComplete == false)
     }
     @Test func codexHistoricalUnclassifiedResidualKeepsMeasuredTotalAndReportsGap() throws {
         var day = rawDay()
@@ -124,6 +138,8 @@ struct CcusageParserTests {
         #expect(report.days[0].unclassifiedTokens == 3)
         #expect(report.days[0].inputTokens == 10)
         #expect(report.days[0].outputTokens == 4)
+        // 没分列的那 3 个 token 估不了价
+        #expect(report.days[0].costComplete == false)
         #expect(report.diagnosticError?.contains("3 token") == true)
     }
     @Test func rejectsInvalidDatesNegativeBooleanFractionalOrInconsistentTokens() throws {

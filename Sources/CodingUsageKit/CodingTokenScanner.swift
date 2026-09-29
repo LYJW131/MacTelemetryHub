@@ -1,42 +1,16 @@
 import Foundation
 import CoreFoundation
 
-public struct CodingTokenCounts: Codable, Equatable, Sendable {
-    public var id: String
-    public var model: String?
-    public var inputTokens: Int64 = 0
-    public var outputTokens: Int64 = 0
-    public var cacheReadTokens: Int64 = 0
-    public var cacheCreationTokens: Int64 = 0
-    public var reasoningTokens: Int64 = 0
-    public var eventCount: Int64 = 0
-}
-public struct CodingTokenWindow: Codable, Equatable, Sendable {
-    public var from: Int64
-    public var to: Int64
-    public var agents: [CodingTokenCounts]
-}
-public struct CodingTokenSource: Codable, Equatable, Sendable {
-    public var id: String
-    public var state: String
-}
-/// The newest usage event a source wrote. The live “正在使用” light for scanned sources comes from this.
-public struct CodingTokenActivity: Equatable, Sendable {
+/// 一个来源最近一条用量事件：扫描器从 JSONL 日志里读到的，或账本会话记录里 `ccusage session` 给的
+public struct CodingActivitySample: Equatable, Sendable {
     public var at: Date
     public var model: String?
-}
-public struct CodingTokenUsage: Codable, Equatable, Sendable {
-    public var from: Int64
-    public var to: Int64
-    public var collectedAt: Int64
-    public var sources: [CodingTokenSource]
-    public var windows: [CodingTokenWindow]
 }
 
 /// Reads only usage metadata. Prompt, response text, paths and session IDs never leave the scanner.
 /// Per-file offsets avoid re-reading unchanged history; restart safely replays and deduplicates it.
 public struct CodingTokenScanner: Sendable {
-    private struct Event: Sendable { var at: Int64; var counts: CodingTokenCounts }
+    private struct Event: Sendable { var at: Int64; var counts: CodingTokenBucketRow }
     private struct FileState: Sendable {
         var offset: UInt64 = 0
         var tail = Data()
@@ -49,22 +23,26 @@ public struct CodingTokenScanner: Sendable {
     private var files: [String: FileState] = [:]
     /// Sources this scanner reads. Their activity does not need a `ccusage session` run.
     public static let sourceIDs = ["codex", "claude"]
+    /// 桶长
+    public static let bucketMilliseconds: Int64 = 300_000
     /// Newest event per source as of the last `scan`, within its 24-hour window.
-    public private(set) var latestActivity: [String: CodingTokenActivity] = [:]
+    public private(set) var latestActivity: [String: CodingActivitySample] = [:]
     public init() {}
-    public mutating func scan(home: URL, at now: Date = Date()) throws -> CodingTokenUsage {
-        let end = Int64(now.timeIntervalSince1970 * 1000)
+
+    /// 滚动 24 小时 `[now - 24h, now)` 的五分钟桶，就是 `modules.codingTokenBuckets` 的那一份
+    public mutating func scan(home: URL, at now: Date = Date()) throws -> CodingTokenBucketReport {
+        let end = CodingUsageDates.milliseconds(now)
         let start = end - 86_400_000
         let roots = [("codex", home.appendingPathComponent(".codex/sessions")),
                      ("codex", home.appendingPathComponent(".codex/archived_sessions")),
                      ("claude", home.appendingPathComponent(".claude/projects"))]
-        var states = Dictionary(uniqueKeysWithValues: Self.sourceIDs.map { ($0, "unavailable") })
+        var states = Dictionary(uniqueKeysWithValues: Self.sourceIDs.map { ($0, CodingTokenBucketState.unavailable) })
         var found = Set<String>()
         for (source, root) in roots {
             guard FileManager.default.fileExists(atPath: root.path) else { continue }
-            if states[source] != "partial" { states[source] = "ok" }
+            if states[source] != .partial { states[source] = .ok }
             guard let enumerator = FileManager.default.enumerator(at: root, includingPropertiesForKeys: [.contentModificationDateKey, .fileSizeKey], options: [.skipsHiddenFiles]) else {
-                states[source] = "partial"; continue
+                states[source] = .partial; continue
             }
             for case let url as URL in enumerator where url.pathExtension == "jsonl" {
                 try Task.checkCancellation()
@@ -94,13 +72,13 @@ public struct CodingTokenScanner: Sendable {
                     }
                     file.events = file.events.filter { $0.value.at >= start }
                     files[url.path] = file
-                    if file.incomplete { states[source] = "partial" }
+                    if file.incomplete { states[source] = .partial }
                 } catch is CancellationError { throw CancellationError() }
-                catch { states[source] = "partial" }
+                catch { states[source] = .partial }
             }
         }
         files = files.filter { found.contains($0.key) }
-        var buckets: [Int64: [String: CodingTokenCounts]] = [:]
+        var buckets: [Int64: [String: CodingTokenBucketRow]] = [:]
         var unique: [String: Event] = [:]
         for file in files.values {
             for (id, event) in file.events where event.at >= start && event.at < end {
@@ -114,22 +92,27 @@ public struct CodingTokenScanner: Sendable {
             newest[event.counts.id] = event
         }
         latestActivity = newest.mapValues {
-            CodingTokenActivity(at: Date(timeIntervalSince1970: Double($0.at) / 1000), model: $0.counts.model)
+            CodingActivitySample(at: Date(timeIntervalSince1970: Double($0.at) / 1000), model: $0.counts.model)
         }
         for event in unique.values {
-                let bucket = event.at / 300_000 * 300_000
-                let key = event.counts.id + ":" + (event.counts.model ?? "")
-                var total = buckets[bucket]?[key] ?? CodingTokenCounts(id: event.counts.id, model: event.counts.model)
-                let c = event.counts
-                total.inputTokens += c.inputTokens; total.outputTokens += c.outputTokens
-                total.cacheReadTokens += c.cacheReadTokens; total.cacheCreationTokens += c.cacheCreationTokens
-                total.reasoningTokens += c.reasoningTokens; total.eventCount += c.eventCount
-                buckets[bucket, default: [:]][key] = total
+            let bucket = event.at / Self.bucketMilliseconds * Self.bucketMilliseconds
+            let key = event.counts.id + ":" + (event.counts.model ?? "")
+            var total = buckets[bucket]?[key] ?? CodingTokenBucketRow(id: event.counts.id, model: event.counts.model)
+            let c = event.counts
+            total.inputTokens += c.inputTokens; total.outputTokens += c.outputTokens
+            total.cacheReadTokens += c.cacheReadTokens; total.cacheCreationTokens += c.cacheCreationTokens
+            total.reasoningTokens += c.reasoningTokens; total.eventCount += c.eventCount
+            buckets[bucket, default: [:]][key] = total
         }
-        return CodingTokenUsage(from: start, to: end, collectedAt: end,
-            sources: Self.sourceIDs.map { CodingTokenSource(id: $0, state: states[$0]!) },
-            windows: buckets.keys.sorted().map { from in CodingTokenWindow(from: from, to: from + 300_000,
-                agents: buckets[from]!.values.sorted { ($0.id + ($0.model ?? "")) < ($1.id + ($1.model ?? "")) }) })
+        return CodingTokenBucketReport(
+            from: start, to: end, collectedAt: end,
+            agents: Self.sourceIDs.map { CodingTokenBucketAgent(id: $0, state: states[$0]!) },
+            windows: buckets.keys.sorted().map { from in
+                CodingTokenBucketWindow(from: from, agents: buckets[from]!.values.sorted {
+                    ($0.id + ($0.model ?? "")) < ($1.id + ($1.model ?? ""))
+                })
+            }
+        )
     }
     private static func consume(_ data: Data, source: String, start: Int64, end: Int64, file: inout FileState) throws {
         guard let row = try JSONSerialization.jsonObject(with: data) as? [String: Any] else { return }
@@ -144,7 +127,7 @@ public struct CodingTokenScanner: Sendable {
         let formatter = ISO8601DateFormatter(); formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
         let date = formatter.date(from: stamp) ?? ISO8601DateFormatter().date(from: stamp)
         guard let date else { return }
-        let at = Int64(date.timeIntervalSince1970 * 1000)
+        let at = CodingUsageDates.milliseconds(date)
         func number(_ object: [String: Any], _ key: String) throws -> Int64 {
             guard let value = object[key] else { return 0 }
             guard let n = value as? NSNumber, CFGetTypeID(n) != CFBooleanGetTypeID(), n.doubleValue.isFinite,
@@ -153,7 +136,7 @@ public struct CodingTokenScanner: Sendable {
             }
             return n.int64Value
         }
-        var counts = CodingTokenCounts(id: source, model: file.model)
+        var counts = CodingTokenBucketRow(id: source, model: file.model)
         let identity: String
         if source == "codex" {
             guard payload["type"] as? String == "token_count", let info = payload["info"] as? [String: Any],

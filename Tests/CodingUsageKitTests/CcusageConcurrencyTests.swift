@@ -133,17 +133,18 @@ struct CcusageConcurrencyTests {
         try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: executable.path)
         let engine = CodingUsageEngine(ledgerURL: directory.appendingPathComponent("history.json"), home: directory)
         let first = CodingUsageDates.parseInstant("2026-09-05T04:00:00Z")!
-        _ = try await engine.refresh(executableURL: executable, includeCursor: false, at: first)
+        _ = try await engine.refresh(executableURL: executable, at: first)
         let log = directory.appendingPathComponent("operations.log")
         try Data().write(to: log)
         let later = first.addingTimeInterval(600)
-        let snapshot = try await engine.refresh(executableURL: executable, includeCursor: false,
-                                                only: ["claude"], at: later)
+        let partial = try await engine.refresh(executableURL: executable, only: ["claude"], at: later)
         let operations = try String(contentsOf: log, encoding: .utf8).split(separator: "\n").map(String.init)
-        // 只刷 Claude：不跑全来源发现，也不碰 Grok
+        // 只刷 Claude：不跑全来源发现，也不碰 Grok；报告也只带 Claude，站点那边 Grok 原样不动
         #expect(Set(operations) == ["claude:daily", "claude:session"])
-        let status = { (id: String) in snapshot.usage.agents.first { $0.id == id }?.usageStatus.collectedAt }
-        #expect(status("claude") == CodingUsageDates.instant(later))
-        #expect(status("grok") == CodingUsageDates.instant(first))
+        #expect(partial.report.agents.map(\.id) == ["claude"])
+        let ledger = try await engine.usage().report
+        let collectedAt = { (id: String) in ledger.agents.first { $0.id == id }?.collectedAt }
+        #expect(collectedAt("claude") == CodingUsageDates.milliseconds(later))
+        #expect(collectedAt("grok") == CodingUsageDates.milliseconds(first))
     }
 }

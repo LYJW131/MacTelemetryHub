@@ -41,7 +41,7 @@ private enum SettingsCategory: String, CaseIterable, Identifiable {
         case .invalidPort, .invalidBindAddress: .local
         case .invalidTiming, .invalidPostURL, .invalidR2Configuration, .missingAccessClientSecret: .reporting
         case .invalidCcusagePath, .invalidCodingSessionInterval,
-             .invalidVibeCodingUsageInterval, .invalidVibeCodingYearInterval: .sources
+             .invalidVibeCodingUsageInterval, .invalidCodingFullRefreshInterval: .sources
         case .invalidWindowTitleRiskThresholds,
              .invalidWindowTitleInformativeMinimum: .windowTitle
         case nil: nil
@@ -346,7 +346,7 @@ struct SettingsView: View {
     }
 
     private var vibeCodingSection: some View {
-        settingSection("Vibe Coding 用量", detail: "ccusage 读取本地完整用量与会话；Cursor 直接同步账号云端历史。Mac 保存历史并统一上报摘要，限额由 NAS 独立上报。不会上传 session ID、项目路径、提示词或回复。", icon: "terminal") {
+        settingSection("Vibe Coding 用量", detail: "ccusage 读取本机各 agent 的完整用量与会话，Mac 保存账本，只上报每天的用量、最近一次活动和五分钟用量窗口；合计与排名由站点计算。Cursor 与限额由容器里的上报器负责。不会上传 session ID、项目路径、提示词或回复。", icon: "terminal") {
             Toggle("启用用量采集", isOn: $settings.vibeCodingModuleEnabled)
                 .toggleStyle(.switch)
 
@@ -360,7 +360,7 @@ struct SettingsView: View {
                     )
                     NumericField(title: "会话状态刷新", unit: "秒（最少 60）", placeholder: "60", value: $settings.codingSessionRefreshInterval)
                     NumericField(title: "Claude 今日用量刷新", unit: "秒（最少 60）", placeholder: "600", value: $settings.vibeCodingUsageRefreshInterval)
-                    NumericField(title: "全部来源与热力图刷新", unit: "秒（最少 60）", placeholder: "3600", value: $settings.vibeCodingYearRefreshInterval)
+                    NumericField(title: "全部来源刷新", unit: "秒（最少 60）", placeholder: "3600", value: $settings.codingFullRefreshInterval)
                 }
                 .padding(.top, 5)
             }

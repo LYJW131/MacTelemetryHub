@@ -3,6 +3,9 @@ import Darwin
 
 /// Persistent source/account/day snapshots. A failed scan never replaces a successful history.
 /// Cross-process locking protects concurrent usage and session refreshes from lost updates.
+///
+/// 上报只出本机观测到的原始事实（`report`）：每个来源的完整日行、会话数、采集状态。
+/// 合计、排名、「今天」、年度格子、模型隐藏名单都归站点。
 public struct CodingUsageLedger: Sendable {
     private struct SourceState: Codable, Sendable {
         var days: [String: CodingUsageDayRecord] = [:]
@@ -19,9 +22,38 @@ public struct CodingUsageLedger: Sendable {
     public let url: URL
     private var disk: DiskState
 
+    /**
+     * 账本里还留着、但不再是本机来源的 id。Cursor 的历史由 agents-reporter 以账号来源上报，
+     * 本机不再采集；旧账本里留下的 Cursor 日子原样留在盘上，不进上报也不进活动。
+     */
+    static let retiredSourceIDs: Set<String> = ["cursor"]
+
+    /// 站点收的 agent id（lyjwpage shared/coding-usage.ts 的 AGENT_ID）
+    static func acceptsID(_ id: String) -> Bool {
+        id.range(of: #"^[a-z0-9][a-z0-9._-]{0,39}$"#, options: .regularExpression) != nil
+    }
+
+    /// 能上报的本机来源：不是退役的，id 也合站点的规矩
+    static func isReported(_ id: String) -> Bool {
+        !retiredSourceIDs.contains(id) && acceptsID(id)
+    }
+
+    /// 同一天最多报这么多个模型（站点的上限）；超出的是用量最小的那些，丢掉后合计仍 ≤ totalTokens
+    static let reportedModelsPerDay = 64
+
     public init(url: URL) throws {
         self.url = url
         self.disk = try Self.read(url)
+    }
+
+    /// 账本里的本机来源（不含退役的），按 id 排序
+    public var sourceIDs: [String] {
+        disk.selectedAccounts.keys.filter { !Self.retiredSourceIDs.contains($0) }.sorted()
+    }
+
+    /// 本机来源里 id 不合站点规矩、因此不上报的那几个。一个坏 id 会让站点拒掉整个模块，所以宁可不报它
+    public var unreportedSourceIDs: [String] {
+        sourceIDs.filter { !Self.acceptsID($0) }
     }
 
     public mutating func apply(_ report: CodingUsageSourceReport) throws {
@@ -75,14 +107,15 @@ public struct CodingUsageLedger: Sendable {
                 source.days[date] = row
             }
             if report.authoritative {
+                // 确认过没用的日子：一个 token 都没有，自然没有估不到价的请求
                 for date in report.completeDates where freshRows[date] == nil {
-                    source.days[date] = CodingUsageDayRecord(date: date, apiEquivalentCostUSD: 0)
+                    source.days[date] = CodingUsageDayRecord(date: date, apiEquivalentCostUSD: 0, costComplete: true)
                 }
                 source.completeDates.formUnion(report.completeDates)
                 source.completeDates.formUnion(freshRows.keys)
                 let scannedToday = CodingUsageDates.day(report.collectedAt)
                 if report.coverageEnd == scannedToday, source.days[scannedToday] == nil {
-                    source.days[scannedToday] = CodingUsageDayRecord(date: scannedToday, apiEquivalentCostUSD: 0)
+                    source.days[scannedToday] = CodingUsageDayRecord(date: scannedToday, apiEquivalentCostUSD: 0, costComplete: true)
                     source.completeDates.insert(scannedToday)
                 }
             }
@@ -94,8 +127,8 @@ public struct CodingUsageLedger: Sendable {
                 warning: problems.isEmpty ? nil : Array(Set(problems)).sorted().joined(separator: "；"),
                 coverageStart: source.days.keys.min(),
                 coverageEnd: [source.days.keys.max(), report.coverageEnd].compactMap { $0 }.max(),
-                precision: report.precision,
-                costComplete: report.costComplete && problems.isEmpty
+                precision: .measured,
+                costComplete: problems.isEmpty && freshRows.values.allSatisfy(Self.costComplete)
             )
             disk.accounts[report.sourceID, default: [:]][account] = source
             disk.selectedAccounts[report.sourceID] = account
@@ -126,120 +159,90 @@ public struct CodingUsageLedger: Sendable {
         }
     }
 
-    public func snapshot(
-        at now: Date = Date(),
-        agents specs: [CodingUsageAgentSpec] = CodingUsageAgentSpec.defaults,
-        omitting omittedSourceIDs: Set<String> = []
-    ) throws -> CodingUsageSnapshot {
-        var allSpecs = specs
-        for id in disk.selectedAccounts.keys.sorted() where !allSpecs.contains(where: { $0.id == id }) && !omittedSourceIDs.contains(id) {
-            allSpecs.append(CodingUsageAgentSpec(id: id, label: id, icon: id))
+    /**
+     * `modules.codingUsage`：`only` 限定报哪几个来源（只刷了 Claude 的那一轮只报 Claude），nil 是全部。
+     *
+     * 采到过的来源（`ok`）带完整日行；这一轮失败但从前采到过的报 `error`，不带日行，站点留着
+     * 已有的日子。从没采到过用量的来源不报 —— 那是这台 Mac 上压根没有它，报一行 error 只是噪音。
+     */
+    public func report(agents only: Set<String>? = nil) throws -> CodingUsageReport {
+        var agents: [CodingUsageAgent] = []
+        for id in sourceIDs where Self.acceptsID(id) && (only?.contains(id) ?? true) {
+            if let agent = try Self.agent(id: id, source: state(for: id)) { agents.append(agent) }
         }
-        let today = CodingUsageDates.day(now)
-        var totals = CodingUsageTotalsPayload()
-        var activeDates = Set<String>()
-        var combinedDays: [String: Int64] = [:]
-        var dayModels: [String: [String: Int64]] = [:]
-        var allModels: [String: Int64] = [:]
-        var agentPayloads: [CodingUsageAgentPayload] = []
-        var nowPayloads: [CodingUsageNowAgentPayload] = []
-        var lastCollection: String?
-        for spec in allSpecs where !omittedSourceIDs.contains(spec.id) {
-            let source = state(for: spec.id)
-            var models: [String: Int64] = [:]
-            // A reproducible order matters for floating-point cost sums and change detection.
-            for date in source.days.keys.sorted() {
-                let row = source.days[date]!
-                totals.inputTokens = try Self.add(totals.inputTokens, row.inputTokens)
-                totals.outputTokens = try Self.add(totals.outputTokens, row.outputTokens)
-                totals.cacheReadTokens = try Self.add(totals.cacheReadTokens, row.cacheReadTokens)
-                totals.cacheCreationTokens = try Self.add(totals.cacheCreationTokens, row.cacheCreationTokens)
-                totals.reasoningTokens = try Self.add(totals.reasoningTokens, row.reasoningTokens)
-                totals.totalTokens = try Self.add(totals.totalTokens, row.totalTokens)
-                totals.apiEquivalentCostUSD += row.apiEquivalentCostUSD ?? 0
-                guard totals.apiEquivalentCostUSD.isFinite else { throw CodingUsageError.invalid("费用总和溢出") }
-                if row.totalTokens > 0 { activeDates.insert(row.date) }
-                combinedDays[row.date] = try Self.add(combinedDays[row.date, default: 0], row.totalTokens)
-                for (model, value) in row.models {
-                    let name = CodingUsageModelIdentity.canonical(model)
-                    models[name] = try Self.add(models[name, default: 0], value)
-                    if Self.visibleModel(name) {
-                        allModels[name] = try Self.add(allModels[name, default: 0], value)
-                        dayModels[row.date, default: [:]][name] = try Self.add(dayModels[row.date]?[name] ?? 0, value)
-                    }
+        return CodingUsageReport(agents: agents)
+    }
+
+    /// 各本机来源会话记录里最近的一次活动（`ccusage session` 给的），没有带时刻的会话就不在里面
+    public func latestSessionActivity() -> [String: CodingActivitySample] {
+        var latest: [String: CodingActivitySample] = [:]
+        for id in sourceIDs {
+            var newest: (at: Date, session: CodingUsageSessionRecord)?
+            for session in state(for: id).sessions.values {
+                guard let at = session.lastActivityAt else { continue }
+                // 同一时刻按 identityHash 取，结果和字典顺序无关
+                if let current = newest, at < current.at || (at == current.at && session.identityHash > current.session.identityHash) {
+                    continue
                 }
+                newest = (at, session)
             }
-            totals.sessionCount += source.sessions.count
-            // Unavailable configured sources and missing prices cannot be called complete.
-            totals.costComplete = totals.costComplete && source.status.costComplete && source.status.state == .ok
-            let ordered = source.sessions.values.sorted {
-                let left = $0.lastActivityAt ?? .distantPast, right = $1.lastActivityAt ?? .distantPast
-                return left == right ? $0.identityHash < $1.identityHash : left > right
-            }
-            let lastActivity = ordered.first?.lastActivityAt
-            let currentModel = ordered.first?.currentModel
-                .map(CodingUsageModelIdentity.canonical)
-                .flatMap { Self.visibleModel($0) ? $0 : nil }
-            let fallbackModel = source.days.keys.sorted().reversed().lazy.compactMap {
-                Self.ranked(source.days[$0]?.models ?? [:]).first?.model
-            }.first
-            let todayRow: CodingUsageDayPayload?
-            if let row = source.days[today] { todayRow = CodingUsageDayPayload(row) }
-            else if source.completeDates.contains(today) {
-                todayRow = CodingUsageDayPayload(.init(date: today, apiEquivalentCostUSD: 0))
-            }
-            else { todayRow = nil }
-            agentPayloads.append(CodingUsageAgentPayload(
-                id: spec.id, label: spec.label, icon: spec.icon,
-                models: models.keys.filter { $0 != "unknown" }.sorted(),
-                currentModel: currentModel ?? fallbackModel, topModel: Self.ranked(models).first?.model,
-                today: todayRow, usageStatus: source.status
-            ))
-            if let collectedAt = source.status.collectedAt, collectedAt > (lastCollection ?? "") {
-                lastCollection = collectedAt
-            }
-            let age = lastActivity.map { now.timeIntervalSince($0) }
-            nowPayloads.append(CodingUsageNowAgentPayload(
-                id: spec.id, currentModel: currentModel,
-                lastActivityAt: lastActivity.map(CodingUsageDates.instant),
-                active: age.map { $0 >= 0 && $0 <= 300 } ?? false
-            ))
+            if let newest { latest[id] = CodingActivitySample(at: newest.at, model: newest.session.currentModel) }
         }
-        totals.activeDays = activeDates.count
-        let calendar = CodingUsageDates.calendar
-        let start = calendar.startOfDay(for: now)
-        let weekday = calendar.component(.weekday, from: start)
-        let origin = calendar.date(byAdding: .day, value: -(52 * 7 + weekday - 1), to: start)!
-        var yearDays: [Int64] = []
-        var yearParts: [(Int, [CodingUsageModelPayload])] = []
-        var yearModelNames = Set<String>()
-        for offset in 0..<371 {
-            let date = CodingUsageDates.day(calendar.date(byAdding: .day, value: offset, to: origin)!)
-            let value = date <= today ? combinedDays[date, default: 0] : 0
-            yearDays.append(value)
-            let parts = Array(Self.ranked(dayModels[date] ?? [:]).prefix(5))
-            if value > 0 && !parts.isEmpty {
-                yearParts.append((offset, parts))
-                yearModelNames.formUnion(parts.map(\.model))
-            }
-        }
-        let yearModels = yearModelNames.sorted()
-        let indexes = Dictionary(uniqueKeysWithValues: yearModels.enumerated().map { ($0.element, Int64($0.offset)) })
-        let mix = yearParts.map { offset, parts in
-            [Int64(offset)] + parts.flatMap { [indexes[$0.model]!, $0.tokens] }
-        }
-        return CodingUsageSnapshot(
-            usage: CodingUsagePayload(agents: agentPayloads, totals: totals, topModels: Array(Self.ranked(allModels).prefix(3)),
-                                      collectedAt: lastCollection ?? CodingUsageDates.instant(now),
-                                      omittedSources: omittedSourceIDs.sorted()),
-            now: CodingUsageNowPayload(agents: nowPayloads),
-            year: CodingUsageYearPayload(origin: CodingUsageDates.day(origin), days: yearDays, models: yearModels, mix: mix)
-        )
+        return latest
     }
 
     private func state(for sourceID: String) -> SourceState {
         disk.accounts[sourceID]?[disk.selectedAccounts[sourceID] ?? "local"] ?? SourceState()
     }
+
+    private static func agent(id: String, source: SourceState) throws -> CodingUsageAgent? {
+        let collectedAt = source.status.collectedAt
+            .flatMap(CodingUsageDates.parseInstant)
+            .map(CodingUsageDates.milliseconds)
+        if source.status.state == .ok, let collectedAt {
+            return CodingUsageAgent(
+                id: id, state: .ok, collectedAt: collectedAt, error: nil, warning: source.status.warning,
+                sessionCount: source.sessions.count,
+                days: try source.days.keys.sorted().map { try day(source.days[$0]!) }
+            )
+        }
+        guard collectedAt != nil || !source.days.isEmpty else { return nil }
+        return CodingUsageAgent(
+            id: id, state: .error, collectedAt: collectedAt, error: source.status.error, warning: nil,
+            sessionCount: source.sessions.count, days: nil
+        )
+    }
+
+    /// 日行换成上报的形状：模型名过 `CodingUsageModelIdentity.reported`（占位符映射后同名的合并），
+    /// 零用量的模型不报；`totalTokens` 原样，含来源没分列的那部分
+    static func day(_ record: CodingUsageDayRecord) throws -> CodingUsageDay {
+        var merged: [String: Int64] = [:]
+        for (raw, tokens) in record.models where tokens > 0 {
+            let name = CodingUsageModelIdentity.reported(raw)
+            merged[name] = try add(merged[name, default: 0], tokens)
+        }
+        let models = merged
+            .map { CodingUsageModelTokens(model: $0.key, tokens: $0.value) }
+            .sorted { $0.tokens == $1.tokens ? $0.model < $1.model : $0.tokens > $1.tokens }
+        return CodingUsageDay(
+            date: record.date,
+            inputTokens: record.inputTokens,
+            outputTokens: record.outputTokens,
+            cacheReadTokens: record.cacheReadTokens,
+            cacheCreationTokens: record.cacheCreationTokens,
+            reasoningTokens: record.reasoningTokens,
+            totalTokens: record.totalTokens,
+            apiEquivalentCostUSD: record.apiEquivalentCostUSD ?? 0,
+            costComplete: costComplete(record),
+            models: Array(models.prefix(reportedModelsPerDay))
+        )
+    }
+
+    /// 旧账本的日行没记这一格：没有 token 的那天谈不上漏估，有 token 的按没估全算
+    static func costComplete(_ record: CodingUsageDayRecord) -> Bool {
+        record.costComplete ?? (record.totalTokens == 0)
+    }
+
     private static func mergeSessions(_ sessions: [CodingUsageSessionRecord], into source: inout SourceState) {
         for session in sessions where !session.identityHash.isEmpty {
             let previous = source.sessions[session.identityHash]
@@ -247,20 +250,6 @@ public struct CodingUsageLedger: Sendable {
                 source.sessions[session.identityHash] = session
             }
         }
-    }
-    static func visibleModel(_ value: String) -> Bool {
-        !value.isEmpty && value != "unknown" && value != "codex-auto-review"
-    }
-    private static func ranked(_ values: [String: Int64]) -> [CodingUsageModelPayload] {
-        var merged: [String: Int64] = [:]
-        for (model, value) in values where value > 0 {
-            let name = CodingUsageModelIdentity.canonical(model)
-            guard visibleModel(name), let next = try? add(merged[name, default: 0], value) else { continue }
-            merged[name] = next
-        }
-        return merged
-            .map { CodingUsageModelPayload(model: $0.key, tokens: $0.value) }
-            .sorted { $0.tokens == $1.tokens ? $0.model < $1.model : $0.tokens > $1.tokens }
     }
     static func add(_ lhs: Int64, _ rhs: Int64) throws -> Int64 {
         let (value, overflow) = lhs.addingReportingOverflow(rhs)
@@ -307,7 +296,8 @@ public struct CodingUsageLedger: Sendable {
         let previous = disk
         disk = fresh
         do {
-            _ = try snapshot()
+            // 写盘前先按上报的口径出一遍：出不了报告的账本（比如模型合并后溢出）不落盘
+            _ = try report()
             let encoder = JSONEncoder(); encoder.outputFormatting = [.sortedKeys]
             try encoder.encode(fresh).write(to: url, options: .atomic)
             try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: url.path)

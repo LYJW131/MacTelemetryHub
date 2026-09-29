@@ -15,7 +15,6 @@ below is off by default.
 | The telemetry envelope: charger readings, frontmost app name and icon, window titles cleared for publishing, Music.app state, coding usage | The `POST` URL you enter under 设置 › 上报. The author's own backend is not published; the ingest protocol below is the whole contract and is enough to build one. | Off (`postEnabled` false, empty URL) |
 | Window titles that are neither blacklisted nor trusted, with the app name and bundle ID | `https://api.typesafe.ai/v1/systemone` (TypeSafe's Jev model), to decide whether the title may be published; see **Module permissions** | Off until a TypeSafe API key is entered |
 | Charger cover JPEG and app icons | The S3-compatible bucket (R2) you configure | Off |
-| Cursor cloud usage history | `https://cursor.com` dashboard endpoints, using Cursor.app's own local login | Off (coding usage module disabled) |
 | Local HTTP API: `/health` (frontmost app, icon state, a window title only when it is already cleared for publishing), `/apple-music/authorization`, charging SSE streams | Whoever can reach the bind address; no authentication | Off; loopback only when enabled |
 
 ## What the app includes
@@ -43,9 +42,9 @@ below is off by default.
   pending. A pending title raises a notification with a single 公开 button;
   closing the notification locks it, and pending titles can also be settled from
   the menu bar
-- coding-usage aggregation that never uploads session IDs, project paths, prompts, or replies
+- coding usage facts read from local agent logs — per-day usage, the latest usage event, five-minute token windows — that never include session IDs, project paths, prompts, or replies
 - charger cover name plus the original JPEG uploaded to R2 (no resize or transcode; the point is to leave Anker's signed URL)
-- coding agent usage aggregation in the envelope (subscription plan tiers and rate-limit windows are out of scope here; the author reports them from a separate container to `/api/ingest/agents`)
+- coding usage in the envelope covers this Mac's local agents only; Cursor's account history, subscription plan tiers and rate-limit windows are out of scope here (the author reports them from a separate container to `/api/ingest/agents`)
 - login launch using `SMAppService.mainApp`
 
 Each module can be disabled without stopping the others. Disabling the charger
@@ -69,7 +68,7 @@ contain only the modules that have fresh data:
   "version": 4,
   "heartbeatAt": 1760000000000,
   "presence": "online",
-  "activeModules": ["desktop", "appleMusic", "timezone", "charger", "vibeCoding", "vibeCodingYear"],
+  "activeModules": ["desktop", "appleMusic", "timezone", "charger", "coding"],
   "modules": {
     "desktop": {
       "applicationName": "Safari",
@@ -81,15 +80,15 @@ contain only the modules that have fresh data:
     "appleMusic": {},
     "timezone": {},
     "chargingDevices": {},
-    "vibeCodingUsage": {},
-    "vibeCodingNow": {},
-    "vibeCodingYear": {}
+    "codingUsage": {},
+    "codingActivity": {},
+    "codingTokenBuckets": {}
   }
 }
 ```
 
-`activeModules` lists enabled capabilities, not the payload keys above. One coding
-usage toggle enables `vibeCoding` and `vibeCodingYear`, which feed three modules.
+`activeModules` lists enabled capabilities, not the payload keys above. The one coding
+usage toggle is listed as `coding` and feeds three modules.
 `charger` and `powerBank` are the exception: they are listed only while the
 toggle is on **and** the BLE link is actually connected, because their data
 comes from outside this process — a dropped link would otherwise keep the site
@@ -119,87 +118,106 @@ reporter is alive. `presence: "offline"` covers graceful exits (quit, sleep) and
 sent synchronously so it beats the disconnect; crashes, network loss, and forced
 shutdowns still rely on the site's "nothing received for a while" timeout. Both
 paths are needed; neither replaces the other.
-The POST body is deliberately bounded. `CodingUsageKit` reduces original local
-and cloud records to display-ready totals, today's usage, model names, and a
-compact calendar. Session identities are hashed only for local deduplication;
-session IDs, project paths, prompts, replies, and Cursor credentials are never
-included in coding telemetry.
 
-Vibe coding is split into three modules by **how often it changes**, not by which
-endpoint produced it:
+`CodingUsageKit` reduces the local agent logs to raw facts and nothing more: what
+each agent used per day, when it last produced a usage event, and five-minute token
+windows. Totals, rankings, "today", the yearly calendar, display names and icons are
+the receiving site's job — it merges this Mac with its other sources. Session
+identities are hashed only for local deduplication; session IDs, project paths,
+prompts and replies are never included.
 
-| Module | Interval | Contents |
+Coding usage is split into three modules by **how often it changes**:
+
+| Module | Cadence | Contents |
 | --- | --- | --- |
-| `vibeCodingNow` | 60 s | activity, current model, and last activity time. Codex and Claude come from an incremental scan of their JSONL logs every minute; other local sources run `ccusage session` at most every 5 minutes |
-| `vibeCodingUsage` | 10 min | retained token history, today's usage, API-equivalent valuation, session count, and per-source collection status |
-| `vibeCodingYear` | 1 h | 371 days from the same ledger, with daily totals and a compact top-5 model mix |
+| `codingActivity` | scanned every 60 s; sent when it changes, and at least every 5 min while it does not | per agent, `lastActivityAt` (epoch ms) and the model of the latest usage event. Codex and Claude come from an incremental scan of their JSONL logs; other local sources run `ccusage session` at most every 5 minutes |
+| `codingTokenBuckets` | same scan, same rule | Codex and Claude five-minute token windows over the rolling 24 hours |
+| `codingUsage` | Claude every 10 min, every local agent every hour; sent every round | per agent, the complete day history (`Asia/Shanghai` days), session count and collection status. The 10-minute round carries only Claude; agents missing from an envelope keep what the site already has |
 
-These intervals are configurable, with a 60-second minimum. Session collection
-runs independently of the slower cloud history refresh. The calendar reads the
-local ledger without starting a second history download. Usage and session counts
-are assembled by the shared engine before upload.
+The intervals are configurable, with a 60-second minimum. Session scans run
+independently of the slower usage refresh. Timestamps are epoch milliseconds,
+dates `YYYY-MM-DD`, and nil fields are omitted rather than sent as `null`.
 
 Plan tiers and rate-limit windows come from a separate producer (the author runs
 a small container that posts them to `/api/ingest/agents`; it is not part of this
 repository). This app reports usage through `/api/ingest/mac` and does not fetch
 or forward those account limits.
 
-Every module is sent only when its own display content changes.
+Every module is sent only when its own display content changes, with two
+exceptions. `codingActivity` and `codingTokenBuckets` ignore their collection
+clock (`collectedAt`, and the bucket report's `from`/`to`) when deciding whether they
+changed, but an unchanged one is still re-sent every 5 minutes so the site sees
+the clock advance — that advance is how it tells a quiet Mac from a dead
+collector. `codingUsage` goes out after every successful round, since each round
+moves `collectedAt` forward; a failed round that changes nothing is not re-sent.
+
+The `202` receipt may list `ignored` (module names the site does not know) and
+`rejected` (`[{ module, error }]`, coding modules that failed validation and were
+dropped on their own while the rest of the envelope was accepted). Either way the
+module's latch still advances and the reason shows on its dashboard card; it is
+sent again only once its content changes, instead of hitting the same validation
+every five minutes. A manual report always sends.
 
 ## Coding agent usage and sessions
 
-采集实现位于 `Sources/CodingUsageKit/`，App 只负责调度和显示状态。应用无需运行
+采集实现位于 `Sources/CodingUsageKit/`，App 只负责调度、上报和显示状态。应用无需运行
 TokenTracker，也不连接它的 HTTP 面板，不读取或导入它的 queue、缓存和汇总文件。
-首次历史重建只使用本机仍存在的原始数据。Cursor 云端记录不在这次重建里。
+首次历史重建只使用本机仍存在的原始数据。
 
-| 来源 | 用量历史 | 会话与此刻状态 |
+| 来源 | 用量历史（`codingUsage`） | 活动（`codingActivity`）与五分钟桶（`codingTokenBuckets`） |
 | --- | --- | --- |
-| Claude、Codex | 固定版本的 `ccusage` 读取本机原始日志 | 每分钟增量扫描 JSONL 日志，只读上次之后追加的部分；最近一条用量事件的时刻和模型就是此刻状态，同一次扫描也产出五分钟用量窗口。会话数仍随用量刷新由 `ccusage session` 更新 |
-| Grok、Antigravity | 固定版本的 `ccusage` 读取本机原始日志或数据库；Antigravity 使用其本地 SQLite 用量记录 | `ccusage <source> session` 的本机会话元数据，最多 5 分钟一次（每次都要重读全部历史）。Antigravity 一次要解析几百 MB 的对话库：固定走离线价目表（在线模式慢三倍、结果相同），超时 300 秒，`conversations` 里的文件没变就沿用上次输出 |
+| Claude、Codex | 固定版本的 `ccusage` 读取本机原始日志 | 每分钟增量扫描 JSONL 日志，只读上次之后追加的部分；最近一条用量事件的时刻和模型就是活动，同一次扫描也产出五分钟桶。会话数仍随用量刷新由 `ccusage session` 更新 |
+| Grok、Antigravity | 固定版本的 `ccusage` 读取本机原始日志或数据库；Antigravity 使用其本地 SQLite 用量记录 | 活动来自 `ccusage <source> session` 的本机会话元数据，最多 5 分钟一次（每次都要重读全部历史），不出五分钟桶。Antigravity 一次要解析几百 MB 的对话库：固定走离线价目表（在线模式慢三倍、结果相同），超时 300 秒，`conversations` 里的文件没变就沿用上次输出 |
 | 其他被 `ccusage` 发现且支持的来源 | 同样读取本机原始历史，动态纳入按来源统计 | 同上，最多 5 分钟一次 |
-| Cursor | 不采集。云端历史由 agent-limits-reporter 用它自己的登录态上报；本机快照把 `cursor` 放进 `omittedSources`，合计和年度图都不含它 | 当前没有本机会话适配器，不把云端历史冒充正在使用状态 |
+
+Cursor 不是本机来源：它的账号历史由容器里的上报器用自己的登录态上报，这台 Mac 不采集也不上报。
+旧账本里留下的 Cursor 日子原样留在盘上，不进任何一份上报。
 
 用量历史分两档刷新：卡片上只有 Claude Code 要看当天的实时用量，所以「Claude 今日用量刷新」
-（默认 10 分钟）每轮只读 Claude；「全部来源与热力图刷新」（默认 1 小时）读全部来源，跑完立刻重算
-年度热力图。两次完整采集之间，其余来源在账本里原样保留（日桶、状态、采集时刻都不动）。手动刷新总是完整的。
+（默认 10 分钟）每轮只读 Claude、报告也只带 Claude；「全部来源刷新」（默认 1 小时）读全部来源，
+报告带全部本机 agent。两次完整采集之间，其余来源在账本里原样保留，站点那边也是没出现的 agent 不动。
+手动刷新总是完整的。
 
 完整采集先通过 `ccusage daily --by-agent --json --offline` 发现来源，再按来源读取
 `daily` 和 `session`。`pi` 的默认目录只有 `~/.pi/agent/sessions`，全来源发现也不接受
 `--pi-path`，所以看不到 `~/.omp/agent/sessions`。omp 会话目录里有 jsonl 且 ccusage 提供
 `pi` 时，采集会把 `pi` 加进来。`pi` 的 `daily` 和 `session` 传 `--pi-path`，同时包含
 `~/.pi/agent/sessions` 与 `~/.omp/agent/sessions`；该参数替换默认目录，只传一边会丢掉另一边。
-所有日桶统一为 `Asia/Shanghai`，命令不传 `--since` 或 `--until`，
-不把“今日”或“近一年”当成累计用量的历史范围。年度图是完整账本的一个窗口。
-活动天数按所有来源中 token 大于零的日期取并集；会话数只统计实际读到且去重的本机会话。
-
-Cursor 云端历史不再由这台 Mac 拉取。`state.vscdb` 里的登录态和
-`POST https://cursor.com/api/dashboard/get-filtered-usage-events` 那套分页还在
-`CursorUsage.swift`，诊断命令 `collect` 默认仍会用本机登录态拉一次；App 的定时采集
-传 `includeCursor: false`，快照 `omitting: ["cursor"]`。旧账本里已经收下的 Cursor
-日子留在盘上，但不会再进上报的合计和年度图。装这版 App 之前，Worker 和
-agent-limits-reporter 得先认 `omittedSources` 和 `cursorUsage`，否则 Cursor 会从总数里消失。
+所有日桶统一为 `Asia/Shanghai`，命令不传 `--since` 或 `--until`，历史范围就是来源还留着的全部记录。
 
 用量账本默认位于
 `~/Library/Application Support/MacTelemetryHub/CodingUsage/history.json`，按来源、账号和日期
 保存聚合值，并以文件锁和原子写入保护并发刷新。一次成功的完整日桶可以接受上游更正，
 包括 token 下调；没有返回的旧活动日、失败来源和异常缩短的历史范围保留已有数据并显示诊断。
-原始日志删除、离线或云端不再返回某个月份，不会自动清空已经保存的历史。
-这不能恢复首次采集前就已丢失、且云端也不可获取的记录。
+原始日志删除或来源不再返回某个月份，不会自动清空已经保存的历史。
+这不能恢复首次采集前就已丢失的记录。
 
-Token 分列互斥：`inputTokens` 不包含缓存读写，`cacheReadTokens` 与
-`cacheCreationTokens` 分开统计；`reasoningTokens` 是 `outputTokens` 的子集，总量只加前述
-四项。Cursor JSON 的 `cacheWriteTokens` 直接映射缓存创建量。CSV 只用于严格对账，
-当前导出中的 `Input (w/ Cache Write)` 也是独立的缓存创建列，不与另一输入列相减。
+### 上报的用量事实
 
-每个 agent 的 `usageStatus` 包含状态、上次采集时间、覆盖日期、`precision`、
-`costComplete`，以及 `error` 和 `warning` 两种说明：`error` 只在这一轮什么都没采到时出现
-（`state` 为 `error`，数据停在 `collectedAt`）；采到了但有缺口（token 未分列、历史变短而保留
-旧日子、会话元数据失败等）时 `state` 仍是 `ok`，缺口写进 `warning`，同时 `costComplete` 为 false。旧版 Cursor 按请求计量记录可能没有 token 分列：保留诊断，并展示已计量
-部分，不推算出虚构 token。`precision` 描述 token 的测量口径，费用本身始终是
-`apiEquivalentCostUSD`，不是订阅费、剩余额度或实际账单扣款。Cursor 按内置公开 API
-价格快照估值，不使用导出 `Cost`、`chargedCents` 或套餐扣费替代；本地来源使用 ccusage
-的 API 估值。未知模型、路由名或缺失价格保留 token，并将费用标为不完整。价格快照的
-来源、版本和适用边界见 `CodingUsagePricing.swift`；历史估值不代表逐日原始账单。
+`codingUsage` 里每个 agent 是它在本机账本里的完整历史，站点收到后整份替换这个 agent：
+
+- `state: "ok"`：带 `collectedAt`（最近一次成功采集，epoch 毫秒）、`sessionCount`（本机见过的不同会话数）
+  和按日期升序的全部 `days`。扫描当天没有用量的来源补一行全 0，站点据此知道「今天确认没用」而不是「不知道」。
+  采到了但有缺口（token 未分列、历史变短而保留旧日子、会话元数据失败等）时仍是 `ok`，缺口写进 `warning`。
+- `state: "error"`：这一轮什么都没采到。只带状态、原因和会话数，不带 `days`，站点保留已有的日子；
+  `collectedAt` 停在上次成功。从没采到过用量的来源（这台 Mac 上压根没有它）不报。
+
+每个日行：
+
+- Token 分列互斥：`inputTokens` 不包含缓存读写，`cacheReadTokens` 与 `cacheCreationTokens` 分开统计；
+  `reasoningTokens` 是 `outputTokens` 的子集。`totalTokens` 是来源实测的总量，可以大于前四列之和——多出来的
+  是来源没分列的量（旧记录里常见），保留实测总量，不推算出虚构的分列。
+- `models` 是这一天各模型的 token，零用量的不报，按用量降序。模型名是来源的原始 id，只有 Antigravity 的
+  `model_placeholder_m…` 占位符换成公开 catalog id（`CodingUsageModelIdentity`），换名后同名的合并。
+  隐藏哪些名字（如 `unknown`）、跨 agent 怎么排名都归站点。
+- `apiEquivalentCostUSD` 是 ccusage 按公开 API 价估的费用，不是订阅费、剩余额度或实际账单扣款。
+  `costComplete` 按天判：这一天有 token 却没有费用、有模型没估到价、有没分列的 token，或是 Antigravity
+  的思考量（ccusage 的日 JSON 没有这一列），那天就是 false；一天估不全不连累别的日子。账本里还没记过
+  这一格的旧日行，有 token 的按 false 报，下一次完整采集把 ccusage 仍返回的日子补上。
+
+来源 id 必须是站点认的形状（小写字母或数字开头，只含 `a-z0-9._-`）。不合规的来源不上报，原因显示在
+「Vibe · 用量」卡片上——一个坏 id 会让站点拒掉整个模块。站点拒收或不认识某个模块时（回执的 `rejected` /
+`ignored`），原因同样显示在对应的卡片上。
 
 ### Pinned ccusage helper
 
@@ -217,8 +235,7 @@ Tools/install-ccusage.sh
 ```
 
 `build-release.sh` 已在 Xcode 构建前调用安装脚本；Xcode 的 Embed ccusage 阶段将辅助程序
-复制到应用的 `Contents/MacOS/ccusage` 并签名，同时打包 ccusage、价格数据和 Cursor 适配代码
-的许可证。直接在 Xcode 运行前也需先执行安装脚本。
+复制到应用的 `Contents/MacOS/ccusage` 并签名，同时打包 ccusage 的许可证。直接在 Xcode 运行前也需先执行安装脚本。
 
 新版采集模块使用 `vibeCodingModuleEnabled`，首次安装或从旧版升级后默认关闭，需在设置中
 明确启用。CLI 路径依次选择 `CCUSAGE_CLI_PATH` 环境变量、新的 `codingUsageCLIPath` 自定义
@@ -228,33 +245,39 @@ Tools/install-ccusage.sh
 ### Read-only source diagnostics
 
 Swift package 提供与 App 共用采集实现的 `coding-usage`。诊断命令只读取原始来源，
-不会向站点上报；它会写入显式指定的诊断账本以及可选输出文件。使用独立目录即可与 App
-的生产账本分开检查：
+不会向站点上报；它会写入显式指定的诊断账本以及可选输出文件。使用独立目录（或 App 账本的一份拷贝）
+即可与 App 的生产账本分开检查：
 
 ```bash
 mkdir -p /tmp/mac-telemetry-coding-usage
 swift run coding-usage collect \
   --ledger /tmp/mac-telemetry-coding-usage/history.json \
   --ccusage "$PWD/.build/ccusage/ccusage" \
-  --output /tmp/mac-telemetry-coding-usage/snapshot.json \
+  --output /tmp/mac-telemetry-coding-usage/usage.json \
   --offline
 
-swift run coding-usage snapshot \
+swift run coding-usage report \
   --ledger /tmp/mac-telemetry-coding-usage/history.json
 
 swift run coding-usage sessions \
   --ledger /tmp/mac-telemetry-coding-usage/history.json \
-  --ccusage "$PWD/.build/ccusage/ccusage"
+  --ccusage "$PWD/.build/ccusage/ccusage" \
+  --output /tmp/mac-telemetry-coding-usage/sessions.json
+
+swift run coding-usage pulse --output /tmp/mac-telemetry-coding-usage/buckets.json
 ```
 
-- `--ledger` 必填；`snapshot` 只读该账本，不运行采集器，也不需要 `--ccusage`。
+- `--ledger` 在 `collect`、`report`、`sessions` 中必填；`report` 只读该账本，不运行采集器，也不需要 `--ccusage`。
 - `--ccusage` 在 `collect` 和 `sessions` 中必填，指向可执行程序。
-- `--output` 可选，写入完整的 `usage`、`now`、`year` JSON；标准输出仅显示数量和来源健康摘要。
-- `collect --offline` 让 ccusage 使用已有/内置价格信息，**仍会请求 Cursor 云端历史**。
-- `collect --local-only` 跳过 Cursor；需要本地离线诊断时同时传 `--offline --local-only`。
-- `sessions` 只刷新本机会话元数据，固定使用离线价格模式，不请求 Cursor，也不重算历史 token。
+- `--output` 可选，写的是信封 `modules` 里对应的那几格，和 App 上报的是同一份，可以原样拼进一封 v4 信封：
+  `collect` / `report` 写 `{"codingUsage": …}`（账本里一个来源都没有时是空对象），`sessions` 写
+  `{"codingActivity": …, "codingTokenBuckets": …}`，`pulse` 写 `{"codingTokenBuckets": …}`。
+  标准输出只显示数量和来源健康摘要。
+- `collect --offline` 让 ccusage 使用已有/内置价格信息。
+- `sessions` 刷新本机会话元数据（固定离线价格模式，不重算历史 token）并扫一次 Codex / Claude 日志。
+- `pulse` 只扫 Codex / Claude 日志，不需要账本和 ccusage。
 
-来源失败会进入结果的状态字段，命令仍可能正常输出；检查 `sources[].state` 与 `error`，
+来源失败会进入结果的状态字段，命令仍可能正常输出；检查 `agents[].state`、`error` 与 `problems`，
 不能仅凭退出码认定所有来源完整。
 
 `positionMs` in the music module is an anchor, not a stream. Paired with
@@ -297,7 +320,7 @@ An activation reschedules a 400 ms settle timer, so a burst of Cmd-Tab switches
 uploads only the application it lands on — the ones passed through never outlive
 the window. Playback needs no such timer; the confirmation read already absorbs
 the race. The loop's own five-second tick is left to the parts with no event
-source of their own: the 30 second heartbeat and the coding-usage interval check.
+source of their own: the quiet-time heartbeat and the coding modules' keepalive.
 
 The charger wakes it too, but selectively. Its stream arrives at ~1 Hz (below),
 and waking on every frame would turn a five-second loop into a one-second one
@@ -419,14 +442,12 @@ pause land in 320–490 ms, application switches in 560–620 ms.
   permission, obtains a Music User Token and a MusicKit-generated developer
   token, and sends them only to the dedicated credentials endpoint described
   below.
-- Coding usage reads the original local logs/databases with the bundled `ccusage`
-  helper. Cursor cloud history uses Cursor.app's existing local login state and
-  sends its credential only to Cursor's HTTPS endpoints. Note that this talks to
-  an undocumented dashboard endpoint (`cursor.com/api/dashboard/…`) with the
-  cookie Cursor.app already holds — it is not an official API, it can break or
-  be disallowed by Cursor at any time, and enabling it is your own call. Enable
-  the coding usage module and check the CLI path in Settings; no local panel URL
-  is needed. Each collection interval has a 60-second minimum.
+- Coding usage reads the original local logs and databases with the bundled
+  `ccusage` helper and the incremental Codex / Claude log scanner, and makes no
+  network request of its own; only the facts described under **Unified ingest
+  protocol** reach the envelope. Enable the coding usage module and check the CLI
+  path in Settings; no local panel URL is needed. Each collection interval has a
+  60-second minimum.
 
 ## Anker BLE protocol notice
 
@@ -585,27 +606,37 @@ swift test
 Tests cover the Python-compatible AES-GCM frame vector, fragmented FF09 frame
 assembly, user-ID injection, live port/cable/device parsing, and the fixed
 minimal JSON response. `CodingUsageKitTests` additionally covers source parsing,
-token/cache/reasoning invariants, Cursor pagination and CSV formats, price
-completeness, historical correction and retention, account isolation, process
+token/cache/reasoning invariants, per-day cost completeness, historical correction
+and retention, the `codingUsage` / `codingActivity` / `codingTokenBuckets` wire
+shapes, reading ledgers written by earlier versions, account isolation, process
 cancellation, and engine-to-ledger mapping without real credentials or network.
 `TelemetryCoreTests` covers the window-title pipeline: normalization (braille and
 geometric spinners, `[n/m]`, percentages, unread badges, the 200-scalar cap), the
 three verdict thresholds against measured Jev distributions, judgment-cache coding
 and LRU eviction, the Jev request body and a recorded live response, and the
 reporting rules — a title change posts immediately, an icon-only change does not,
-and the hidden virtual application carries no title.
+and the hidden virtual application carries no title — plus the coding modules'
+change detection that ignores the collection clock, the five-minute keepalive,
+and receipts that reject or ignore a module.
 
 ## Pulse window usage
 
-The session refresh includes `modules.vibeCodingNow.tokenUsage`: a rolling 24-hour
-set of five-minute, epoch-millisecond usage buckets from Codex and Claude JSONL logs.
-The scanner follows file offsets, handles unfinished lines, deduplicates Codex totals
-and Claude streaming messages, and never uploads content, paths or session IDs.
-`inputTokens` excludes cache reads; reasoning is a subset of output. `eventCount`
-counts usage events, not HTTP requests. Source status is `ok`, `partial` or
-`unavailable`; unsupported providers are unknown, not zero. Daily usage is unchanged.
-Window usage is reconciled by event time, including late-arriving records. It is
-internal Jev evidence and does not appear in the public Vibe Coding patch.
+`modules.codingTokenBuckets` is a rolling 24-hour report, `[from, to)` in epoch
+milliseconds with `to` equal to `collectedAt`, of five-minute buckets from the
+Codex and Claude JSONL logs. A window carries only its start (`from`, a multiple of
+300 000 ms; the bucket is `[from, from + 5 min)`), and each row is one agent ×
+model with input, output, cache-read, cache-creation and reasoning tokens plus
+`eventCount`. `agents` declares which agents the report covers and how well:
+`ok`, `partial` (some lines could not be read) or `unavailable` (no logs at all).
+Inside the covered range a missing bucket means zero; unsupported providers are
+unknown, not zero.
 
-Read-only diagnostic: `swift run coding-usage pulse --output /tmp/pulse-usage.json`.
+The scanner follows file offsets, handles unfinished lines, deduplicates Codex
+totals and Claude streaming messages, and never uploads content, paths or session
+IDs. `inputTokens` excludes cache reads; reasoning is a subset of output.
+`eventCount` counts usage events, not HTTP requests. Window usage is reconciled by
+event time, including late-arriving records. Daily usage comes from ccusage in
+`codingUsage`, not from these windows.
+
+Read-only diagnostic: `swift run coding-usage pulse --output /tmp/buckets.json`.
 Deploy a backend that accepts the ingest protocol above before installing this reporter.

@@ -110,12 +110,13 @@ struct ReportDecisionTests {
         music: AppleMusicSnapshot? = nil,
         credentials: AppleMusicCredentialsSnapshot? = nil,
         musicUserTokenChanged: Bool = false,
+        coding: [CodingModule: CodingPayload] = [:],
         manualModules: Set<TelemetryModule> = []
     ) -> ReportInputs {
         ReportInputs(
             now: now,
             appleMusicModuleEnabled: true,
-            vibeCodingModuleEnabled: true,
+            codingModuleEnabled: true,
             charger: charger,
             capturedDesktop: capturedDesktop,
             desktopBlocked: desktopBlocked,
@@ -123,6 +124,7 @@ struct ReportDecisionTests {
             music: music,
             credentials: credentials,
             musicUserTokenChanged: musicUserTokenChanged,
+            coding: coding,
             manualModules: manualModules
         )
     }
@@ -559,5 +561,172 @@ struct ReportDecisionTests {
         #expect(!decide(inputs(now: tooSoon), lastPosted: lastPosted).shouldSendHeartbeat)
         let dueAt = t0.addingTimeInterval(ReportDecision.heartbeatInterval)
         #expect(decide(inputs(now: dueAt), lastPosted: lastPosted).shouldSendHeartbeat)
+    }
+
+    // MARK: - coding
+
+    private func activity(_ collectedAt: Int, model: String = "claude-opus-5") -> JSONValue {
+        .object([
+            "collectedAt": .number(Double(collectedAt)),
+            "agents": .array([.object(["id": .string("claude"), "model": .string(model)])]),
+        ])
+    }
+
+    private func usage(_ collectedAt: Int, tokens: Int = 10) -> JSONValue {
+        .object(["agents": .array([.object([
+            "id": .string("claude"), "state": .string("ok"), "collectedAt": .number(Double(collectedAt)),
+            "days": .array([.object(["date": .string("2026-09-05"), "totalTokens": .number(Double(tokens))])]),
+        ])])])
+    }
+
+    /// 按采集器的做法一轮一轮地换载荷
+    private func collected(_ previous: CodingPayload?, _ value: JSONValue, _ module: CodingModule, at: Date) -> CodingPayload {
+        CodingPayload.next(after: previous, value: value, module: module, at: at)
+    }
+
+    private func post(_ decision: ReportDecision, into lastPosted: inout LastPostedState,
+                      response: TelemetryIngestResponse.Result? = nil) -> PostCommitEffects {
+        lastPosted.commit(decision: decision, response: response ?? ok, desktopPayloadHasObjectKey: false)
+    }
+
+    /// 采集时刻不算内容：只换了时刻，内容变化时刻不动；整份一样就什么都不动
+    @Test func codingPayloadSeparatesContentFromCollectionClock() {
+        let first = collected(nil, activity(1), .activity, at: t0)
+        #expect(first.contentChangedAt == t0 && first.updatedAt == t0)
+        let clockOnly = collected(first, activity(2), .activity, at: t0.addingTimeInterval(60))
+        #expect(clockOnly.contentChangedAt == t0)
+        #expect(clockOnly.updatedAt == t0.addingTimeInterval(60))
+        #expect(collected(clockOnly, activity(2), .activity, at: t0.addingTimeInterval(120)) == clockOnly)
+        let changed = collected(clockOnly, activity(3, model: "claude-fable-5"), .activity, at: t0.addingTimeInterval(180))
+        #expect(changed.contentChangedAt == t0.addingTimeInterval(180))
+        // 用量报告里每个 agent 的 collectedAt 也是时钟
+        let usageFirst = collected(nil, usage(1), .usage, at: t0)
+        #expect(collected(usageFirst, usage(2), .usage, at: t0.addingTimeInterval(1)).contentChangedAt == t0)
+        // 桶报告的滚动窗口起止同理
+        let buckets: (Int) -> JSONValue = { at in
+            .object(["from": .number(Double(at - 1)), "to": .number(Double(at)), "collectedAt": .number(Double(at)),
+                     "windows": .array([])])
+        }
+        let bucketsFirst = collected(nil, buckets(10), .buckets, at: t0)
+        #expect(collected(bucketsFirst, buckets(20), .buckets, at: t0.addingTimeInterval(1)).contentChangedAt == t0)
+    }
+
+    /**
+     * 活动内容不变时至少五分钟发一封：站点靠采集时刻前进判断采集器还活着，
+     * 超过十分钟没前进，Pulse 就把 agent 当成未知。内容变了立刻（按节流窗口）发。
+     */
+    @Test func codingActivityKeepsAliveEveryFiveMinutes() {
+        var lastPosted = LastPostedState()
+        var payload = collected(nil, activity(1), .activity, at: t0)
+        var decision = decide(inputs(now: t0, coding: [.activity: payload]))
+        #expect(decision.codingToSend == [.activity])
+        _ = post(decision, into: &lastPosted)
+
+        // 一分钟后的扫描：只有采集时刻变了，不发
+        payload = collected(payload, activity(2), .activity, at: t0.addingTimeInterval(60))
+        decision = decide(inputs(now: t0.addingTimeInterval(61), coding: [.activity: payload]), lastPosted: lastPosted)
+        #expect(decision.codingToSend.isEmpty)
+        #expect(!decision.dataChanged)
+
+        // 五分钟到了：发最新那一份，站点看得见采集时刻前进
+        payload = collected(payload, activity(5), .activity, at: t0.addingTimeInterval(299))
+        decision = decide(inputs(now: t0.addingTimeInterval(300), coding: [.activity: payload]), lastPosted: lastPosted)
+        #expect(decision.codingToSend == [.activity])
+        _ = post(decision, into: &lastPosted)
+        #expect(lastPosted.coding[.activity]?.postedAt == t0.addingTimeInterval(300))
+
+        // 内容变了不等五分钟
+        payload = collected(payload, activity(6, model: "claude-fable-5"), .activity, at: t0.addingTimeInterval(330))
+        decision = decide(inputs(now: t0.addingTimeInterval(331), coding: [.activity: payload]), lastPosted: lastPosted)
+        #expect(decision.codingToSend == [.activity])
+    }
+
+    /// 采集停了（没有新的一份）就不保活：同一份旧的重发只会让站点以为采集器还活着
+    @Test func codingKeepaliveNeedsAFreshCollection() {
+        var lastPosted = LastPostedState()
+        let payload = collected(nil, activity(1), .activity, at: t0)
+        _ = post(decide(inputs(now: t0, coding: [.activity: payload])), into: &lastPosted)
+        let later = decide(inputs(now: t0.addingTimeInterval(3_600), coding: [.activity: payload]), lastPosted: lastPosted)
+        #expect(later.codingToSend.isEmpty)
+    }
+
+    /// 用量每轮新采的都发：采集时刻前进本身就是站点要的事实。同一份失败状态不重发
+    @Test func codingUsageIsSentOnEveryFreshRound() {
+        var lastPosted = LastPostedState()
+        var payload = collected(nil, usage(1), .usage, at: t0)
+        _ = post(decide(inputs(now: t0, coding: [.usage: payload])), into: &lastPosted)
+        payload = collected(payload, usage(2), .usage, at: t0.addingTimeInterval(600))
+        let fresh = decide(inputs(now: t0.addingTimeInterval(601), coding: [.usage: payload]), lastPosted: lastPosted)
+        #expect(fresh.codingToSend == [.usage])
+        _ = post(fresh, into: &lastPosted)
+        payload = collected(payload, usage(2), .usage, at: t0.addingTimeInterval(1_200))
+        let same = decide(inputs(now: t0.addingTimeInterval(1_201), coding: [.usage: payload]), lastPosted: lastPosted)
+        #expect(same.codingToSend.isEmpty)
+    }
+
+    /**
+     * 站点拒收（`rejected`）或不认识（`ignored`）的那一格：门闩照样推进、原因交给卡片，
+     * 之后保活不再重发同一份，内容再变才发。别的模块照常收下。
+     */
+    @Test func refusedCodingModuleAdvancesTheLatchAndWaitsForNewContent() {
+        var lastPosted = LastPostedState()
+        var activityPayload = collected(nil, activity(1), .activity, at: t0)
+        var usagePayload = collected(nil, usage(1), .usage, at: t0)
+        let first = decide(inputs(now: t0, coding: [.activity: activityPayload, .usage: usagePayload]))
+        #expect(first.codingToSend == [.activity, .usage])
+        let effects = post(first, into: &lastPosted, response: TelemetryIngestResponse.Result(
+            desktopIconAvailable: nil, chargerCoverIconAvailable: nil,
+            ignored: ["codingUsage"],
+            rejected: [TelemetryIngestResponse.Rejection(module: "codingActivity", error: "agents[0].model 超过 200 个字符")]
+        ))
+        #expect(effects.codingAccepted.isEmpty)
+        #expect(effects.codingRefused == [
+            .activity: "站点拒收：agents[0].model 超过 200 个字符",
+            .usage: "站点不认识这个模块，没有收下",
+        ])
+        #expect(lastPosted.coding[.activity]?.refused == true)
+        #expect(lastPosted.coding[.usage]?.refused == true)
+
+        // 十分钟后又采了一轮，内容没变：两格都不发
+        activityPayload = collected(activityPayload, activity(2), .activity, at: t0.addingTimeInterval(600))
+        usagePayload = collected(usagePayload, usage(2), .usage, at: t0.addingTimeInterval(600))
+        let quiet = decide(inputs(now: t0.addingTimeInterval(601), coding: [.activity: activityPayload, .usage: usagePayload]),
+                           lastPosted: lastPosted)
+        #expect(quiet.codingToSend.isEmpty)
+
+        // 内容变了：再试一次；这回收下了，拒收标记清掉，保活恢复
+        activityPayload = collected(activityPayload, activity(3, model: "claude-fable-5"), .activity, at: t0.addingTimeInterval(660))
+        let retry = decide(inputs(now: t0.addingTimeInterval(661), coding: [.activity: activityPayload, .usage: usagePayload]),
+                           lastPosted: lastPosted)
+        #expect(retry.codingToSend == [.activity])
+        let accepted = post(retry, into: &lastPosted)
+        #expect(accepted.codingAccepted == [.activity])
+        #expect(accepted.codingRefused.isEmpty)
+        #expect(lastPosted.coding[.activity]?.refused == false)
+    }
+
+    /// 手动上报：coding 手上有的几份全发，内容没变、被拒过的也发 —— 用户按按钮就是要再试一次
+    @Test func manualCodingReportSendsEveryPayloadAtHand() {
+        var lastPosted = LastPostedState()
+        let payload = collected(nil, activity(1), .activity, at: t0)
+        _ = post(decide(inputs(now: t0, coding: [.activity: payload])), into: &lastPosted,
+                 response: TelemetryIngestResponse.Result(desktopIconAvailable: nil, chargerCoverIconAvailable: nil,
+                                                          ignored: ["codingActivity"]))
+        let buckets = collected(nil, .object(["windows": .array([])]), .buckets, at: t0)
+        let manual = decide(inputs(now: t0.addingTimeInterval(1), timezone: timezone(),
+                                   coding: [.activity: payload, .buckets: buckets], manualModules: [.coding]),
+                            lastPosted: lastPosted)
+        #expect(manual.codingToSend == [.activity, .buckets])
+        #expect(!manual.timezoneToSend)
+        #expect(manual.shouldPost)
+        // 一份都还没采到时按下按钮：当场摘掉，不挂着
+        let empty = decide(inputs(now: t0, manualModules: [.coding]))
+        #expect(empty.unsatisfiableManualModules == [.coding])
+    }
+
+    @Test func disabledCodingModuleSendsNothing() {
+        var disabled = inputs(now: t0, coding: [.activity: collected(nil, activity(1), .activity, at: t0)])
+        disabled.codingModuleEnabled = false
+        #expect(decide(disabled).codingToSend.isEmpty)
     }
 }

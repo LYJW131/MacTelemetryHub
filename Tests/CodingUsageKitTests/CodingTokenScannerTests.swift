@@ -21,6 +21,9 @@ struct CodingTokenScannerTests {
         try (first+first+second).write(to:file)
         var scanner=CodingTokenScanner()
         let result=try scanner.scan(home:root,at:Date(timeIntervalSince1970:Double(boundary+2000)/1000))
+        #expect(result.to==boundary+2000);#expect(result.collectedAt==result.to);#expect(result.from==result.to-86_400_000)
+        #expect(result.agents==[CodingTokenBucketAgent(id:"codex",state:.ok),CodingTokenBucketAgent(id:"claude",state:.ok)])
+        #expect(result.windows.map(\.from)==[boundary-300_000,boundary])
         #expect(result.windows.count==2)
         #expect(result.windows[0].agents[0].inputTokens==20)
         #expect(result.windows[0].agents[0].cacheReadTokens==80)
@@ -52,41 +55,22 @@ struct CodingTokenScannerTests {
     @Test func absentSourcesAreNotMeasuredZero() throws {
         let root=FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         var scanner=CodingTokenScanner();let value=try scanner.scan(home:root)
-        #expect(value.sources.allSatisfy{$0.state=="unavailable"});#expect(value.windows.isEmpty)
+        #expect(value.agents.map(\.id)==CodingTokenScanner.sourceIDs)
+        #expect(value.agents.allSatisfy{$0.state == .unavailable});#expect(value.windows.isEmpty)
     }
-}
-
-struct SessionActivityOverlayTests {
-    private let now = CodingUsageDates.parseInstant("2026-09-23T04:00:00Z")!
-    private func agent(_ id: String, at: Date?, model: String? = "old-model") -> CodingUsageNowAgentPayload {
-        CodingUsageNowAgentPayload(id: id, currentModel: model, lastActivityAt: at.map(CodingUsageDates.instant),
-                                   active: false)
-    }
-
-    @Test func newerScannedEventLightsTheAgentAndCarriesItsModel() {
-        let payload = CodingUsageNowPayload(agents: [agent("codex", at: now.addingTimeInterval(-3_600)), agent("grok", at: nil)])
-        let seen = now.addingTimeInterval(-60)
-        let result = CodingUsageEngine.overlay(payload, activity: [
-            "codex": CodingTokenActivity(at: seen, model: "gpt-5.5-codex"),
-        ], at: now)
-        let codex = result.agents.first { $0.id == "codex" }!
-        #expect(codex.active)
-        #expect(codex.lastActivityAt == CodingUsageDates.instant(seen))
-        #expect(codex.currentModel == CodingUsageModelIdentity.canonical("gpt-5.5-codex"))
-        #expect(result.agents.first { $0.id == "grok" } == payload.agents[1])
-    }
-
-    @Test func olderOrExpiredScanDoesNotOverrideTheLedger() {
-        let recorded = now.addingTimeInterval(-30)
-        let payload = CodingUsageNowPayload(agents: [agent("claude", at: recorded)])
-        let older = CodingUsageEngine.overlay(payload, activity: [
-            "claude": CodingTokenActivity(at: now.addingTimeInterval(-120), model: "claude-opus-5"),
-        ], at: now)
-        #expect(older == payload)
-        let expired = CodingUsageEngine.overlay(CodingUsageNowPayload(agents: [agent("claude", at: nil)]), activity: [
-            "claude": CodingTokenActivity(at: now.addingTimeInterval(-301), model: nil),
-        ], at: now)
-        #expect(expired.agents[0].active == false)
-        #expect(expired.agents[0].currentModel == "old-model")
+    /// 线上形状：`agents` 声明覆盖了谁，窗口只剩起点（桶长固定五分钟），没有 `to`
+    @Test func reportMatchesTheWireContract() throws {
+        let root=try home();defer{try? FileManager.default.removeItem(at:root)}
+        let now=Date();let stamp=ISO8601DateFormatter().string(from:now.addingTimeInterval(-30))
+        let line=try JSONSerialization.data(withJSONObject:["type":"assistant","timestamp":stamp,"message":["id":"r1","model":"claude-test","usage":["input_tokens":1,"output_tokens":2]]])
+        try (line+Data([10])).write(to:root.appendingPathComponent(".claude/projects/a.jsonl"))
+        var scanner=CodingTokenScanner()
+        let json=try #require(try JSONSerialization.jsonObject(with:JSONEncoder().encode(scanner.scan(home:root,at:now))) as? [String:Any])
+        #expect(Set(json.keys)==["from","to","collectedAt","agents","windows"])
+        let window=try #require((json["windows"] as? [[String:Any]])?.first)
+        #expect(Set(window.keys)==["from","agents"])
+        #expect((window["from"] as? NSNumber).map{$0.int64Value % 300_000}==0)
+        let row=try #require((window["agents"] as? [[String:Any]])?.first)
+        #expect(Set(row.keys)==["id","model","inputTokens","outputTokens","cacheReadTokens","cacheCreationTokens","reasoningTokens","eventCount"])
     }
 }

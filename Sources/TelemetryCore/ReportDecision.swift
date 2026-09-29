@@ -19,8 +19,8 @@ enum ReportPayloadKind: Hashable, Sendable {
     case desktop
     case timezone
     case appleMusic
-    case vibeCoding
-    case vibeCodingYear
+    /// coding 的三份载荷一起算一格：手动上报时手上有哪几份就发哪几份
+    case coding
 }
 
 extension TelemetryModule {
@@ -30,8 +30,7 @@ extension TelemetryModule {
         case .appleMusic: .appleMusic
         case .charger, .powerBank: .chargingDevices
         case .timezone: .timezone
-        case .vibeCoding: .vibeCoding
-        case .vibeCodingYear: .vibeCodingYear
+        case .coding: .coding
         }
     }
 }
@@ -45,7 +44,7 @@ extension TelemetryModule {
  *
  * 模块开关的过滤发生在捕获侧：关掉的模块这里直接是 nil，判断不必再问一次。
  * 只有两处例外留了显式开关 —— 音乐要区分「关了」和「停了」（后者要发一次
- * null），vibe coding 的三份摘要按更新时刻判变、拿不到开关就没法短路。
+ * null），coding 的三份载荷按各自的变化时刻判变、拿不到开关就没法短路。
  */
 struct ReportInputs: Sendable {
     var now: Date = .distantPast
@@ -53,7 +52,7 @@ struct ReportInputs: Sendable {
     var suspended = false
 
     var appleMusicModuleEnabled = false
-    var vibeCodingModuleEnabled = false
+    var codingModuleEnabled = false
 
     var charger: ChargingDevicesPayload?
     /// 黑名单过滤**之前**的前台应用快照。三态判断要靠它区分「没有前台应用」
@@ -66,12 +65,8 @@ struct ReportInputs: Sendable {
     var credentials: AppleMusicCredentialsSnapshot?
     var musicUserTokenChanged = false
 
-    var vibeCodingUsagePayload: JSONValue?
-    var vibeCodingNowPayload: JSONValue?
-    var vibeCodingYearPayload: JSONValue?
-    var vibeCodingUsageUpdatedAt: Date?
-    var vibeCodingNowUpdatedAt: Date?
-    var vibeCodingYearUpdatedAt: Date?
+    /// 采集器手上的 coding 载荷，还没采到的那份不在里面
+    var coding: [CodingModule: CodingPayload] = [:]
 
     var manualModules: Set<TelemetryModule> = []
 
@@ -163,9 +158,8 @@ struct ReportDecision: Sendable {
     var desktopToSend = false
     var timezoneToSend = false
     var musicToSend = false
-    var usageToSend = false
-    var nowToSend = false
-    var yearToSend = false
+    /// 这一圈要发的 coding 载荷
+    var codingToSend: Set<CodingModule> = []
     var credentialsToSend: AppleMusicCredentialsPayload?
 
     /// 这一圈实际按手动上报处理的模块。成功或失败后从 pending 里摘掉的就是它们。
@@ -237,23 +231,13 @@ struct ReportDecision: Sendable {
         // snapshot 从有值变成 nil 时也要发送一次 null，避免网页保留旧歌曲。
         let musicChanged = inputs.appleMusicModuleEnabled &&
             (musicSignature != lastPosted.appleMusic || musicSeeked)
-        /// 两个模块各判各的变化。门闩看的是载荷**变化**的时刻而不是采集
-        /// 成功的时刻 —— 会话状态 60 秒扫一次，绝大多数轮次什么都没变，拿
-        /// lastSuccess 当门闩会把每一轮扫描都变成一次上报。
-        let vibeCodingEnabled = inputs.vibeCodingModuleEnabled
-        func vibeCodingChanged(_ updatedAt: Date?, _ lastPostedAt: Date?) -> Bool {
-            guard vibeCodingEnabled, let updatedAt else { return false }
-            return lastPostedAt.map { updatedAt > $0 } ?? true
-        }
-        let usageChanged = vibeCodingChanged(
-            inputs.vibeCodingUsageUpdatedAt, lastPosted.vibeCodingUsageAt
-        )
-        let nowChanged = vibeCodingChanged(
-            inputs.vibeCodingNowUpdatedAt, lastPosted.vibeCodingNowAt
-        )
-        let yearChanged = vibeCodingChanged(
-            inputs.vibeCodingYearUpdatedAt, lastPosted.vibeCodingYearAt
-        )
+        /// coding 的三份各判各的：内容变了就发，内容没变按各自的保活间隔续一封，站点
+        /// 拒收过的只等内容再变（规则见 `CodingModule.shouldSend`）。会话一分钟扫一次，
+        /// 拿「采集成功」当门闩会把每一轮扫描都变成一次上报。
+        let codingDue = Set(CodingModule.allCases.filter { module in
+            guard inputs.codingModuleEnabled, let payload = inputs.coding[module] else { return false }
+            return module.shouldSend(payload, after: lastPosted.coding[module], now: now)
+        })
 
         /// 这一格此刻有没有东西可发。手动上报的可满足性只看这个。
         func hasPayload(_ kind: ReportPayloadKind) -> Bool {
@@ -264,10 +248,8 @@ struct ReportDecision: Sendable {
             case .desktop: inputs.capturedDesktop != nil
             case .timezone: timezone != nil
             case .appleMusic: music != nil
-            // 两份任一有值就能发：用量还没采到时，「此刻在不在用」也值得单独发
-            case .vibeCoding:
-                inputs.vibeCodingUsagePayload != nil || inputs.vibeCodingNowPayload != nil
-            case .vibeCodingYear: inputs.vibeCodingYearPayload != nil
+            // 三份任一有值就能发：用量还没采到时，此刻的活动和五分钟桶也值得单独发
+            case .coding: !inputs.coding.isEmpty
             }
         }
         // 发不出去的当场摘掉，剩下的才算这一圈的手动上报。全都发不出去时
@@ -283,16 +265,11 @@ struct ReportDecision: Sendable {
         desktopToSend = manualMode ? manualKinds.contains(.desktop) : desktopChanged
         timezoneToSend = manualMode ? manualKinds.contains(.timezone) : timezoneChanged
         musicToSend = manualMode ? manualKinds.contains(.appleMusic) : musicChanged
-        // 手动上报按整个 vibe coding 走：信封只有一个，用量和此刻
-        // 手上有什么就一起发什么。年度热力图间隔不同，单独一门。
-        let manualVibeCoding = manualKinds.contains(.vibeCoding)
-        usageToSend = manualMode
-            ? manualVibeCoding && inputs.vibeCodingUsagePayload != nil
-            : usageChanged
-        nowToSend = manualMode
-            ? manualVibeCoding && inputs.vibeCodingNowPayload != nil
-            : nowChanged
-        yearToSend = manualMode ? manualKinds.contains(.vibeCodingYear) : yearChanged
+        // 手动上报按整个 coding 走：信封只有一个，三份手上有什么就一起发什么，
+        // 内容没变、被站点拒过的也发 —— 用户按按钮就是要再试一次。
+        codingToSend = manualMode
+            ? (manualKinds.contains(.coding) ? Set(inputs.coding.keys) : [])
+            : codingDue
         // 手动上报只发用户选中的模块；token 的自动变化留到下一轮。
         if !manualMode, let credentials = inputs.credentials, inputs.musicUserTokenChanged {
             credentialsToSend = AppleMusicCredentialsPayload(musicUserToken: credentials.musicUserToken)
@@ -303,7 +280,7 @@ struct ReportDecision: Sendable {
         let heartbeatDue = lastPosted.heartbeatAt
             .map { now.timeIntervalSince($0) >= Self.heartbeatInterval } ?? true
         dataChanged = chargerToSend || desktopToSend || timezoneToSend ||
-            musicToSend || usageToSend || nowToSend || yearToSend ||
+            musicToSend || !codingToSend.isEmpty ||
             credentialsToSend != nil
         /**
          * 只在没有数据要发的时候才补心跳 —— 有数据时那个包本身就证明

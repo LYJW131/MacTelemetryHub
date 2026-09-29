@@ -35,9 +35,10 @@ final class AppSettings: ObservableObject {
         static let vibeCodingModuleEnabled = "vibeCodingModuleEnabled"
         static let ccusageCLIPath = "codingUsageCLIPath"
         static let codingSessionRefreshInterval = "codingSessionRefreshInterval"
-        /// 完整用量采集间隔；账号限额由独立上报器处理。
+        /// 只刷 Claude 那一轮的间隔；账号限额由独立上报器处理。
         static let vibeCodingUsageRefreshInterval = "vibeCodingUsageRefreshInterval"
-        static let vibeCodingYearRefreshInterval = "vibeCodingYearRefreshInterval"
+        /// 全部来源完整采集的间隔。键名是当年年度热力图留下的，改键会把用户设过的值丢掉。
+        static let codingFullRefreshInterval = "vibeCodingYearRefreshInterval"
         static let r2Endpoint = "r2Endpoint"
         static let r2Bucket = "r2Bucket"
         static let r2AccessKeyAccount = "r2-access-key-id"
@@ -105,10 +106,10 @@ final class AppSettings: ObservableObject {
     @Published var ccusageCLIPath = ""
     /// 短间隔那份：此刻在不在用
     @Published var codingSessionRefreshInterval: Double = 60
-    /// 长间隔那份：全历史 token 与费用，限额由 NAS 独立采集。
+    /// 只刷 Claude 那一轮：卡片要看 Claude Code 当天的用量，默认十分钟。
     @Published var vibeCodingUsageRefreshInterval: Double = 600
-    /// 年度热力图：过去 53 周日合计。格子按天变，默认一小时。
-    @Published var vibeCodingYearRefreshInterval: Double = 3_600
+    /// 全部来源的完整采集：其余来源的历史不急，默认一小时。
+    @Published var codingFullRefreshInterval: Double = 3_600
     @Published var r2Endpoint = ""
     @Published var r2Bucket = ""
     @Published var r2AccessKeyID = ""
@@ -237,10 +238,10 @@ final class AppSettings: ObservableObject {
         codingSessionRefreshInterval = storedSessionInterval == 0 ? 60 : storedSessionInterval
         let storedUsageInterval = defaults.double(forKey: Key.vibeCodingUsageRefreshInterval)
         vibeCodingUsageRefreshInterval = storedUsageInterval == 0 ? 600 : storedUsageInterval
-        let storedYearInterval = defaults.double(forKey: Key.vibeCodingYearRefreshInterval)
-        vibeCodingYearRefreshInterval = storedYearInterval == 0
-            ? VibeCodingYearMonitor.defaultRefreshInterval
-            : storedYearInterval
+        let storedFullInterval = defaults.double(forKey: Key.codingFullRefreshInterval)
+        codingFullRefreshInterval = storedFullInterval == 0
+            ? VibeCodingUsageMonitor.defaultFullInterval
+            : storedFullInterval
         r2Endpoint = defaults.string(forKey: Key.r2Endpoint)
             ?? environment["R2_ENDPOINT"]
             ?? ""
@@ -426,8 +427,8 @@ final class AppSettings: ObservableObject {
             guard vibeCodingUsageRefreshInterval >= 60 else {
                 throw SettingsError.invalidVibeCodingUsageInterval
             }
-            guard vibeCodingYearRefreshInterval >= 60 else {
-                throw SettingsError.invalidVibeCodingYearInterval
+            guard codingFullRefreshInterval >= 60 else {
+                throw SettingsError.invalidCodingFullRefreshInterval
             }
         }
         let r2Values = [r2Endpoint, r2Bucket, r2AccessKeyID, r2SecretAccessKey]
@@ -494,7 +495,7 @@ final class AppSettings: ObservableObject {
         defaults.set(ccusageCLIPath, forKey: Key.ccusageCLIPath)
         defaults.set(codingSessionRefreshInterval, forKey: Key.codingSessionRefreshInterval)
         defaults.set(vibeCodingUsageRefreshInterval, forKey: Key.vibeCodingUsageRefreshInterval)
-        defaults.set(vibeCodingYearRefreshInterval, forKey: Key.vibeCodingYearRefreshInterval)
+        defaults.set(codingFullRefreshInterval, forKey: Key.codingFullRefreshInterval)
         defaults.set(r2Endpoint, forKey: Key.r2Endpoint)
         defaults.set(r2Bucket, forKey: Key.r2Bucket)
     }
@@ -575,7 +576,7 @@ final class AppSettings: ObservableObject {
             ccusageCLIPath: ccusageCLIPath,
             codingSessionRefreshInterval: codingSessionRefreshInterval,
             vibeCodingUsageRefreshInterval: vibeCodingUsageRefreshInterval,
-            vibeCodingYearRefreshInterval: vibeCodingYearRefreshInterval,
+            codingFullRefreshInterval: codingFullRefreshInterval,
             r2Endpoint: r2Endpoint,
             r2Bucket: r2Bucket,
             r2AccessKeyID: r2AccessKeyID,
@@ -630,7 +631,7 @@ struct SettingsDraftToken: Equatable {
     var ccusageCLIPath: String
     var codingSessionRefreshInterval: Double
     var vibeCodingUsageRefreshInterval: Double
-    var vibeCodingYearRefreshInterval: Double
+    var codingFullRefreshInterval: Double
     var r2Endpoint: String
     var r2Bucket: String
     var r2AccessKeyID: String
@@ -641,7 +642,7 @@ enum SettingsError: LocalizedError {
     case invalidUserID, invalidPeripheralID, invalidPort, invalidBindAddress, invalidTiming, invalidPostURL
     case invalidCcusagePath, invalidCodingSessionInterval
     case invalidVibeCodingUsageInterval
-    case invalidVibeCodingYearInterval
+    case invalidCodingFullRefreshInterval
     case invalidR2Configuration
     case invalidWindowTitleRiskThresholds
     case invalidWindowTitleInformativeMinimum
@@ -658,8 +659,8 @@ enum SettingsError: LocalizedError {
         case .invalidPostURL: "上报端点必须是完整的 http:// 或 https:// URL。"
         case .invalidCcusagePath: "启用 Vibe Coding 用量时，ccusage CLI 路径必须指向可执行文件。"
         case .invalidCodingSessionInterval: "会话状态刷新间隔不能低于 60 秒。"
-        case .invalidVibeCodingUsageInterval: "用量刷新间隔不能低于 60 秒。"
-        case .invalidVibeCodingYearInterval: "年度热力图刷新间隔不能低于 60 秒。"
+        case .invalidVibeCodingUsageInterval: "Claude 今日用量刷新间隔不能低于 60 秒。"
+        case .invalidCodingFullRefreshInterval: "全部来源刷新间隔不能低于 60 秒。"
         case .invalidR2Configuration: "R2 直传配置必须同时填写 HTTPS Endpoint、Bucket、Access Key ID 和 Secret Access Key。"
         case .invalidWindowTitleRiskThresholds: "放行线必须大于 0 且小于锁定线，锁定线不能超过 1。"
         case .invalidWindowTitleInformativeMinimum: "值得展示线必须在 0 到 1 之间。"

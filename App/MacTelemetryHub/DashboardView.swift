@@ -70,7 +70,6 @@ struct DashboardView: View {
     private var appleMusic: AppleMusicMonitor { service.appleMusic }
     private var vibeCodingUsageCollector: VibeCodingUsageMonitor { service.vibeCodingUsageCollector }
     private var codingSessions: CodingSessionMonitor { service.codingSessions }
-    private var vibeCodingYearCollector: VibeCodingYearMonitor { service.vibeCodingYearCollector }
 
     init(service: ServiceController) {
         self.service = service
@@ -497,7 +496,6 @@ struct DashboardView: View {
             // 会话和用量共用一个手动上报模块，卡片却各看各的采集器。
             Refreshing(object: codingSessions) { vibeCodingSessionCard }
             Refreshing(object: vibeCodingUsageCollector) { vibeCodingUsageCard }
-            Refreshing(object: vibeCodingYearCollector) { vibeCodingYearCard }
             Refreshing(object: chargerLink) { chargerModuleCard }
             Refreshing(object: powerBankLink) { powerBankModuleCard }
         }
@@ -548,24 +546,33 @@ struct DashboardView: View {
         )
     }
 
+    /// 站点没收下的那几格（回执的 rejected / ignored）排在采集问题前面：采集好好的，数据却没进站点
+    private func codingDeliveryError(_ modules: [CodingModule]) -> String? {
+        let errors = modules.compactMap { module in
+            service.codingDeliveryErrors[module].map { "\(module.rawValue)：\($0)" }
+        }
+        return errors.isEmpty ? nil : errors.joined(separator: "；")
+    }
+
     private var vibeCodingSessionCard: some View {
         ModuleStatusCard(
             title: "Vibe · 会话状态",
             icon: "terminal",
             enabled: settings.vibeCodingModuleEnabled,
             value: codingSessions.lastSuccess == nil ? "等待扫描" : "扫描完成",
-            detail: codingSessions.lastError
+            detail: codingDeliveryError([.activity, .buckets])
+                ?? codingSessions.lastError
                 ?? codingSessions.lastSuccess?.formatted(date: .omitted, time: .standard),
             action: { Task { await service.refreshVibeCodingSessionsNow() } },
             actionIcon: "arrow.clockwise",
             actionHelp: "重新读取本地会话状态并上报",
             actionEnabled: settings.vibeCodingModuleEnabled,
             isReporting: service.isRefreshingVibeCodingSessions
-                || service.isManualReportInFlight(.vibeCoding),
+                || service.isManualReportInFlight(.coding),
             feedback: service.isRefreshingVibeCodingSessions
                 ? "正在扫描会话状态…"
-                : service.manualReportMessage(for: .vibeCoding),
-            feedbackIsError: service.manualReportFailed(.vibeCoding)
+                : service.manualReportMessage(for: .coding),
+            feedbackIsError: service.manualReportFailed(.coding)
         )
     }
 
@@ -574,40 +581,20 @@ struct DashboardView: View {
             title: "Vibe · 用量",
             icon: "chart.bar",
             enabled: settings.vibeCodingModuleEnabled,
-            value: vibeCodingUsageCollector.lastSuccess == nil ? "等待统计" : "聚合完成",
-            detail: vibeCodingUsageCollector.lastError
+            value: vibeCodingUsageCollector.lastSuccess == nil ? "等待统计" : "采集完成",
+            detail: codingDeliveryError([.usage])
+                ?? vibeCodingUsageCollector.lastError
                 ?? vibeCodingUsageCollector.lastSuccess?.formatted(date: .omitted, time: .standard),
             action: { Task { await service.refreshVibeCodingUsageNow() } },
             actionIcon: "arrow.clockwise",
-            actionHelp: "重新统计本地与 Cursor 云端完整历史并上报",
+            actionHelp: "重新统计本机全部来源的完整历史并上报",
             actionEnabled: settings.vibeCodingModuleEnabled,
             isReporting: service.isRefreshingVibeCodingUsage
-                || service.isManualReportInFlight(.vibeCoding),
+                || service.isManualReportInFlight(.coding),
             feedback: service.isRefreshingVibeCodingUsage
                 ? "正在重新统计用量…"
-                : service.manualReportMessage(for: .vibeCoding),
-            feedbackIsError: service.manualReportFailed(.vibeCoding)
-        )
-    }
-
-    private var vibeCodingYearCard: some View {
-        ModuleStatusCard(
-            title: "Vibe · 年度用量",
-            icon: "calendar",
-            enabled: settings.vibeCodingModuleEnabled,
-            value: vibeCodingYearCollector.lastSuccess == nil ? "等待日历" : "已采集",
-            detail: vibeCodingYearCollector.lastError
-                ?? vibeCodingYearCollector.lastSuccess?.formatted(date: .omitted, time: .standard),
-            action: { Task { await service.refreshVibeCodingYearNow() } },
-            actionIcon: "arrow.clockwise",
-            actionHelp: "重新读取过去 53 周的日合计并上报",
-            actionEnabled: settings.vibeCodingModuleEnabled,
-            isReporting: service.isRefreshingVibeCodingYear
-                || service.isManualReportInFlight(.vibeCodingYear),
-            feedback: service.isRefreshingVibeCodingYear
-                ? "正在读取年度用量…"
-                : service.manualReportMessage(for: .vibeCodingYear),
-            feedbackIsError: service.manualReportFailed(.vibeCodingYear)
+                : service.manualReportMessage(for: .coding),
+            feedbackIsError: service.manualReportFailed(.coding)
         )
     }
 

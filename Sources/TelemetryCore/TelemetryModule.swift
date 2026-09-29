@@ -6,8 +6,8 @@ enum TelemetryModule: String, CaseIterable, Hashable, Sendable {
     case charger
     case powerBank
     case timezone
-    case vibeCoding
-    case vibeCodingYear
+    /// 一个开关管 coding 的三份载荷（`CodingModule`）：用量、活动、五分钟桶
+    case coding
 
     var displayName: String {
         switch self {
@@ -16,8 +16,7 @@ enum TelemetryModule: String, CaseIterable, Hashable, Sendable {
         case .charger: "充电头"
         case .powerBank: "充电宝"
         case .timezone: "Mac 时区"
-        case .vibeCoding: "Vibe Coding"
-        case .vibeCodingYear: "年度用量"
+        case .coding: "Vibe Coding"
         }
     }
 }

@@ -16,9 +16,7 @@ struct TelemetryEnvelopeTests {
         appleMusic: AppleMusicSnapshot? = nil,
         appleMusicCredentials: AppleMusicCredentialsPayload? = nil,
         timezone: TimeZoneSnapshot? = nil,
-        vibeCodingUsage: JSONValue? = nil,
-        vibeCodingNow: JSONValue? = nil,
-        vibeCodingYear: JSONValue? = nil,
+        coding: [CodingModule: JSONValue] = [:],
         includeDesktop: Bool = false,
         includeAppleMusic: Bool = false,
         activeModules: [String] = [],
@@ -33,9 +31,7 @@ struct TelemetryEnvelopeTests {
                 appleMusic: appleMusic,
                 appleMusicCredentials: appleMusicCredentials,
                 timezone: timezone,
-                vibeCodingUsage: vibeCodingUsage,
-                vibeCodingNow: vibeCodingNow,
-                vibeCodingYear: vibeCodingYear,
+                coding: coding,
                 includeDesktop: includeDesktop,
                 includeAppleMusic: includeAppleMusic
             ),
@@ -102,18 +98,22 @@ struct TelemetryEnvelopeTests {
                 identifier: "Asia/Shanghai", abbreviation: "GMT+8",
                 secondsFromGMT: 28_800, observedAt: 1_789_099_506_000
             ),
-            vibeCodingUsage: .object(["totalCostUSD": .number(1.5)]),
-            vibeCodingNow: .object(["active": .bool(true)]),
-            vibeCodingYear: .object(["weeks": .array([])]),
+            coding: [
+                .usage: .object(["agents": .array([])]),
+                .activity: .object(["collectedAt": .number(1_789_099_506_000), "agents": .array([])]),
+                .buckets: .object(["windows": .array([])]),
+            ],
             includeDesktop: true,
-            activeModules: ["charger", "desktop", "timezone"]
+            activeModules: ["charger", "desktop", "timezone", "coding"]
         ))
 
         let modules = try #require(json["modules"] as? [String: Any])
         #expect(Set(modules.keys) == [
             "chargingDevices", "desktop", "appleMusicCredentials", "timezone",
-            "vibeCodingUsage", "vibeCodingNow", "vibeCodingYear",
+            "codingUsage", "codingActivity", "codingTokenBuckets",
         ])
+        let activity = try #require(modules["codingActivity"] as? [String: Any])
+        #expect((activity["collectedAt"] as? NSNumber)?.int64Value == 1_789_099_506_000)
         let desktopJSON = try #require(modules["desktop"] as? [String: Any])
         #expect(Set(desktopJSON.keys) == [
             "applicationName", "bundleIdentifier", "iconHash", "iconObjectKey",
@@ -123,7 +123,42 @@ struct TelemetryEnvelopeTests {
         // developer token 已经归后端，带上它的信封会被整封退回：这一格只能有 user token
         let credentialsJSON = try #require(modules["appleMusicCredentials"] as? [String: Any])
         #expect(Set(credentialsJSON.keys) == ["musicUserToken"])
-        #expect(json["activeModules"] as? [String] == ["charger", "desktop", "timezone"])
+        #expect(json["activeModules"] as? [String] == ["charger", "desktop", "timezone", "coding"])
+    }
+
+    /// coding 的三格与站点 shared/ingest/coding.ts 的 CODING_MODULES 同名；开关在 activeModules 里只有一个 `coding`
+    @Test func codingModuleNamesMatchTheSite() {
+        #expect(CodingModule.allCases.map(\.rawValue) == ["codingUsage", "codingActivity", "codingTokenBuckets"])
+        #expect(TelemetryModule.coding.rawValue == "coding")
+        #expect(TelemetryModule.allCases.map(\.rawValue) == ["desktop", "appleMusic", "charger", "powerBank", "timezone", "coding"])
+    }
+
+    /// 只带某几格的信封：没带的 coding 键整个不出现
+    @Test func absentCodingModulesOmitTheirKeys() throws {
+        let modules = try #require(
+            try object(envelope(coding: [.activity: .object([:])]))["modules"] as? [String: Any]
+        )
+        #expect(Set(modules.keys) == ["codingActivity"])
+    }
+
+    /**
+     * 202 回执里站点自己判下的两件事：`ignored` 不认识的模块名、`rejected` 校验不过只丢了自己的 coding 模块。
+     * 旧站点的回执没有这两个键，照样解得开。
+     */
+    @Test func ingestReceiptCarriesIgnoredAndRejectedModules() throws {
+        let body = #"""
+        {"ok":true,"data":{"desktopIconAvailable":true,"ignored":["vibeCodingNow"],
+          "rejected":[{"module":"codingUsage","error":"agents[0].days[1].totalTokens 小于四列之和"}]}}
+        """#
+        let result = try JSONDecoder().decode(TelemetryIngestResponse.self, from: Data(body.utf8)).data
+        #expect(result.refusal(of: "codingUsage") == "站点拒收：agents[0].days[1].totalTokens 小于四列之和")
+        #expect(result.refusal(of: "vibeCodingNow") == "站点不认识这个模块，没有收下")
+        #expect(result.refusal(of: "codingActivity") == nil)
+        let old = try JSONDecoder().decode(
+            TelemetryIngestResponse.self, from: Data(#"{"ok":true,"data":{"desktopIconAvailable":true}}"#.utf8)
+        ).data
+        #expect(old.ignored == nil && old.rejected == nil)
+        #expect(old.refusal(of: "codingUsage") == nil)
     }
 
     /// 黑名单命中时发的虚拟身份：真实应用的名字和图标一个都不进载荷。
@@ -168,8 +203,8 @@ struct TelemetryEnvelopeTests {
 
     /// 站点 4xx 的正文是 `{ ok: false, error: "…" }`，只显示状态码会看不出真因。
     @Test func ingestErrorDetailPrefersTheJSONErrorField() {
-        #expect(ReporterError.ingestErrorDetail(Data(#"{"ok":false,"error":" 年度数据非法 "}"#.utf8))
-            == "年度数据非法")
+        #expect(ReporterError.ingestErrorDetail(Data(#"{"ok":false,"error":" desktop 模块缺少 applicationName "}"#.utf8))
+            == "desktop 模块缺少 applicationName")
         #expect(ReporterError.ingestErrorDetail(Data("  plain text  ".utf8)) == "plain text")
         #expect(ReporterError.ingestErrorDetail(Data()) == nil)
         #expect(ReporterError.ingestErrorDetail(Data(#"{"ok":false,"error":"  "}"#.utf8))

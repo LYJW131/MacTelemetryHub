@@ -13,10 +13,8 @@ import ChargerTelemetryKit
  * 而「成功之后怎么推进」也有了唯一落点（`commit`）。
  */
 struct LastPostedState {
-    /// 三类载荷独立判断是否需要上报。
-    var vibeCodingUsageAt: Date?
-    var vibeCodingNowAt: Date?
-    var vibeCodingYearAt: Date?
+    /// coding 的三份载荷各自发出去的是哪一版，各判各的变化和保活。
+    var coding: [CodingModule: CodingPayloadLatch] = [:]
     var chargingDevices: ChargingDevicesPayload?
     /// 显示内容门闩。和上面那份载荷分开，是为了不让 `updatedAt` 参与「变没变」。
     var chargingContent: ChargingDevicesContentSignature?
@@ -50,6 +48,10 @@ struct PostCommitEffects {
     var desktopIconRejected: DesktopActivitySnapshot?
     /// 这封信真的带了对象键且服务端认了：可以记成已确认。
     var desktopIconConfirmed: DesktopActivitySnapshot?
+    /// 这封信带的 coding 模块里站点收下的那几格
+    var codingAccepted: Set<CodingModule> = []
+    /// 站点拒收或不认识的那几格和原因，要显示在对应的卡片上
+    var codingRefused: [CodingModule: String] = [:]
 }
 
 extension LastPostedState {
@@ -109,9 +111,21 @@ extension LastPostedState {
             appleMusic = inputs.musicSignature
             musicAnchor = inputs.music.map(AppleMusicPositionAnchor.init)
         }
-        if decision.usageToSend { vibeCodingUsageAt = inputs.vibeCodingUsageUpdatedAt }
-        if decision.nowToSend { vibeCodingNowAt = inputs.vibeCodingNowUpdatedAt }
-        if decision.yearToSend { vibeCodingYearAt = inputs.vibeCodingYearUpdatedAt }
+        /**
+         * 被站点拒收或不认识的那一格同样推进门闩：信封里别的模块已经收下，这一格再原样
+         * 发多少次也是同一个结果。记下 `refused`，之后只在内容再变时才重发（见 `CodingModule`）。
+         */
+        for module in decision.codingToSend {
+            guard let payload = inputs.coding[module] else { continue }
+            let refusal = response.refusal(of: module.rawValue)
+            coding[module] = CodingPayloadLatch(
+                contentChangedAt: payload.contentChangedAt,
+                updatedAt: payload.updatedAt,
+                postedAt: inputs.now,
+                refused: refusal != nil
+            )
+            if let refusal { effects.codingRefused[module] = refusal } else { effects.codingAccepted.insert(module) }
+        }
         return effects
     }
 }

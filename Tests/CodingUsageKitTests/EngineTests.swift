@@ -3,153 +3,137 @@ import XCTest
 @testable import CodingUsageKit
 
 final class EngineTests: XCTestCase, @unchecked Sendable {
-    private let now = Date(timeIntervalSince1970: 1_788_580_800)
+    private let now = CodingUsageDates.parseInstant("2026-09-23T04:00:00Z")!
+    private func ms(_ date: Date) -> Int64 { CodingUsageDates.milliseconds(date) }
 
-    private func event(
-        at date: Date, input: Int64 = 100, output: Int64 = 50,
-        cacheRead: Int64 = 200, cacheWrite: Int64 = 300,
-        model: String = "claude-4.5-sonnet-thinking", measured: Bool = true
-    ) -> CursorUsageRecord {
-        CursorUsageRecord(
-            timestampMs: Int64(date.timeIntervalSince1970 * 1_000), model: model,
-            inputTokens: input, outputTokens: output, cacheReadTokens: cacheRead,
-            cacheCreationTokens: cacheWrite, tokenCountsAvailable: measured,
-            reportedTokenCostUSD: 999, chargedUSD: 9_999
+    // MARK: - codingActivity
+
+    func testNewerScannedEventWinsAndCarriesItsModel() throws {
+        let seen = now.addingTimeInterval(-60)
+        let report = CodingUsageEngine.activity(
+            sources: ["codex", "grok"],
+            recorded: ["codex": CodingActivitySample(at: now.addingTimeInterval(-3_600), model: "old-model")],
+            scanned: ["codex": CodingActivitySample(at: seen, model: "gpt-5.5-codex")],
+            at: now
         )
+        XCTAssertEqual(report.collectedAt, ms(now))
+        XCTAssertEqual(report.agents, [
+            CodingActivityAgent(id: "codex", lastActivityAt: ms(seen), model: "gpt-5.5-codex"),
+            // 本机有这个来源、但从没见过它的用量事件
+            CodingActivityAgent(id: "grok", lastActivityAt: nil, model: nil),
+        ])
+        // 在不在跑由站点按时刻现算，这里没有电平
+        let json = try XCTUnwrap(JSONSerialization.jsonObject(with: JSONEncoder().encode(report)) as? [String: Any])
+        let rows = try XCTUnwrap(json["agents"] as? [[String: Any]])
+        XCTAssertEqual(Set(rows[0].keys), ["id", "lastActivityAt", "model"])
+        XCTAssertEqual(Set(rows[1].keys), ["id"])
     }
 
-    private func report(
-        _ records: [CursorUsageRecord], at collectedAt: Date? = nil,
-        account: String = "fixture-account-hash", complete: Bool = true
-    ) -> CursorUsageReport {
-        CursorUsageReport(
-            accountHash: account, records: records, fetchedAt: collectedAt ?? now,
-            requestedStart: Date(timeIntervalSince1970: 0), requestedEnd: now,
-            rawRecordCount: records.count, reportedRecordCount: records.count,
-            pageCount: 1, isComplete: complete
+    func testOlderScanOrTieKeepsTheLedgerSession() {
+        let recorded = now.addingTimeInterval(-30)
+        let older = CodingUsageEngine.activity(
+            sources: ["claude"],
+            recorded: ["claude": CodingActivitySample(at: recorded, model: "claude-opus-5")],
+            scanned: ["claude": CodingActivitySample(at: now.addingTimeInterval(-120), model: "claude-fable-5")],
+            at: now
         )
+        XCTAssertEqual(older.agents, [CodingActivityAgent(id: "claude", lastActivityAt: ms(recorded), model: "claude-opus-5")])
+        let tie = CodingUsageEngine.activity(
+            sources: ["claude"],
+            recorded: ["claude": CodingActivitySample(at: recorded, model: "claude-opus-5")],
+            scanned: ["claude": CodingActivitySample(at: recorded, model: "claude-fable-5")],
+            at: now
+        )
+        XCTAssertEqual(tie.agents.first?.model, "claude-opus-5")
     }
 
-    private func withLedger(_ body: (inout CodingUsageLedger) throws -> Void) throws {
-        let folder = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+    func testChosenEventWithoutAModelBorrowsTheOthers() {
+        let report = CodingUsageEngine.activity(
+            sources: ["codex"],
+            recorded: ["codex": CodingActivitySample(at: now.addingTimeInterval(-600), model: "gpt-5.5-codex")],
+            scanned: ["codex": CodingActivitySample(at: now.addingTimeInterval(-60), model: nil)],
+            at: now
+        )
+        XCTAssertEqual(report.agents.first?.lastActivityAt, ms(now.addingTimeInterval(-60)))
+        XCTAssertEqual(report.agents.first?.model, "gpt-5.5-codex")
+    }
+
+    func testRetiredSourcesAndFutureStampsAreLeftOut() {
+        let report = CodingUsageEngine.activity(
+            sources: ["cursor", "claude", "Bad Source"],
+            recorded: [
+                "claude": CodingActivitySample(at: now.addingTimeInterval(3_600), model: "claude-opus-5"),
+                "cursor": CodingActivitySample(at: now, model: "composer-2"),
+            ],
+            scanned: [:],
+            at: now
+        )
+        XCTAssertEqual(report.agents, [CodingActivityAgent(id: "claude", lastActivityAt: nil, model: nil)])
+    }
+
+    func testPlaceholderModelNamesArePublished() {
+        let report = CodingUsageEngine.activity(
+            sources: ["antigravity"],
+            recorded: ["antigravity": CodingActivitySample(at: now, model: "MODEL_PLACEHOLDER_M318")],
+            scanned: [:],
+            at: now
+        )
+        XCTAssertEqual(report.agents.first?.model, "gemini-3.8-flash-high")
+    }
+
+    /// 一次会话扫描：Claude 的活动和桶来自日志扫描，Grok 的活动来自 `ccusage session` 记进账本的会话
+    func testSessionRefreshReportsActivityAndBuckets() async throws {
+        let folder = FileManager.default.temporaryDirectory.appendingPathComponent("engine-sessions-" + UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: folder) }
-        var ledger = try CodingUsageLedger(url: folder.appendingPathComponent("history.json"))
-        try body(&ledger)
-    }
-
-    func testCursorCacheWritesAreIndependentAndPlanChargesAreNotValuation() throws {
-        // A sanitized real API event shape, including two intentionally unrelated billing amounts.
-        let json = """
-        {"totalUsageEventsCount":1,"usageEventsDisplay":[{
-          "timestamp":"1788580800000","model":"claude-4.5-sonnet-thinking",
-          "tokenUsage":{"inputTokens":100,"outputTokens":50,"cacheReadTokens":200,"cacheWriteTokens":300,"totalCents":99900},
-          "chargedCents":999900,"isTokenBasedCall":true,"kind":"USAGE_EVENT_KIND_INCLUDED",
-          "conversationId":"private-fixture-id","owningUser":"private-fixture-owner"
-        }]}
+        let projects = folder.appendingPathComponent(".claude/projects")
+        try FileManager.default.createDirectory(at: projects, withIntermediateDirectories: true)
+        let current = Date()
+        // 日志里的时刻只到秒
+        let seen = Date(timeIntervalSince1970: (current.timeIntervalSince1970 - 90).rounded(.down))
+        let stamp = ISO8601DateFormatter().string(from: seen)
+        let line = try JSONSerialization.data(withJSONObject: [
+            "type": "assistant", "timestamp": stamp,
+            "message": ["id": "response", "model": "claude-test", "usage": ["input_tokens": 3, "output_tokens": 2]],
+        ])
+        try (line + Data([10])).write(to: projects.appendingPathComponent("session.jsonl"))
+        let executable = folder.appendingPathComponent("ccusage")
+        let script = """
+        #!\(testPython)
+        import sys,json
+        args=sys.argv[1:]
+        if args==['--help']:
+            print('  claude    Show Claude usage\\n  codex    Show Codex usage\\n  grok    Show Grok usage\\n  antigravity    Show Antigravity usage')
+            raise SystemExit
+        if args[0]=='daily':
+            print(json.dumps({'daily':[{'agents':[{'agent':'grok'}]}]}))
+            raise SystemExit
+        if args[0]=='grok':
+            print(json.dumps({'sessions':[{'sessionId':'private-grok','lastActivity':'2026-09-23T03:00:00Z','modelsUsed':['grok-5']}]}))
+        else:
+            print(json.dumps({'sessions':[]}))
         """
-        let decoded = try CursorUsageParsing.page(Data(json.utf8), lower: 0, upper: 1_788_580_800_000)
-        let source = try CodingUsageEngine.sourceReport(report(decoded.events.map(\.record)))
-        let row = try XCTUnwrap(source.days.first { $0.totalTokens > 0 })
-        XCTAssertEqual(row.inputTokens, 100)
-        XCTAssertEqual(row.cacheCreationTokens, 300)
-        XCTAssertEqual(row.cacheReadTokens, 200)
-        XCTAssertEqual(row.outputTokens, 50)
-        XCTAssertEqual(row.totalTokens, 650)
-        XCTAssertEqual(try XCTUnwrap(row.apiEquivalentCostUSD), 0.002235, accuracy: 0.000000001)
-        XCTAssertTrue(source.costComplete)
-        try withLedger { ledger in
-            try ledger.apply(source)
-            let data = try JSONEncoder().encode(ledger.snapshot(at: now))
-            let text = String(decoding: data, as: UTF8.self)
-            XCTAssertFalse(text.contains("private-fixture"))
-            XCTAssertFalse(text.contains("chargedUSD"))
-            XCTAssertFalse(text.contains("reportedTokenCostUSD"))
-        }
+        try Data(script.utf8).write(to: executable)
+        try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: executable.path)
+        let engine = CodingUsageEngine(ledgerURL: folder.appendingPathComponent("history.json"), home: folder)
+        let result = try await engine.refreshSessions(executableURL: executable, at: current)
+        XCTAssertEqual(result.problems, [])
+        XCTAssertEqual(result.activity.collectedAt, ms(current))
+        XCTAssertEqual(result.activity.agents, [
+            // 默认要问的来源：问过了、没有会话
+            CodingActivityAgent(id: "antigravity", lastActivityAt: nil, model: nil),
+            CodingActivityAgent(id: "claude", lastActivityAt: ms(seen), model: "claude-test"),
+            CodingActivityAgent(id: "grok", lastActivityAt: ms(CodingUsageDates.parseInstant("2026-09-23T03:00:00Z")!),
+                                model: "grok-5"),
+        ])
+        XCTAssertEqual(result.buckets.agents.map(\.id), ["codex", "claude"])
+        XCTAssertEqual(result.buckets.windows.flatMap(\.agents).map(\.outputTokens), [2])
+        XCTAssertEqual(result.buckets.collectedAt, ms(current))
+        // 会话 ID 只以摘要进账本，上报里一个字都没有
+        let text = String(decoding: try JSONEncoder().encode(result.activity), as: UTF8.self)
+        XCTAssertFalse(text.contains("private-grok"))
     }
 
-    func testUnmeasuredHistoricalRequestsReportDiagnosticsAndKeepMeasuredTotals() throws {
-        let oldDate = now.addingTimeInterval(-86_400)
-        let unknown = event(at: oldDate, input: 0, output: 0, cacheRead: 0, cacheWrite: 0, measured: false)
-        let cloud = report(Array(repeating: unknown, count: 1_891) + [event(at: now)])
-        let source = try CodingUsageEngine.sourceReport(cloud)
-        XCTAssertFalse(source.costComplete)
-        XCTAssertTrue(source.diagnosticError?.contains("1891") == true)
-        XCTAssertEqual(source.days.reduce(Int64(0)) { $0 + $1.totalTokens }, 650)
-        try withLedger { ledger in
-            try ledger.apply(source)
-            let snapshot = try ledger.snapshot(at: now)
-            let cursor = try XCTUnwrap(snapshot.usage.agents.first { $0.id == "cursor" })
-            XCTAssertEqual(snapshot.usage.totals.totalTokens, 650)
-            // 采到了但有缺口：状态仍是 ok，缺口进 warning（error 只留给真失败）
-            XCTAssertEqual(cursor.usageStatus.state, .ok)
-            XCTAssertNil(cursor.usageStatus.error)
-            XCTAssertTrue(cursor.usageStatus.warning?.contains("1891") == true)
-            XCTAssertFalse(cursor.usageStatus.costComplete)
-        }
-    }
-
-    func testHistoricalCorrectionCanDecreaseAnActuallyReturnedDay() throws {
-        let oldDate = now.addingTimeInterval(-86_400)
-        try withLedger { ledger in
-            try ledger.apply(CodingUsageEngine.sourceReport(report([event(at: oldDate, input: 1_000)])))
-            try ledger.apply(CodingUsageEngine.sourceReport(report(
-                [event(at: oldDate, input: 100)], at: now.addingTimeInterval(1)
-            )))
-            let snapshot = try ledger.snapshot(at: now)
-            XCTAssertEqual(snapshot.usage.totals.totalTokens, 650)
-            XCTAssertEqual(snapshot.usage.totals.activeDays, 1)
-        }
-    }
-
-    func testAbsentHistoricalDayAndSourceFailurePreserveTheLedger() throws {
-        let oldDate = now.addingTimeInterval(-86_400)
-        try withLedger { ledger in
-            try ledger.apply(CodingUsageEngine.sourceReport(report([event(at: oldDate), event(at: now)])))
-            try ledger.apply(CodingUsageEngine.sourceReport(report([event(at: now)], at: now.addingTimeInterval(1))))
-            var snapshot = try ledger.snapshot(at: now)
-            XCTAssertEqual(snapshot.usage.totals.totalTokens, 1_300)
-            XCTAssertEqual(snapshot.usage.totals.activeDays, 2)
-            let status = snapshot.usage.agents.first { $0.id == "cursor" }?.usageStatus
-            XCTAssertEqual(status?.state, .ok)
-            XCTAssertNotNil(status?.warning)
-            try ledger.recordFailure(sourceID: "cursor", error: "fixture timeout")
-            snapshot = try ledger.snapshot(at: now)
-            XCTAssertEqual(snapshot.usage.totals.totalTokens, 1_300)
-            XCTAssertEqual(snapshot.usage.totals.activeDays, 2)
-        }
-    }
-
-    func testAccountSwitchDoesNotAddTwoAccountHistories() throws {
-        try withLedger { ledger in
-            try ledger.apply(CodingUsageEngine.sourceReport(report([event(at: now, input: 1_000)])))
-            try ledger.apply(CodingUsageEngine.sourceReport(report(
-                [event(at: now, input: 100)], at: now.addingTimeInterval(1), account: "other-fixture-hash"
-            )))
-            XCTAssertEqual(try ledger.snapshot(at: now).usage.totals.totalTokens, 650)
-        }
-    }
-
-    func testUnknownPricePreservesTokensAndMarksCostIncomplete() throws {
-        let source = try CodingUsageEngine.sourceReport(report([event(at: now, model: "fixture-unpriced")]))
-        XCTAssertFalse(source.costComplete)
-        XCTAssertEqual(source.days.reduce(Int64(0)) { $0 + $1.totalTokens }, 650)
-        XCTAssertEqual(source.days.reduce(0) { $0 + ($1.apiEquivalentCostUSD ?? 0) }, 0)
-    }
-
-    func testEventDayUsesContractTimezoneAtMidnight() throws {
-        let boundary = Date(timeIntervalSince1970: 1_788_537_600) // 2026-09-05 00:00 in +08:00.
-        let source = try CodingUsageEngine.sourceReport(report([
-            event(at: boundary.addingTimeInterval(-0.001)), event(at: boundary),
-        ]))
-        XCTAssertEqual(source.days.first { $0.date == "2026-09-04" }?.totalTokens, 650)
-        XCTAssertEqual(source.days.first { $0.date == "2026-09-05" }?.totalTokens, 650)
-    }
-
-    func testIncompleteCloudReportCannotReachAuthoritativeLedgerMapping() throws {
-        XCTAssertThrowsError(try CodingUsageEngine.sourceReport(report([event(at: now)], complete: false))) {
-            XCTAssertEqual($0 as? CursorUsageError, .incompletePagination)
-        }
-    }
+    // MARK: - codingUsage
 
     func testCancelledEngineRefreshNeverWritesFailureStatusesOrReplacesHistory() async throws {
         let folder = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
@@ -171,9 +155,7 @@ final class EngineTests: XCTestCase, @unchecked Sendable {
         try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: executable.path)
         let engine = CodingUsageEngine(ledgerURL: ledgerURL, home: folder)
         let task = Task {
-            try await engine.refresh(
-                executableURL: executable, environment: ["ENGINE_TEST_MARKER": marker.path], includeCursor: false
-            )
+            try await engine.refresh(executableURL: executable, environment: ["ENGINE_TEST_MARKER": marker.path])
         }
         // 上限放宽到 10 秒：只是等 fixture 进程真正跑起来，通常几十毫秒就到；
         // 机器同时在跑 xcodebuild 时 spawn 会拖到 1 秒以上，之前 1 秒的上限就偶发红。

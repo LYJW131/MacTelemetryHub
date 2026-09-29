@@ -56,6 +56,7 @@
 		B10000000000000000000041 /* WindowTitleJudgmentCache.swift in Sources */ = {isa = PBXBuildFile; fileRef = F10000000000000000000040 /* WindowTitleJudgmentCache.swift */; };
 		B10000000000000000000042 /* JevWindowTitleQuestion.swift in Sources */ = {isa = PBXBuildFile; fileRef = F10000000000000000000041 /* JevWindowTitleQuestion.swift */; };
 		B10000000000000000000043 /* WindowTitleJudge.swift in Sources */ = {isa = PBXBuildFile; fileRef = F10000000000000000000042 /* WindowTitleJudge.swift */; };
+		B10000000000000000000044 /* CodingPayloads.swift in Sources */ = {isa = PBXBuildFile; fileRef = F10000000000000000000043 /* CodingPayloads.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -110,6 +111,7 @@
 		F10000000000000000000040 /* WindowTitleJudgmentCache.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WindowTitleJudgmentCache.swift; sourceTree = "<group>"; };
 		F10000000000000000000041 /* JevWindowTitleQuestion.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = JevWindowTitleQuestion.swift; sourceTree = "<group>"; };
 		F10000000000000000000042 /* WindowTitleJudge.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WindowTitleJudge.swift; sourceTree = "<group>"; };
+		F10000000000000000000043 /* CodingPayloads.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CodingPayloads.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -211,6 +213,7 @@
 				F1000000000000000000003F /* WindowTitleJudgment.swift */,
 				F10000000000000000000040 /* WindowTitleJudgmentCache.swift */,
 				F10000000000000000000041 /* JevWindowTitleQuestion.swift */,
+				F10000000000000000000043 /* CodingPayloads.swift */,
 			);
 			path = Sources/TelemetryCore;
 			sourceTree = SOURCE_ROOT;
@@ -329,6 +332,7 @@
 				B10000000000000000000041 /* WindowTitleJudgmentCache.swift in Sources */,
 				B10000000000000000000042 /* JevWindowTitleQuestion.swift in Sources */,
 				B10000000000000000000043 /* WindowTitleJudge.swift in Sources */,
+				B10000000000000000000044 /* CodingPayloads.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

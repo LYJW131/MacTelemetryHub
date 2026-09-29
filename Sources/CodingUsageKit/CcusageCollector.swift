@@ -17,8 +17,11 @@ public struct CcusageCollector: Sendable {
     public var offline: Bool
     public var home: URL
 
+    /// 全来源发现之外总要问一遍的来源：发现失败或还没跑过发现时，也不至于一家都不采
+    public static let defaultSourceIDs = ["claude", "codex", "grok", "antigravity"]
+
     public init(executableURL: URL, environment: [String: String] = [:],
-                sourceIDs: [String] = ["claude", "codex", "grok", "antigravity"],
+                sourceIDs: [String] = CcusageCollector.defaultSourceIDs,
                 timeout: TimeInterval = 90, offline: Bool = false,
                 home: URL = FileManager.default.homeDirectoryForCurrentUser) {
         self.executableURL = executableURL; self.environment = environment
@@ -26,7 +29,7 @@ public struct CcusageCollector: Sendable {
         self.home = home
     }
 
-    /// `cursor` 是云端账号，不是 ccusage 来源。发现结果里若出现同名 id，不能并进本地采集。
+    /// `cursor` 的用量由 agents-reporter 以账号来源上报，不是 ccusage 来源。发现结果里若出现同名 id，不能并进本地采集。
     /// `includePi` 补上全来源发现看不到的 omp 会话；`--pi-path` 会替换默认目录，不能只传一边。
     static func sources(requested: [String], discovered: Set<String>, includePi: Bool = false) -> [String] {
         var ids = Set(requested).union(discovered)
@@ -249,13 +252,17 @@ public struct CcusageCollector: Sendable {
 }
 
 public enum CcusageParser {
+    /**
+     * `costComplete` 按天判：这一天有 token 却没有费用、有模型没估到价、Antigravity 的思考量
+     * （ccusage 的日 JSON 没有这一列，价也就没算进去）、或有来源没分列的 token，那天就不算估全。
+     * 一天估不全不连累别的日子。
+     */
     public static func parse(sourceID: String, daily: Data, sessions: Data,
                              collectedAt: Date = Date()) throws -> CodingUsageSourceReport {
         let root = try object(daily)
         guard let rows = root["daily"] as? [[String: Any]] else {
             throw CodingUsageError.invalid("daily 响应缺少日桶数组")
         }
-        var costComplete = true
         var days: [CodingUsageDayRecord] = []
         var unclassifiedTotal: Int64 = 0
         var unique: [String: CodingUsageDayRecord] = [:]
@@ -266,6 +273,7 @@ public enum CcusageParser {
             let components = try tokens(raw, antigravityDay: sourceID == "antigravity",
                                         allowUnclassified: sourceID != "antigravity")
             let cost = try amount(raw["totalCost"] ?? raw["costUSD"], field: "费用")
+            var costComplete = true
             var models: [String: Int64] = [:]
             if let breakdowns = raw["modelBreakdowns"] as? [[String: Any]] {
                 for model in breakdowns {
@@ -294,12 +302,14 @@ public enum CcusageParser {
             }
             if components.total > 0 && (cost == nil || cost == 0) { costComplete = false }
             if sourceID == "antigravity", components.reasoning > 0 { costComplete = false }
+            if components.unclassified > 0 { costComplete = false }
             let day = CodingUsageDayRecord(
                 date: date, inputTokens: components.input, outputTokens: components.output,
                 cacheReadTokens: components.cacheRead, cacheCreationTokens: components.cacheCreation,
                 reasoningTokens: components.reasoning, totalTokens: components.total,
                 apiEquivalentCostUSD: cost, models: models,
-                unclassifiedTokens: components.unclassified > 0 ? components.unclassified : nil
+                unclassifiedTokens: components.unclassified > 0 ? components.unclassified : nil,
+                costComplete: costComplete
             )
             try CodingUsageLedger.validate(day)
             if let previous = unique[date] {
@@ -317,8 +327,7 @@ public enum CcusageParser {
         return CodingUsageSourceReport(
             sourceID: sourceID, days: days, sessions: sessionRows, collectedAt: collectedAt,
             coverageStart: days.first?.date, coverageEnd: today,
-            precision: .measured,
-            costComplete: costComplete, completeDates: Set(days.map(\.date)), authoritative: true,
+            completeDates: Set(days.map(\.date)), authoritative: true,
             diagnosticError: unclassifiedTotal > 0 ? "历史记录有 \(unclassifiedTotal) token 未提供分列，已保留实测总量" : nil
         )
     }
