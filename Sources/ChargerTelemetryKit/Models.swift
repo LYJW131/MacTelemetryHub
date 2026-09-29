@@ -154,8 +154,7 @@ public struct StatusPayload: Encodable, Equatable, Sendable {
 }
 
 public enum JSONCoding {
-    /// 键一律用驼峰，和 Swift 侧的属性名一致 —— 不再做蛇形转换，
-    /// 省掉「Swift 写驼峰、线上是蛇形、站点又得转回来」这一路心智负担。
+    /// JSON 键与 Swift 属性同名，使用 camelCase。
     public static func encoder(pretty: Bool = false) -> JSONEncoder {
         let encoder = JSONEncoder()
         if pretty {

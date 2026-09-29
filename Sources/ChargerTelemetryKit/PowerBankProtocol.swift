@@ -12,9 +12,8 @@ import Foundation
  * - **两位十进制对**：电量和剩余时间是 `[整数, 百分位]` 两个字节，不是 u16。
  *   当 u16 读会得到一个很大的、看起来像那么回事的错误数字。
  *
- * 字段依据见调试仓库 anker-prime-ble 的 `docs/powerbank.md`；那边的
- * `spec/fixtures/` 是这份实现的一致性契约 —— 同样的抓包字节喂进来，输出必须逐
- * 字段相等。改这个文件之后跑 `PowerBankConformanceTests`。
+ * 字段依据见调试仓库 anker-prime-ble 的 `docs/powerbank.md`。
+ * 一致性契约是 `Tests/ChargerTelemetryKitTests/ContractTests.swift#powerBankMatchesRecordedContract`。
  */
 public struct PowerBankPort: Codable, Equatable, Sendable {
     public var name: String

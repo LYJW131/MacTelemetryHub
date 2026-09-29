@@ -13,8 +13,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /**
      * 采集服务归 AppDelegate 持有。
      *
-     * 以前是控制面板 `onAppear` 才 start()：登录自启拉起来时面板并不打开，采集要等
-     * 到用户第一次点开窗口才真正开始。启动本来就该跟窗口无关。
+     * 采集随 `applicationDidFinishLaunching` 启动，不依赖面板打开。
      */
     let service = ServiceController()
 

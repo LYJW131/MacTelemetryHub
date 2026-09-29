@@ -7,12 +7,7 @@ import ChargerTelemetryKit
 /**
  * 一个模块的手动上报最终落到信封里的哪一格载荷。
  *
- * 模块和载荷不是一一对应的：充电头和充电宝共用 `chargingDevices` 那一格。
- * 从前手写的 switch 只认 `.charger`，于是点「立刻上报充电宝」什么都不会发，
- * 而 pending 只在发出去之后才清 —— 结果是永远清不掉，manualMode 一直为真，
- * 所有自动上报被挡住，按钮停在「正在上报…」直到重新保存设置。
- *
- * 加设备、加模块时改这里，不要再展开一遍 switch。
+ * 充电头与充电宝共用 `chargingDevices`。映射统一由此维护；加设备、加模块时改这里。
  */
 enum ReportPayloadKind: Hashable, Sendable {
     case chargingDevices
@@ -121,11 +116,7 @@ struct ChargingBurstState: Equatable, Sendable {
 }
 
 /**
- * 这一圈发什么、发不发、急不急。
- *
- * 从上报循环里抽出来的唯一理由是它能被单独钉住：黑名单三态、进度容差、
- * 追发计数、退避期不放行 —— 这些规则从前只存在于一段两百行的循环体里，
- * 改动它们只能靠通读。现在它们是一个纯函数，测试直接喂快照。
+ * 纯函数：根据输入快照和已发送状态决定发送内容与紧急性。
  */
 struct ReportDecision: Sendable {
     /// 进度偏离预测多少才算被拖过。留 2.5 秒，既不会把采样抖动当 seek，
@@ -326,7 +317,7 @@ struct ReportDecision: Sendable {
          * 点了锁定）是一次撤回，更不能等。
          *
          * 这不会变吵：只有归一化后真的变了的标题才会走到判断，而判断本身压着
-         * 2 秒去抖和每应用 10 秒一次的闸门（见 WindowTitleJudge）。
+         * `WindowTitleJudge.settleDelay` 和 `WindowTitleJudge.perApplicationInterval`。
          */
         let desktopUrgent = !manualMode && desktopChanged && (
             inputs.desktopBlocked ||

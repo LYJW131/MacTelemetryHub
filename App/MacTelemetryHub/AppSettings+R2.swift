@@ -4,9 +4,7 @@ extension AppSettings {
     /**
      * 四项 R2 直传配置，缺一项或 endpoint 不是 https 就没有。
      *
-     * 「配置从设置里怎么读」是 App 的事，签名和上传是纯逻辑（见 TelemetryCore
-     * 的 `R2IconUploader`）。从前这段挂在 uploader 上，那个 enum 因此被
-     * `@MainActor` 的 AppSettings 拽住，整块没法搬出去。
+     * App 读取设置，`TelemetryCore.R2IconUploader` 接受显式配置。
      */
     var r2UploadConfiguration: R2UploadConfiguration? {
         let endpointText = r2Endpoint.trimmingCharacters(in: .whitespacesAndNewlines)

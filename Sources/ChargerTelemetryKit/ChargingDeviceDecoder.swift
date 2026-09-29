@@ -7,7 +7,7 @@ import Foundation
  * 收进一个解码器对象之后，链路那边就不用再关心对面是充电头还是充电宝 —— 它只
  * 负责连上、握手、把帧丢进来，然后问一句「有没有可上报的东西」。
  *
- * 加第三台设备就是再写一个实现，链路、上报、界面都不用动。
+ * 新设备还要在 `ChargingDeviceSlot` 登记，并在 `ServiceController.link(for:)` 接上链路。
  */
 public protocol ChargingDeviceDecoder: AnyObject {
     var kind: ChargingDeviceKind { get }

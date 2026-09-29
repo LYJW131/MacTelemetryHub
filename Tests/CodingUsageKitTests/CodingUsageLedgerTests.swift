@@ -316,6 +316,5 @@ struct CodingUsageLedgerTests {
 }
 
 private extension Array {
-    /// 恰好一个元素时给出它
     var onlyElement: Element? { count == 1 ? first : nil }
 }

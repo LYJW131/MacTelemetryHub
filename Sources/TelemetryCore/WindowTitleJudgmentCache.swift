@@ -7,9 +7,7 @@ import Foundation
  * 之后切回去是本地查表。转动的圆点被归一化剥掉了，所以一个「正在下载
  * ⠋ 47%」的窗口在这里始终只占一条。
  *
- * 按 `lastSeenAt` 做 LRU，上限 500 条。上限存在的理由不是省内存（五百条
- * 标题不到一百 KB），是别让一份陈年名单无限长下去 —— 里面装的是用户用过
- * 什么、开过哪些文件。
+ * 按 `lastSeenAt` 做 LRU。容量由 `capacity` 限制，避免长期保留无限增长的标题历史。
  *
  * 落盘的 JSON 时间戳用毫秒整数而不是 `Date` 的默认编码（参考日起算的浮点
  * 秒），这份文件是给人看的。
@@ -17,16 +15,7 @@ import Foundation
 struct WindowTitleJudgmentCache: Equatable, Sendable {
     static let capacity = 500
     /**
-     * 文件里带一个版本号：格式改了直接丢掉重判，不做迁移。
-     *
-     * 2：加了「已省略」一档。字段形状没变，但旧名单里的 `Claude`、
-     * `Mac Telemetry Hub` 这类条目当时被判成了「已公开」，不重判的话它们
-     * 永远不会进新档 —— 整份作废比逐条猜它们该去哪里可靠。
-     *
-     * 3：一道「敏感吗」拆成五道风险题加一道信息量，`probabilities` 从两个键
-     * 变成六个，条目多了 `lockedBy`。作废的理由不只是字段对不上，更是结论本身
-     * 靠不住：版本 2 的名单里政治和成人内容这两件事从来没被问过，一条键政
-     * 标题当时拿着 sensitive 0.07 稳稳躺在「已公开」上。
+     * 仅接受 `formatVersion`。不兼容缓存丢弃重判，避免复用不同策略的结论。
      */
     static let formatVersion = 3
 
@@ -39,8 +28,7 @@ struct WindowTitleJudgmentCache: Equatable, Sendable {
     }
 
     static func key(bundleIdentifier: String?, title: String) -> String {
-        // Bundle ID 缺失的应用（少数非 bundle 进程）用一个固定占位，
-        // 免得它们的标题互相串到同一个键上。
+        // 缺失 Bundle ID 时用同一个占位，同标题共享缓存键。
         "\(bundleIdentifier ?? "-")\n\(title)"
     }
 

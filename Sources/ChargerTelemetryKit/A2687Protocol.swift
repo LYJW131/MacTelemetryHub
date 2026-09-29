@@ -193,8 +193,8 @@ public enum A2687Protocol {
     /**
      * 会话密钥就绪后要发的命令。
      *
-     * `userID` 传 nil 就只发 0x0022 —— 充电宝那样就够了，握完手它自己开始 1 Hz
-     * 推 0x0300。充电头不行：不发 0x0027 带上账号 ID，它一帧都不推。
+     * 调用方按 `ChargingDeviceDecoder.needsAccountID` 决定是否传入账号。
+     * 有 `userID` 就再发 0x0027；没有则只发 0x0022。
      */
     public static func postSessionSteps(
         userID: String?,

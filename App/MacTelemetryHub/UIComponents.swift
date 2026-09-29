@@ -1,19 +1,12 @@
 import SwiftUI
 
 /**
- * 面板共用的那几个数字。
- *
- * 卡片背景以前在七八处各写一遍，圆角和描边浓度就慢慢对不上了。收在这里，改一次
- * 全站一起变。
+ * 共享面板指标，保证卡片样式一致。
  */
 enum PanelMetrics {
-    /// 卡片圆角
     static let cornerRadius: CGFloat = 8
-    /// 卡片描边浓度
     static let strokeOpacity: Double = 0.08
-    /// 卡片内边距
     static let padding: CGFloat = 13
-    /// 状态圆点直径
     static let statusDot: CGFloat = 7
     /// 遥测静默多久算「数据过期」。两台设备都是约 1 Hz 推流，15 秒远在抖动之外。
     static let staleThreshold: TimeInterval = 15

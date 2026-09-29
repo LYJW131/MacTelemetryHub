@@ -44,7 +44,7 @@ final class ServiceController: ObservableObject {
     @Published private(set) var appleMusicCredentialsUploadAt: Date?
     @Published private(set) var appleMusicCredentialsUploadError: String?
     @Published private(set) var isUploadingAppleMusicCredentials = false
-    /// 两个 token 本身、续期节奏、已上报记录都归它。上面三个 @Published 是 UI 状态，
+    /// 持有 user token、刷新排期和发送记录。上面三个 @Published 是 UI 状态，
     /// 留在这里 —— 转发成计算属性的话 SwiftUI 的观察会静默失效。
     let appleMusicCredentialStore: AppleMusicCredentialStore
     @Published private(set) var pendingManualReports: Set<TelemetryModule> = []
@@ -79,7 +79,7 @@ final class ServiceController: ObservableObject {
      * 排一个 400ms 的防抖，而 `willSleepNotification` 的观察者同步发出 offline。
      * 观察者返回后系统还要几百毫秒才真的挂起，防抖恰好在这段窗口里到点，于是
      * 那封「前台应用 = 锁屏」的信封跟在 offline 后面发了出去 —— 它的 presence
-     * 默认是 online（见 makeTelemetryEnvelope），站点每封都算一次在线心跳，
+     * 默认是 online（见 `Sources/TelemetryCore/TelemetryEnvelope.swift#TelemetryEnvelope.make`），站点每封都算一次在线心跳，
      * 刚宣告的离线就这么被复活成「已锁屏」，一直挂到心跳窗口超时才翻回去。
      *
      * 站点那边修不了：迟到那封的 heartbeatAt 确实更晚，不是乱序，是这边真的
@@ -461,9 +461,7 @@ final class ServiceController: ObservableObject {
      * 所有已启用、且真的收到过遥测的充电设备。一台都没有就返回 nil，
      * 上报信封里那个键整个不出现。
      *
-     * 这条路是纯读取：不启动 R2 resolver、不动重试额度。SSE 推流每秒都要走它，
-     * 从前顺手启动的后台解析于是被 1 Hz 驱动着跑。发起解析改由上报侧的
-     * `kickCoverIconResolution()` 显式负责。
+     * 载荷读取不得触发 R2 操作。解析由 `kickCoverIconResolution` 发起。
      */
     var chargingDevicesPayload: ChargingDevicesPayload? {
         let devices = chargingLinks.compactMap { link -> ChargingDevicePayload? in
@@ -482,8 +480,6 @@ final class ServiceController: ObservableObject {
         return device
     }
 
-    /// 组装待上报载荷之前叫一次：封面还没确认就在后台 HEAD / PUT。
-    /// 条件跟从前埋在 `devicePayload(for:)` 里的那次完全一致。
     private func kickCoverIconResolution() {
         guard ChargingDeviceSlot.charger.isEnabled(settings),
               chargerLink.devicePayload != nil,
@@ -611,13 +607,7 @@ final class ServiceController: ObservableObject {
     /**
      * 等到下一个周期，或者被事件提前叫醒 —— 谁先来算谁。
      *
-     * `cycleStart` 是本轮开始的时刻，睡眠时间从它算起扣掉本轮已经花掉的时间。
-     * 原来是「干完活再睡满 5 秒」，于是实际周期变成 5 秒加上本轮耗时 —— 一次
-     * 上报要一两秒，追发就从 5 秒一次变成 7 秒一次。要求是 5 秒，那就得按周期
-     * 算而不是按间隔算。
-     *
-     * 本轮耗时超过一个周期时不补睡，直接进入下一轮：追进度没有意义，只会让
-     * 循环一直欠着时间往前赶。
+     * 从 `cycleStart` 扣除工作耗时；超出周期立即继续，不补睡追进度。
      */
     private func waitForNextTick(since cycleStart: ContinuousClock.Instant, generation: Int) async {
         if pendingWake {
@@ -776,7 +766,7 @@ final class ServiceController: ObservableObject {
         lastPosted = .init()
         codingDeliveryErrors.removeAll()
         icons.reset()
-        // 每个上报会话都完整发一次，之后两个 token 才分别判变。
+        // 重置 user token 的已发送记录。
         appleMusicCredentialStore.resetPostedTokens()
         pendingManualReports.removeAll()
         lastManualReportError.removeAll()
@@ -814,12 +804,7 @@ final class ServiceController: ObservableObject {
                     // 1 Hz 的 SSE 推流不会再顺手启动 resolver、也不会动重试额度。
                     kickCoverIconResolution()
                     /**
-                     * 一次性把这一圈要看的东西全捕获下来。
-                     *
-                     * 从这里到 POST 之间没有挂起点，所以「判断依据」和「实际发出去
-                     * 的内容」必然是同一份 —— 从前这靠一长串同名局部变量维持，现在
-                     * 靠这个快照。判断本身（发什么、发不发、急不急）搬进了
-                     * `ReportDecision`：纯函数，规则可以被单测直接钉住。
+                     * 捕获至 POST 前无挂起点，判断与发送共用同一快照。
                      */
                     let capturedDesktop = settings.desktopModuleEnabled
                         ? desktopActivity.snapshot : nil
@@ -1011,9 +996,10 @@ final class ServiceController: ObservableObject {
     /**
      * 返回已经确认存在的对象键；没有准备好就启动后台 resolver 并立即返回 nil。
      *
-     * 名称上报从此不 await R2。resolver 先 HEAD：对象还在就复用，被清掉就 PUT；
-     * 同一枚图标五分钟内不重复检查。成功时若网页已经收过无图版本，再叫醒一轮
-     * 补对象键。失败最多试三次，但绝不靠反复 POST 遥测来驱动重试。
+     * 名称上报不 await R2。resolver 先 HEAD：对象还在就复用，被清掉就 PUT。
+     * 检查间隔见 `App/MacTelemetryHub/IconUploadCoordinator.swift#verificationInterval`，
+     * 失败次数见 `Sources/TelemetryCore/IconUploadBudget.swift#maxAttempts`。
+     * 成功时若网页已经收过无图版本，再叫醒一轮补对象键。绝不靠反复 POST 遥测来驱动重试。
      */
     private func desktopIconObjectKeyIfReady(_ desktop: DesktopActivitySnapshot) -> String? {
         guard let iconHash = desktop.iconHash, let iconData = desktop.iconData else { return nil }
@@ -1110,14 +1096,10 @@ final class ServiceController: ObservableObject {
     }
 
     /**
-     * 发一条不带任何模块的信封：只声明在离线，不刷新任何模块的时间戳。
-     *
-     * 和数据上报走同一个端点、同一个 v4 信封 —— 空 `modules` 就是心跳的全部
-     * 含义，接收端不需要为它准备第二条路。从前这条走独立的 presence 端点、
-     * 发的是另一种 JSON，两边各维护一套。
+     * 空 `modules` 信封通过统一 ingest 声明 presence，不刷新任何模块的时间戳。
      *
      * `blocking` 那条路的超时给得很短：睡眠前系统只留很窄的一个窗口，宁可这条
-     * 发丢，也不能把睡眠拖住。发丢了还有心跳超时兜底，那条路本来就没拆。
+     * 发丢，也不能把睡眠拖住。发丢了靠心跳超时兜底。
      */
     private func sendHeartbeat(_ presence: String, blocking: Bool = false) {
         // 宣告过离线之后只剩 offline 能发。这是「闭嘴」的唯一落实处，

@@ -3,8 +3,8 @@ import Foundation
 /**
  * 一条窗口标题的结论。
  *
- * 只有 `published` 会让标题进信封；另外两档在协议上和「没有标题」完全一样
- * （`windowTitle` 为 null），区别只在本机界面上还看得见它停在哪一步。
+ * `published` 可公开，进上报信封；其余结论不公开（`windowTitle` 为 null）。
+ * 本机界面仍能看出停在哪一档。
  */
 enum WindowTitleVerdict: String, Codable, Equatable, Sendable {
     /// 放行：标题可以随前台应用一起公开。

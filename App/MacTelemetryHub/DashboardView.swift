@@ -37,11 +37,7 @@ private enum DashboardSection: String, CaseIterable, Identifiable {
 private let chargerRatedMaxWatts: Double = 250
 
 /**
- * 每秒重算一次的那一小块。
- *
- * 以前整个面板套在一个 1 秒的 TimelineView 里，于是每一秒所有卡片、端口格、封面
- * 列表全部重新求值 —— 而真正跟时间有关的只有钟点、「上次上报多久前」和几处过期
- * 判断。把 TimelineView 收到叶子上，其余部分只在数据真的变了才重绘。
+ * `TimelineView` 只包裹依赖时间的叶子视图。
  */
 private struct Ticking<Content: View>: View {
     @ViewBuilder let content: (Date) -> Content
@@ -1083,8 +1079,7 @@ private struct ModuleStatusCard: View {
 /**
  * 端口卡的骨架：抬头、大瓦数、电压电流条、底下三行说明。
  *
- * 充电头和充电宝的端口卡本来是两份一模一样的版式，只有取值不同 —— 改一边忘另一边
- * 就会错位。骨架收在这里，两边只负责把字算出来。
+ * 共享端口卡布局，两类设备分别提供内容。
  */
 private struct ChargingPortCard: View {
     let icon: String

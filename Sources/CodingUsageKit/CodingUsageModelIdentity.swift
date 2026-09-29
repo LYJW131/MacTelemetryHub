@@ -46,8 +46,6 @@ public enum CodingUsageModelIdentity {
         return key
     }
 
-    /// Gemini 3.8 Flash High / Medium / Low = M318 / M319 / M320；
-    /// 3.7 = M298 / M299 / M300；3.6 现号 M71–M73，退役号 M264–M266。
     private static let aliases: [String: String] = [
         "m318": "gemini-3.8-flash-high",
         "m319": "gemini-3.8-flash-medium",

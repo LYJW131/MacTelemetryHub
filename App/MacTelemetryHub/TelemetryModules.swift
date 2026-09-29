@@ -416,14 +416,7 @@ final class DesktopActivityMonitor: ObservableObject {
     }
 
     /**
-     * 图标编码。用系统原生的 PNG 写出，不依赖任何外部二进制。
-     *
-     * 从前这里 fork 出 Homebrew 的 cwebp：签名 app 里那个子进程起不来，返回 nil，
-     * 而 nil 一路被下游当成「这个应用没图标」，于是整批图标静默消失。图标是
-     * 大片纯色加硬边缘的小图，PNG 无损、96px 也就十几 KB，没必要为它引一个
-     * 装不装全看运气的外部依赖。
-     *
-     * 网页只显示 40 CSS px，96px 覆盖 Retina 所需的 80px 还有余量。
+     * 使用系统 PNG 编码，避免签名应用依赖外部可执行文件。
      */
     private static func pngData(for icon: NSImage) -> Data? {
         /*
@@ -531,11 +524,8 @@ final class AppleMusicMonitor: ObservableObject {
     private static let settleDelay = Duration.milliseconds(400)
 
     /**
-     * 播放状态改由 Music.app 的跨进程通知驱动，不再 2 秒轮询一次 AppleScript。
-     *
-     * `com.apple.Music.playerInfo` 在每次换歌和播放/暂停时发出，带了 Player State、
-     * 曲目身份和 Total Time —— 但**没有播放进度，也没有封面**。所以这里只把它
-     * 当触发器：收到就跑一次 AppleScript，专门取那两样拿不到的。
+     * `com.apple.Music.playerInfo` 在换歌和播放/暂停时发出。通知触发播放状态与曲目信息重读。
+     * AppleScript 不读取封面。
      */
     func start() {
         Task { await refresh() }

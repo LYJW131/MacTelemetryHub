@@ -9,7 +9,7 @@ import Foundation
  *
  * 连接节奏两边一样。传输层也一样；不一样的只有解码和配对过滤，都在 decoder 里。
  *
- * 加第三台设备：这里加一个 case，加一个解码器，其余不动。
+ * 加设备：这里加一个 case、一个解码器，并改 `ServiceController.link(for:)`。
  */
 enum ChargingDeviceSlot: String, CaseIterable, Identifiable, Sendable {
     case charger
@@ -71,10 +71,10 @@ enum ChargingDeviceSlot: String, CaseIterable, Identifiable, Sendable {
     }
 
     /**
-     * 掉线后多久重新挂上定向连接。
+     * `scheduleRetry` 用的退避。
      *
-     * 两边同一套：定向 connect 挂在控制器上，不轮询、不耗电，短退避不会变成忙循环。
-     * 设备睡着或拔掉时也只是静静等着。
+     * 重连由 `BluetoothService.startConnectionPump` 驱动，`tickConnectionPump`
+     * 会在连接超时后拆掉会话再来。
      */
     var reconnectDelay: Duration { .seconds(5) }
 

@@ -7,10 +7,7 @@ import ChargerTelemetryKit
 /**
  * 「已经发出去的是什么」的全部门闩。
  *
- * 每个字段单独判变，所以从前它们是 ServiceController 上十来个平行的
- * `lastPosted*` 属性，重开一轮上报会话要挨个清一遍 —— 漏掉一个不会报错，
- * 只会让某个模块的第一封信悄悄不发。收成一个结构体之后重置就是 `.init()`，
- * 而「成功之后怎么推进」也有了唯一落点（`commit`）。
+ * 统一重置发送状态（`.init()`），成功后仅由 `commit` 推进。
  */
 struct LastPostedState {
     /// coding 的三份载荷各自发出去的是哪一版，各判各的变化和保活。

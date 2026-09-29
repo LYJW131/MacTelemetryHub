@@ -3,13 +3,7 @@ import Foundation
 /**
  * 本机 HTTP 接口：状态查询和两条充电设备推流。
  *
- * 和远端上报是两件事 —— 这边只读此刻的内存状态，不发任何请求、不推进任何门闩。
- * 从前挤在 ServiceController 末尾，读起来像是上报循环的一部分。
- *
- * Swift 的 private 是文件级的，所以这里用到的几个成员在主文件里由 private 提到
- * internal：route、chargingSSE、streamEvent(for:)、icons，以及 ChargingSSEBroker
- * 本身。图标的三份交付状态从前是三个裸字段，现在走 IconUploadCoordinator 的
- * 三个只读方法。chargingStream 和 json 只在本文件里用，仍然是 private。
+ * 本地接口只读内存状态，不触发远端上报。
  */
 extension ServiceController {
     func route(_ request: HTTPRequest) async -> HTTPHandlerResult {

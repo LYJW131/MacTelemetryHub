@@ -95,13 +95,12 @@ class CodingUsageMonitor: ObservableObject {
 }
 
 /**
- * `codingUsage`，两档节奏：卡片上只有 Claude Code 要看当天的实时用量，所以每轮（`interval`，
- * 默认 10 分钟）只刷 Claude、报告也只带 Claude；全部来源的完整采集按 `fullInterval`（默认
- * 1 小时）跑一次，报告带全部本机来源。其余来源在两次完整采集之间原样留在账本里，站点那边
- * 也是没出现的不动。手动刷新总是完整的。
+ * `codingUsage` 两档节奏。每轮 `interval` 只刷 Claude、报告只带 Claude；全部来源按
+ * `fullInterval` 采集。未保存的间隔由 `App/MacTelemetryHub/AppSettings.swift#load` 填上，
+ * 完整采集的缺省是 `defaultFullInterval`。其余来源在两次完整采集之间留在账本里。
+ * 手动刷新总是完整的。
  *
- * 完整那一轮的报告还没发出去（上报一直失败）时下一轮只刷 Claude 的报告会顶掉它，其余来源
- * 就要等再下一次完整采集 —— 它们本来就一小时才更新一次。
+ * 完整那一轮还没发出去时，下一轮只刷 Claude 的报告会顶掉它，其余来源要等再下一次完整采集。
  */
 @MainActor
 final class VibeCodingUsageMonitor: CodingUsageMonitor {
@@ -145,7 +144,8 @@ final class CodingSessionMonitor: CodingUsageMonitor {
     }
 
     /// Codex 和 Claude 每轮都由增量扫描器更新；其余来源的 ccusage session
-    /// 由引擎按 5 分钟节流，手动刷新时 `forceCcusage` 让它立刻跑一次。
+    /// 由引擎按 `Sources/CodingUsageKit/CodingUsageEngine.swift#ccusageSessionInterval` 节流，
+    /// 手动刷新时 `forceCcusage` 让它立刻跑一次。
     @discardableResult
     func refreshNow(ccusageCLIPath: String, forceCcusage: Bool = true) async -> Bool {
         await refresh {

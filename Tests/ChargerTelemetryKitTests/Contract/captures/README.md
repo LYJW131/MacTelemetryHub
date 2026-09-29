@@ -42,8 +42,9 @@ changed no realtime field — see the firmware section of the field map.
 | `charger-01` | C1 charging a MacBook Pro at 89.2 W, no account ID | verifies the A2687 decoder against hardware; also showed the `0x0200` snapshot carries live port structs |
 | `charger-02` | same load, with an account ID | 35 pushed `0x0300` frames at 1 Hz — the stream `0x0027` unlocks |
 
-Replay both with `--device charger`. The difference between them is the whole
-argument for why the charger needs an account ID and the power bank does not.
+Replay both with `--device charger`. Both device kinds need an account ID
+(`Sources/ChargerTelemetryKit/ChargingDeviceDecoder.swift#needsAccountID`;
+`App/MacTelemetryHub/BluetoothService.swift#performHandshake` supplies it).
 
 Neither contains the account ID. It travels only inside AES-GCM ciphertext under
 an ephemeral ECDH session key, and no response echoes it back — checked before
@@ -54,7 +55,3 @@ capture that cannot be tied to the hardware it came from is worth much less as
 evidence, and every field claim in `docs/` rests on these being real recordings
 of a specific unit. Neither value is a credential — a BLE MAC is broadcast to
 anything in radio range, and the serial is printed on the device.
-
-They do **not** contain the Anker account ID the charger needs. That travels
-only inside AES-GCM ciphertext under an ephemeral ECDH session key, and no
-response echoes it back; both charger captures were checked before committing.

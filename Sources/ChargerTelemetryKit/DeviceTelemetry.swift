@@ -3,17 +3,10 @@ import Foundation
 /**
  * 上报给站点的充电设备负载 —— 多设备通用形状。
  *
- * 从前这里只有充电头一台，`StatusPayload` 的字段就直接是它的字段：三个端口、
- * 一个总输出、按端口名索引的字典。加进充电宝之后那套形状撑不住了 —— 它有电量、
- * 温度、热控、输入方向，端口名也不同（C1/C2/A 对 C1/C2/C3）。
+ * 公共字段在顶层：id、kind、连接状态、端口和总量。设备特有的收进可选子对象
+ * （`battery`、`temperaturesC`），没有就不出现。`kind` 是判别字段。
  *
- * 所以拆成两层：**公共字段拍平在顶层**，任何一台设备都有 id、kind、连接状态、
- * 端口和总量，站点可以完全通用地渲染；**设备特有的收进子对象**（`battery`、
- * `temperaturesC`），没有就不出现。`kind` 是判别字段，以后加第三台设备只是多一
- * 个枚举值，结构不用动。
- *
- * 端口用数组不用字典：JSON 对象无序，而两台设备的端口名还不一样，字典会逼着
- * 站点去猜顺序或者硬编码名字。
+ * 端口用数组不用字典：JSON 对象无序，端口名又因设备而异，字典会逼着站点猜顺序。
  */
 public enum ChargingDeviceKind: String, Codable, Sendable {
     case charger
@@ -194,8 +187,7 @@ public struct ChargingDevicesPayload: Codable, Equatable, Sendable {
 // MARK: - 从各设备状态构造
 
 public enum TelemetryRounding {
-    /// 上报统一保留两位小数。原始读数本来就只有一位（充电宝）或三位（充电头
-    /// 的毫伏毫安），两位既不丢真实精度，也不会让指纹被浮点尾巴搅得每帧都变。
+    /// 百分位舍入。牺牲第三位精度以稳定显示指纹，避免浮点尾巴让内容指纹每帧都变。
     public static func twoDecimals(_ value: Double) -> Double {
         (value * 100).rounded() / 100
     }

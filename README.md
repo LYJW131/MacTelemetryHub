@@ -33,15 +33,8 @@ below is off by default.
 - foreground application reporting: the app's name, bundle ID, icon, and — when a
   judgment clears it — the focused window title, with an exact Bundle ID blacklist
   for remote reporting
-- window titles gated by a blacklist plus six TypeSafe Jev yes/no judgments
-  asked in one request (secrets, private matters, employer material, adult
-  content, political sensitivity, informativeness): blacklisted apps are never
-  read, trusted apps are published directly, everything else lands in one of
-  four verdicts — published, locked (with the dimensions that triggered it),
-  omitted (nothing to show, e.g. a title that is just the app's own name) or
-  pending. A pending title raises a notification with a single 公开 button;
-  closing the notification locks it, and pending titles can also be settled from
-  the menu bar
+- Jev participates in window-title judgments; only titles cleared for publication
+  enter the reporting envelope
 - coding usage facts read from local agent logs — per-day usage, the latest usage event, five-minute token windows — that never include session IDs, project paths, prompts, or replies
 - charger cover name plus the original JPEG uploaded to R2 (no resize or transcode; the point is to leave Anker's signed URL)
 - coding usage in the envelope covers this Mac's local agents only; Cursor's account history, subscription plan tiers and rate-limit windows are out of scope here (the author reports them from a separate container to `/api/ingest/agents`)
@@ -101,8 +94,8 @@ exactly what heartbeat renewal is for.
 cleared the judgment described under **Module permissions**, so the site can render
 it as-is. The Mac normalizes it before sending (spinners, `[n/m]` progress, `nn%`,
 unread badges stripped, whitespace collapsed), trims it, drops an empty string to
-`null`, and truncates at **200 Unicode scalars**; the Worker applies the same limit
-in the same unit. The `hidden` virtual application never carries a title.
+`null`, and truncates at `Sources/TelemetryCore/WindowTitleNormalizer.swift#maximumScalarCount`
+Unicode scalars; the Worker applies the same limit in the same unit. The `hidden` virtual application never carries a title.
 
 Version 4 is the only accepted contract; desktop icons are addressed by SHA-256.
 The Mac renders each icon at 96 px, encodes it once as PNG, signs an S3-compatible
@@ -112,8 +105,9 @@ The R2 access key and secret are stored in macOS Keychain. There is no base64 fa
 the server never receives image bytes.
 
 An envelope with no `modules` (or an empty one) is a pure heartbeat: it refreshes
-liveness without touching any module's timestamp. One is sent every 90 s while
-nothing changes, and never alongside a data post — that post already proves the
+liveness without touching any module's timestamp. One is sent every
+`Sources/TelemetryCore/ReportDecision.swift#heartbeatInterval` while nothing
+changes, and never alongside a data post — that post already proves the
 reporter is alive. `presence: "offline"` covers graceful exits (quit, sleep) and is
 sent synchronously so it beats the disconnect; crashes, network loss, and forced
 shutdowns still rely on the site's "nothing received for a while" timeout. Both
@@ -130,12 +124,13 @@ Coding usage is split into three modules by **how often it changes**:
 
 | Module | Cadence | Contents |
 | --- | --- | --- |
-| `codingActivity` | scanned every 60 s; sent when it changes, and at least every 5 min while it does not | per agent, `lastActivityAt` (epoch ms) and the model of the latest usage event. Codex and Claude come from an incremental scan of their JSONL logs; other local sources run `ccusage session` at most every 5 minutes |
-| `codingTokenBuckets` | same scan, same rule | Codex and Claude five-minute token windows over the rolling 24 hours |
-| `codingUsage` | Claude every 10 min, every local agent every hour; sent every round | per agent, the complete day history (`Asia/Shanghai` days), session count and collection status. The 10-minute round carries only Claude; agents missing from an envelope keep what the site already has |
+| `codingActivity` | scanned on the session interval from `App/MacTelemetryHub/AppSettings.swift#load`; sent when it changes, and again after `Sources/TelemetryCore/CodingPayloads.swift#CodingModule.keepaliveInterval` while it does not | per agent, `lastActivityAt` (epoch ms) and the model of the latest usage event. Codex and Claude come from an incremental scan of their JSONL logs; other local sources run `ccusage session` at most every `Sources/CodingUsageKit/CodingUsageEngine.swift#ccusageSessionInterval` |
+| `codingTokenBuckets` | same scan, same `keepaliveInterval` | Codex and Claude token windows (`Sources/CodingUsageKit/CodingTokenScanner.swift#bucketMilliseconds`) over the range that scanner covers |
+| `codingUsage` | Claude on the usage interval and every local agent on the full interval, both from `AppSettings.load` (an unset full interval is `App/MacTelemetryHub/CodingUsageMonitors.swift#VibeCodingUsageMonitor.defaultFullInterval`); sent every round | per agent, the complete day history (`Asia/Shanghai` days), session count and collection status. The shorter round carries only Claude; agents missing from an envelope keep what the site already has |
 
-The intervals are configurable, with a 60-second minimum. Session scans run
-independently of the slower usage refresh. Timestamps are epoch milliseconds,
+The intervals are configurable. `AppSettings` rejects a coding interval below its
+minimum. Session scans run independently of the slower usage refresh. Timestamps
+are epoch milliseconds,
 dates `YYYY-MM-DD`, and nil fields are omitted rather than sent as `null`.
 
 Plan tiers and rate-limit windows come from a separate producer (the author runs
@@ -146,7 +141,8 @@ or forward those account limits.
 Every module is sent only when its own display content changes, with two
 exceptions. `codingActivity` and `codingTokenBuckets` ignore their collection
 clock (`collectedAt`, and the bucket report's `from`/`to`) when deciding whether they
-changed, but an unchanged one is still re-sent every 5 minutes so the site sees
+changed, but an unchanged one is still re-sent after
+`Sources/TelemetryCore/CodingPayloads.swift#CodingModule.keepaliveInterval` so the site sees
 the clock advance — that advance is how it tells a quiet Mac from a dead
 collector. `codingUsage` goes out after every successful round, since each round
 moves `collectedAt` forward; a failed round that changes nothing is not re-sent.
@@ -156,7 +152,7 @@ The `202` receipt may list `ignored` (module names the site does not know) and
 dropped on their own while the rest of the envelope was accepted). Either way the
 module's latch still advances and the reason shows on its dashboard card; it is
 sent again only once its content changes, instead of hitting the same validation
-every five minutes. A manual report always sends.
+on each `CodingModule.keepaliveInterval`. A manual report always sends.
 
 ## Coding agent usage and sessions
 
@@ -215,6 +211,8 @@ Cursor 不是本机来源：它的账号历史由容器里的上报器用自己�
   的思考量（ccusage 的日 JSON 没有这一列），那天就是 false；一天估不全不连累别的日子。账本里还没记过
   这一格的旧日行，有 token 的按 false 报，下一次完整采集把 ccusage 仍返回的日子补上。
 
+`codingTokenBuckets` 是 Codex 与 Claude JSONL 的滚动窗口，`[from, to)`，`to` 等于 `collectedAt`。窗口只带起点 `from`（`Sources/CodingUsageKit/CodingTokenScanner.swift#bucketMilliseconds` 的整数倍，桶是 `[from, from + bucketMilliseconds)`）。每一行是一个 agent × 模型，含 input、output、cache-read、cache-creation、reasoning 和 `eventCount`。`agents` 标明覆盖了哪些 agent：`ok`、`partial`（有行读不了）或 `unavailable`（没有日志）。覆盖范围内缺桶是零；不支持的来源是未知，不是零。扫描器按文件偏移走，处理未写完的行，并去掉 Codex 总量和 Claude 流式消息的重复。不上报正文、路径或 session ID。`inputTokens` 不含缓存读；reasoning 是 output 的子集。`eventCount` 计的是用量事件，不是 HTTP 请求。窗口按事件时间对齐，迟到的记录也算。按天的用量在 `codingUsage`，不在这些窗口里。
+
 来源 id 必须是站点认的形状（小写字母或数字开头，只含 `a-z0-9._-`）。不合规的来源不上报，原因显示在
 「Vibe · 用量」卡片上——一个坏 id 会让站点拒掉整个模块。站点拒收或不认识某个模块时（回执的 `rejected` /
 `ignored`），原因同样显示在对应的卡片上。
@@ -222,12 +220,11 @@ Cursor 不是本机来源：它的账号历史由容器里的上报器用自己�
 ### Pinned ccusage helper
 
 `Tools/install-ccusage.sh` 从 npm 下载官方 ccusage 正式版的平台二进制包
-（`@ccusage/ccusage-darwin-*`），固定版本 `20.0.21`。该版本包含 Antigravity SQLite 支持，
-并已合入 ccusage/ccusage#1719：不再丢弃 `usage.iterations[].model` 为 `null` 的 Claude 条目
-（Fable 5.1 会话）。升级时改脚本里的 `VERSION` 和两个 `ARCHIVE_SHA`（对 npm tarball 算
-SHA-256）。脚本按本机架构选择 `darwin-arm64` 或 `darwin-x64`，校验对应归档的 SHA-256，
-再检查 Antigravity 子命令，输出到 `.build/ccusage/ccusage`；不会修改全局 npm/Homebrew
-安装。`CCUSAGE_ARCH=arm64` 或 `x86_64` 可显式选择构建架构，需与目标 Mac 匹配。
+（`@ccusage/ccusage-darwin-*`），版本是 `Tools/install-ccusage.sh#VERSION`。升级时改
+`VERSION` 和两个 `ARCHIVE_SHA`（对 npm tarball 算 SHA-256）。脚本按本机架构选择
+`darwin-arm64` 或 `darwin-x64`，校验对应归档的 SHA-256，再检查 Antigravity 子命令，
+输出到 `.build/ccusage/ccusage`；不会修改全局 npm/Homebrew 安装。`CCUSAGE_ARCH=arm64`
+或 `x86_64` 可显式选择构建架构，需与目标 Mac 匹配。
 
 ```bash
 Tools/install-ccusage.sh
@@ -237,10 +234,7 @@ Tools/install-ccusage.sh
 `build-release.sh` 已在 Xcode 构建前调用安装脚本；Xcode 的 Embed ccusage 阶段将辅助程序
 复制到应用的 `Contents/MacOS/ccusage` 并签名，同时打包 ccusage 的许可证。直接在 Xcode 运行前也需先执行安装脚本。
 
-新版采集模块使用 `vibeCodingModuleEnabled`，首次安装或从旧版升级后默认关闭，需在设置中
-明确启用。CLI 路径依次选择 `CCUSAGE_CLI_PATH` 环境变量、新的 `codingUsageCLIPath` 自定义
-设置、应用内置程序、最后才是已知系统路径。旧版保存的 `ccusageCLIPath` 不再继承，避免旧的
-全局安装覆盖支持 Antigravity 的内置构建。通常直接使用内置程序即可。
+`vibeCodingModuleEnabled` 在 `App/MacTelemetryHub/AppSettings.swift#load` 里缺省关闭，需在设置中启用。CLI 路径按同一处的顺序选择：`CCUSAGE_CLI_PATH`、已保存且可执行的 `codingUsageCLIPath`、应用内置程序、已知系统路径。
 
 ### Read-only source diagnostics
 
@@ -283,7 +277,8 @@ swift run coding-usage pulse --output /tmp/mac-telemetry-coding-usage/buckets.js
 `positionMs` in the music module is an anchor, not a stream. Paired with
 `observedAt` and `state` it lets the site interpolate the playhead on its own,
 so the module is re-sent only on a track change, a play/pause transition, or a
-seek — detected as the playhead drifting more than 2.5 s from what the site
+seek — detected as the playhead drifting more than
+`Sources/TelemetryCore/ReportDecision.swift#musicSeekToleranceMs` from what the site
 would be showing. A track played straight through uploads once, not once per
 post interval.
 
@@ -294,12 +289,13 @@ object always includes `"beta": true`. Treat the shape as experimental; a
 Music.app update can change the file without warning. The site can ignore it
 until it chooses to render it.
 
-Play/pause transitions, track changes, and foreground-application switches skip
-the throttle window entirely: they wake the reporter loop the moment they happen
-and upload at once, then reset the window so the next scheduled post is a full
-interval away. Everything else — seeks, charger readings, coding usage — waits for
-that window, and rides along in whichever envelope goes out first. While a post
-is failing, the urgent path is suspended until the backoff expires.
+Play/pause transitions, track changes, seeks, and foreground-application switches
+skip the throttle window: they wake the reporter loop and upload at once, then
+reset the window so the next scheduled post is a full interval away. A seek is
+urgent — `musicUrgent` includes `musicSeeked` in `Sources/TelemetryCore/ReportDecision.swift`.
+Power readings and coding usage wait for that window and ride along in whichever
+envelope goes out first. While a post is failing, the urgent path is suspended
+until the backoff expires.
 
 Foreground activity is event-driven: the snapshot is rewritten by the
 `NSWorkspace` activation notification, using the `NSRunningApplication` the
@@ -307,52 +303,43 @@ notification carries rather than re-reading `frontmostApplication`, which can
 still hold the previous app when the notification arrives.
 
 Playback is event-driven too. Music.app posts `com.apple.Music.playerInfo` on
-`DistributedNotificationCenter` for every track change and play/pause, carrying
-the player state, track identity, and total time — but neither the playhead nor
-the artwork. The notification is therefore used only as a trigger: each one runs
-a single AppleScript read for the two fields it omits. Music.app fires several
-notifications per change, so refreshes coalesce rather than queue up. Scrubbing
-the playhead posts nothing at all, which is the one transition left to a 25
-second fallback poll; every other change arrives as an event.
+`DistributedNotificationCenter` for track changes and play/pause. The notification
+is only a trigger: playback state and track info are read immediately, then again
+after `App/MacTelemetryHub/TelemetryModules.swift#AppleMusicMonitor.settleDelay`.
+The AppleScript does not read artwork. Music.app fires several notifications per
+change, so refreshes coalesce rather than queue up. Scrubbing the playhead posts
+nothing; that case waits for the fallback poll
+(`AppleMusicMonitor.seekPollInterval`).
 
 Both monitors wake the reporter loop directly rather than waiting to be sampled.
-An activation reschedules a 400 ms settle timer, so a burst of Cmd-Tab switches
-uploads only the application it lands on — the ones passed through never outlive
-the window. Playback needs no such timer; the confirmation read already absorbs
-the race. The loop's own five-second tick is left to the parts with no event
-source of their own: the quiet-time heartbeat and the coding modules' keepalive.
+An activation reschedules `App/MacTelemetryHub/ServiceController.swift#desktopSettleDelay`,
+which only coalesces those event wakeups. A periodic tick can still send an
+intermediate application (`ReportDecision`). The confirmation read absorbs the
+playback race. The loop tick (`ServiceController.tickInterval`) covers the
+quiet-time heartbeat and the coding modules' keepalive.
 
-The charger wakes it too, but selectively. Its stream arrives at ~1 Hz (below),
-and waking on every frame would turn a five-second loop into a one-second one
-to watch numbers that were always going to wait for the throttle window. So the
-callback compares a structural fingerprint first — ports, cables, device
+The charger wakes it too, but selectively. Waking on every pushed frame would turn
+the loop tick into a per-frame loop, to watch numbers that wait for the throttle
+window. So the callback compares a structural fingerprint first — ports, cables, device
 identity — and only a plug, unplug, or device swap gets through. Those then take
 the same urgent path as a track change, so they upload about a second after they
 happen instead of up to five seconds later.
 
-The charger is event-driven at the acquisition layer as well. Nothing is polled
-over BLE: the handshake — specifically `0x0022`/`0x0027` — arms an unprompted
-`0x0300` stream that the charger then pushes at ~1 Hz, and after that the app
-transmits nothing. Measured on firmware `v0.0.5.1`, disabling the former 12 s
-status and 6 s realtime polls left the rate unchanged at 1.00 frames/s with a
-1.24 s worst-case gap, and a 72 second capture recorded 9 transmitted frames,
-all of them handshake steps, against 72 received pushes.
+The charger is event-driven at the acquisition layer as well. The device pushes
+its stream; the app does not poll BLE to keep telemetry flowing. A link can stay
+connected while that stream is dead, which would freeze the dashboard and the
+uploader. Silence recovery is `App/MacTelemetryHub/BluetoothService.swift#startStreamWatchdog`:
+inside `ChargingDeviceSlot.streamIdleTimeout` it sends nothing; past that it calls
+`armTelemetry` once per quiet period to resend the status probe (and the realtime
+probe when `ChargingDeviceDecoder.needsRealtimeProbe`); past
+`ChargingDeviceSlot.streamStallTimeout` it drops the peripheral so reconnect
+builds a fresh session. The timer is local and puts nothing on the air unless
+the stream has already gone quiet.
 
-Dropping the polls also drops the only thing that used to fail loudly when the
-charger stopped answering — a BLE link can stay connected while the stream is
-dead, leaving the dashboard and the uploader on a frozen snapshot.
-`startStreamWatchdog` covers that without reintroducing periodic traffic: under
-10 s of silence it does nothing; past that it re-sends the arming pair once per
-quiet period; past 20 s it drops the peripheral so the normal reconnect path
-builds a fresh session. The observed worst-case gap is ~1.2 s, so the threshold
-sits far outside normal jitter, and the timer is local — it puts nothing on the
-air unless the stream has already gone quiet.
-
-One consequence worth knowing: `raw_status` is no longer refreshed on a timer.
-It holds whatever the last `0x0200` reply carried, normally the one the
-handshake requested, so it carries its own `raw_status_updated_at` in
-the dashboard snapshot. Port telemetry stays ~1 Hz fresh; the two ages are not
-interchangeable.
+`rawStatus` holds whatever the last `0x0200` reply carried, normally the one the
+handshake requested, with its own `rawStatusUpdatedAt`
+(`Sources/ChargerTelemetryKit/Models.swift#ChargerState`). Port telemetry follows
+the pushed stream; the two ages are not interchangeable.
 
 Measured end to end, from the event to the site serving the new state: play and
 pause land in 320–490 ms, application switches in 560–620 ms.
@@ -362,75 +349,9 @@ pause land in 320–490 ms, application switches in 560–620 ms.
 - Foreground app names and icons use `NSWorkspace` and need no special
   permission. With explicit Accessibility permission, the app also reads the
   focused window title. Window contents are never read.
-- Behind the master switch, window titles are gated in three tiers, all
-  editable in **设置 › 窗口标题** — the pane that holds every
-  window-title setting, from that switch and the two permissions down to the
-  lists, the judgment credentials and lines, and the verdict cache. **设置 › 数据源** keeps only
-  application identity: the foreground-capture switch and the
-  remote-reporting blacklist.
-  1. **标题黑名单** — those Bundle IDs never have their accessibility window or
-     title read at all, and switching to one detaches the previous observer.
-  2. **免判放行** — those titles are reported as they are, with no judgment.
-  3. Everything else — each normalized title is sent to TypeSafe's `jev-latest`
-     model (`POST https://api.typesafe.ai/v1/systemone`) as **six `noul` (yes/no)
-     questions over the same state, asked in one request**. One label per
-     question, so that a title can only be caught by a risk it was actually
-     asked about:
-
-     | Question | Yes means |
-     | --- | --- |
-     | `exposesSecret` | a password, key, token, secret or account number |
-     | `exposesPrivateMatter` | money, health, legal, romantic or family matters; a named private individual; a personal message subject |
-     | `exposesConfidentialWork` | an employer's or client's internal material — the owner's own repositories, hobby projects and coding-agent sessions are not, nor are public vendors and platforms the work merely uses |
-     | `isAdultContent` | pornographic or sexually explicit |
-     | `isPoliticallySensitive` | political leaders, regimes, movements or contested events, including coded references (homophones, nicknames, memes) |
-     | `isInformative` | the title says something beyond the application's own name |
-
-     Each answer is a probability. The five risk questions share one pair of
-     measured thresholds and are combined in code by an **any-serious-violation**
-     rule, never a weighted average; the four verdicts follow in this order:
-     a risk at or above the lock line locks, and every triggered dimension is
-     recorded so the UI can say *已锁定 · 政治敏感*; an `isInformative` below
-     the informative line omits the title (not reported, no notification, but
-     listed in **设置 › 窗口标题** where it can be published by hand); all five
-     risks at or below the clear line publishes; anything left — a
-     title the model is genuinely unsure about — raises a user notification
-     titled *<app> 窗口标题公开确认* whose body is the title itself, and the UI
-     names the dimensions that are still in the middle band. The notification
-     has exactly one
-     action, 公开: macOS folds two or more actions into an 选项 submenu, so a
-     second button would cost two clicks. Closing the notification
-     (X / Clear / Clear All) locks the title instead, but only while that title is still pending, so
-     clearing a stale banner for an already-decided title changes nothing.
-     Clicking the notification body decides nothing — it just opens
-     **设置 › 窗口标题**. The menu-bar menu lists up to five pending titles at
-     the top, each a submenu with 公开 and 锁定, so a missed notification is still
-     two clicks from settled. Until the user answers, the title is treated as
-     locked. Verdicts are cached on disk by Bundle ID plus normalized title
-     (LRU, 500 entries, `~/Library/Application Support/
-     MacTelemetryHub/window-title-judgments.json`, format version 3 — an older
-     file is discarded and re-judged rather than migrated, because a version-2
-     list was never asked about politics or adult content at all) and are
-     reviewable, re-judgeable and deletable in **设置 › 窗口标题**, which also
-     shows all six probabilities per entry. All three lines are adjustable in
-     **设置 › 窗口标题**; saving new ones re-applies them to the cached
-     Jev verdicts, leaving the ones decided by hand untouched. A master switch
-     — in that same pane and in the menu-bar menu, applied the moment it is
-     flipped — turns the whole thing off: no title is read, nothing is asked of
-     Jev, the envelope carries a null title and the status reads `disabled`. The
-     judgment cache survives, so flipping it back does not re-ask anything.
-
-  Only the title text and the application's name and Bundle ID leave the machine
-  for a judgment; the TypeSafe API key lives in Keychain (or `TYPESAFE_API_KEY`).
-  Apps in the remote-reporting blacklist are **never** sent to TypeSafe and never
-  report a title. A missing key, a timeout (10 s) or any other failure is treated
-  as locked and is not cached, so one network hiccup cannot permanently mark a
-  title private. Published titles are the only ones that reach the envelope;
-  the local UI still shows the current title together with its verdict, and
-  `GET /health` reports the verdict always but the title only when it is
-  publishable. Judgments are throttled: a title must stay stable for 2 s, each
-  application is asked at most once per 10 s, and only one request per cache key
-  is ever in flight.
+- Window-title reporting is controlled in **设置 › 窗口标题**. Jev participates in
+  judging titles; only titles cleared for publication enter the reporting
+  envelope. The local pane lets the user review and change verdicts.
 - Bundle IDs in the remote-reporting blacklist remain visible in the local UI
   and local APIs, but their application identity and icon are not uploaded.
   Entering a blacklisted app reports the dedicated virtual application
@@ -439,9 +360,9 @@ pause land in 320–490 ms, application switches in 560–620 ms.
   icon. The real application name, Bundle ID, and icon never enter the payload.
 - Apple Music asks once for permission to communicate with Music.app. The
   separate “授权并上报 Apple Music token” action asks for MusicKit library
-  permission, obtains a Music User Token and a MusicKit-generated developer
-  token, and sends them only to the dedicated credentials endpoint described
-  below.
+  permission and obtains a Music User Token. The unified envelope carries only
+  `musicUserToken` (`Sources/TelemetryCore/TelemetryEnvelope.swift#TelemetryModulesPayload`,
+  `Sources/TelemetryCore/Snapshots.swift#AppleMusicCredentialsPayload`).
 - Coding usage reads the original local logs and databases with the bundled
   `ccusage` helper and the incremental Codex / Claude log scanner, and makes no
   network request of its own; only the facts described under **Unified ingest
@@ -473,10 +394,10 @@ live in [LYJW131/anker-prime-ble](https://github.com/LYJW131/anker-prime-ble).
    whole-page validation: an unrelated half-filled field must not fail the
    pairing after the UUID has already changed in memory.
 
-Pairing is the only time the app scans. Once a UUID is stored, it only ever
-issues a directed connect to that one charger — the request stays pending until
-the charger powers on, so there is no scanning, no timeout, and no retry loop.
-**重新配对** clears the UUID and brings the scan button back.
+Once a UUID is stored, the link uses a directed connect to that peripheral.
+Recovery still scans for it (`App/MacTelemetryHub/BluetoothService.swift#startRecoveryScan`),
+and `BluetoothService.tickConnectionPump` rebuilds the session when a connect
+times out. **重新配对** clears the UUID and brings the scan button back.
 
 The current charger's CoreBluetooth identifier is
 `102DC514-2EB9-DAC9-C11A-4A0781776A73`.
@@ -504,7 +425,8 @@ return a 2xx response only after accepting the payload.
 The developer token is no longer part of this contract: the receiving backend signs its
 own with a MusicKit private key (`.p8`), so nothing expiring travels in the envelope, and
 an envelope that still carries `developerToken` or `expiresAt` is rejected. The
-app only re-reads MusicKit's cached user token every five minutes and uploads it
+app only re-reads MusicKit's cached user token every
+`App/MacTelemetryHub/AppleMusicCredentialStore.swift#refreshInterval` and uploads it
 when the value changes (it still asks MusicKit for a developer token in passing,
 because `userToken(for:)` requires one, but that value is neither kept nor sent).
 
@@ -551,10 +473,12 @@ the change-detection semantics with `swift test`.
 
 After installing the signed app in `/Applications`, enable **登录后自动启动** in
 Settings. This uses the supported macOS `SMAppService` API and starts after the
-user logs in; it is not a root LaunchDaemon. This one toggle applies the moment
-it is flipped — the page says so under the switch. Every other field applies on
-**保存**; **取消**, or simply closing the Settings window, re-reads the persisted
-values and drops the unsaved edits.
+user logs in; it is not a root LaunchDaemon. Login launch applies the moment it
+is flipped. Pairing (`App/MacTelemetryHub/SettingsView.swift`) and the window-title
+master switch (`App/MacTelemetryHub/ServiceController.swift#setWindowTitleReporting`)
+also apply immediately. Other fields apply on **保存**; **取消**, or simply
+closing the Settings window, re-reads the persisted values and drops the unsaved
+edits.
 
 Collection starts in `applicationDidFinishLaunching`, not when the dashboard
 window opens: a login launch normally shows no window at all. Closing the
@@ -578,14 +502,15 @@ default unless you trust the whole network.
   whether R2 direct upload is fully configured; `desktopIcon` shows the frontmost app's
   icon delivery state (`iconHash`, `iconEncoded`, `objectKeyConfirmed`, `uploadAttempts`,
   `resolving`). Read this first when an app icon is missing on the site. Icon uploads
-  back off 2s/4s/8s between failures and, after three failures, retry again ten minutes
-  later instead of giving up until restart; failures also go to the unified log under
+  follow `Sources/TelemetryCore/IconUploadBudget.swift#noteFailure` between failures
+  and, after `IconUploadBudget.maxAttempts`, wait `IconUploadBudget.retryCooldown`
+  instead of giving up until restart; failures also go to the unified log under
   category `desktop-icon`. `windowTitle` carries the focused title's judgment
   `status` (`published`, `locked`, `needsConfirmation`, `judging`, `trusted`,
   `blacklisted`, `hidden`, `noAccess`, `unavailable`, `none`), whether a title is
   going out right now (`reportable`), and that `title`. While a new title is
   `judging`, the previous **published** title of the same application keeps being
-  reported for up to 20 seconds, so `judging` can legitimately come with
+  reported for up to `Sources/TelemetryCore/WindowTitleJudgment.swift#WindowTitleHold.maximumDuration`, so `judging` can legitimately come with
   `reportable: true` and the older title.
 - `GET /apple-music/authorization` — Apple Music authorization state, see above.
 - `GET /sse/charger` and `GET /sse/powerbank` — Server-Sent Events. The first
@@ -610,33 +535,14 @@ token/cache/reasoning invariants, per-day cost completeness, historical correcti
 and retention, the `codingUsage` / `codingActivity` / `codingTokenBuckets` wire
 shapes, reading ledgers written by earlier versions, account isolation, process
 cancellation, and engine-to-ledger mapping without real credentials or network.
-`TelemetryCoreTests` covers the window-title pipeline: normalization (braille and
-geometric spinners, `[n/m]`, percentages, unread badges, the 200-scalar cap), the
-three verdict thresholds against measured Jev distributions, judgment-cache coding
-and LRU eviction, the Jev request body and a recorded live response, and the
-reporting rules — a title change posts immediately, an icon-only change does not,
+`TelemetryCoreTests` covers the window-title pipeline, judgment-cache coding
+and LRU eviction, and the reporting rules — a title change posts immediately, an icon-only change does not,
 and the hidden virtual application carries no title — plus the coding modules'
 change detection that ignores the collection clock, the five-minute keepalive,
 and receipts that reject or ignore a module.
 
 ## Pulse window usage
 
-`modules.codingTokenBuckets` is a rolling 24-hour report, `[from, to)` in epoch
-milliseconds with `to` equal to `collectedAt`, of five-minute buckets from the
-Codex and Claude JSONL logs. A window carries only its start (`from`, a multiple of
-300 000 ms; the bucket is `[from, from + 5 min)`), and each row is one agent ×
-model with input, output, cache-read, cache-creation and reasoning tokens plus
-`eventCount`. `agents` declares which agents the report covers and how well:
-`ok`, `partial` (some lines could not be read) or `unavailable` (no logs at all).
-Inside the covered range a missing bucket means zero; unsupported providers are
-unknown, not zero.
-
-The scanner follows file offsets, handles unfinished lines, deduplicates Codex
-totals and Claude streaming messages, and never uploads content, paths or session
-IDs. `inputTokens` excludes cache reads; reasoning is a subset of output.
-`eventCount` counts usage events, not HTTP requests. Window usage is reconciled by
-event time, including late-arriving records. Daily usage comes from ccusage in
-`codingUsage`, not from these windows.
+`modules.codingTokenBuckets` 的形状见上文「上报的用量事实」。
 
 Read-only diagnostic: `swift run coding-usage pulse --output /tmp/buckets.json`.
-Deploy a backend that accepts the ingest protocol above before installing this reporter.

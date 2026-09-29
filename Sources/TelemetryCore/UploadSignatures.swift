@@ -12,14 +12,7 @@ import ChargerTelemetryKit
  * 一概不进 —— 否则每帧都判定为变化，循环就从 5 秒一转变成 1 秒一转。
  */
 /**
- * 电量**不进**这份指纹。
- *
- * 曾经按整数百分比收过，理由是「跳一格该立刻发」。它会跳得比想象中厉害：90W
- * 输出时电压下垂、电量计重算，实测四秒内从 34.32% 掉到 33.32%，而按电池容量算
- * 一个百分点要三十秒。于是整数每跳一格就算一次结构变化，即时上报退化成五秒一
- * 次的轮询 —— 加上追发之后更糟，每一格都把追发计数重置满，循环再也停不下来。
- *
- * 电量是滚动读数，它该走节流窗口，和功率电压一样。
+ * 电量属于连续读数，不参与结构指纹，避免反复重置追发额度。
  */
 struct ChargingDevicesStructuralSignature: Equatable {
     private struct Port: Equatable {
@@ -76,9 +69,8 @@ struct ChargingDevicesStructuralSignature: Equatable {
  * 节流窗口看的是这一份，不看整份 `ChargingDevicesPayload`。载荷里的
  * `updatedAt` 每一帧都在走，拿结构体相等当变化会让安静的连接也每到
  * 发送间隔就打一包。功率、电压、电流、电量、温度、封面对象键都算显示
- * 内容；时间戳和只在连接时出现一次的电池健康度不算。
- *
- * 插拔仍然只看 `ChargingDevicesStructuralSignature`，不进这里。
+ * 内容，插拔字段（`active`、`attached`）也在里面。时间戳和只在连接时出现一次的
+ * 电池健康度不算。紧急性另看 `ChargingDevicesStructuralSignature`。
  */
 struct ChargingDevicesContentSignature: Equatable {
     private struct Port: Equatable {
