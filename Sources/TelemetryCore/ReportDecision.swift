@@ -303,7 +303,7 @@ struct ReportDecision: Sendable {
         // 只认应用身份和标题：图标变了（同一个 App 换了图标）也算 desktopChanged，
         // 但不值得为它绕过节流窗口。
         // Cmd-Tab 路过的中间应用一般不会把循环叫醒 —— 激活通知那侧压了
-        // 400ms 的 desktopSettleDelay，只有最后停下的那个才放行。
+        // 切换防抖（`AppSettings.desktopSettleDelayMs`），只有最后停下的那个才放行。
         // 但那只防住「叫醒」这条路：tick 恰好落在切换途中时照样会采到中间
         // 那个应用。真要根治得在这里再比一次，眼下不值当。
         /**

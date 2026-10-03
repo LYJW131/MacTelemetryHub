@@ -23,6 +23,7 @@ final class AppSettings: ObservableObject {
         static let chargerModuleEnabled = "chargerModuleEnabled"
         static let desktopModuleEnabled = "desktopModuleEnabled"
         static let desktopReportingBlacklist = "desktopReportingBlacklist"
+        static let desktopSettleDelayMs = "desktopSettleDelayMs"
         static let windowTitleReportingEnabled = "windowTitleReportingEnabled"
         static let windowTitleBlacklist = "windowTitleBlacklist"
         static let windowTitleTrustedApplications = "windowTitleTrustedApplications"
@@ -79,6 +80,7 @@ final class AppSettings: ObservableObject {
     @Published var powerBankIdleSleepEnabled = true
     @Published var desktopModuleEnabled = true
     @Published var desktopReportingBlacklist = ""
+    @Published var desktopSettleDelayMs: Double = AppSettings.defaultDesktopSettleDelayMs
     /**
      * 窗口标题的总开关。
      *
@@ -202,6 +204,8 @@ final class AppSettings: ObservableObject {
             forKey: Key.windowTitleReportingEnabled
         ) as? Bool ?? true
         windowTitleBlacklist = defaults.string(forKey: Key.windowTitleBlacklist) ?? ""
+        desktopSettleDelayMs = defaults.object(forKey: Key.desktopSettleDelayMs)
+            as? Double ?? Self.defaultDesktopSettleDelayMs
         windowTitleTrustedApplications = defaults.string(
             forKey: Key.windowTitleTrustedApplications
         ) ?? ""
@@ -402,6 +406,9 @@ final class AppSettings: ObservableObject {
             throw SettingsError.missingAccessClientSecret
         }
         guard postInterval > 0, postTimeout > 0 else { throw SettingsError.invalidTiming }
+        guard Self.desktopSettleDelayRangeMs.contains(desktopSettleDelayMs) else {
+            throw SettingsError.invalidDesktopSettleDelay
+        }
         // 放行线严格低于锁定线：两条线相等的话中间那档没了，「问一句」这条路
         // 就此消失，一条模型也拿不准的标题会被直接归进公开或锁定。
         guard windowTitleRiskClearMaximum > 0,
@@ -483,6 +490,7 @@ final class AppSettings: ObservableObject {
         defaults.set(powerBankIdleSleepEnabled, forKey: Key.powerBankIdleSleepEnabled)
         defaults.set(desktopModuleEnabled, forKey: Key.desktopModuleEnabled)
         defaults.set(desktopReportingBlacklist, forKey: Key.desktopReportingBlacklist)
+        defaults.set(desktopSettleDelayMs, forKey: Key.desktopSettleDelayMs)
         defaults.set(windowTitleReportingEnabled, forKey: Key.windowTitleReportingEnabled)
         defaults.set(windowTitleBlacklist, forKey: Key.windowTitleBlacklist)
         defaults.set(windowTitleTrustedApplications, forKey: Key.windowTitleTrustedApplications)
@@ -564,6 +572,7 @@ final class AppSettings: ObservableObject {
             powerBankIdleSleepEnabled: powerBankIdleSleepEnabled,
             desktopModuleEnabled: desktopModuleEnabled,
             desktopReportingBlacklist: desktopReportingBlacklist,
+            desktopSettleDelayMs: desktopSettleDelayMs,
             windowTitleBlacklist: windowTitleBlacklist,
             windowTitleTrustedApplications: windowTitleTrustedApplications,
             windowTitleRiskLockMinimum: windowTitleRiskLockMinimum,
@@ -593,6 +602,9 @@ final class AppSettings: ObservableObject {
         launchAtLoginEnabled = SMAppService.mainApp.status == .enabled
     }
 
+    nonisolated static let defaultDesktopSettleDelayMs: Double = 400
+    nonisolated static let desktopSettleDelayRangeMs: ClosedRange<Double> = 0...5_000
+
     private static func firstExistingPath(_ candidates: [String]) -> String? {
         candidates.first { FileManager.default.isExecutableFile(atPath: $0) }
     }
@@ -619,6 +631,7 @@ struct SettingsDraftToken: Equatable {
     var powerBankIdleSleepEnabled: Bool
     var desktopModuleEnabled: Bool
     var desktopReportingBlacklist: String
+    var desktopSettleDelayMs: Double
     var windowTitleBlacklist: String
     var windowTitleTrustedApplications: String
     var windowTitleRiskLockMinimum: Double
@@ -646,6 +659,7 @@ enum SettingsError: LocalizedError {
     case invalidR2Configuration
     case invalidWindowTitleRiskThresholds
     case invalidWindowTitleInformativeMinimum
+    case invalidDesktopSettleDelay
     case missingAccessClientSecret
 
     var errorDescription: String? {
@@ -664,6 +678,7 @@ enum SettingsError: LocalizedError {
         case .invalidR2Configuration: "R2 直传配置必须同时填写 HTTPS Endpoint、Bucket、Access Key ID 和 Secret Access Key。"
         case .invalidWindowTitleRiskThresholds: "放行线必须大于 0 且小于锁定线，锁定线不能超过 1。"
         case .invalidWindowTitleInformativeMinimum: "值得展示线必须在 0 到 1 之间。"
+        case .invalidDesktopSettleDelay: "切换防抖必须在 0 到 \(Int(AppSettings.desktopSettleDelayRangeMs.upperBound)) 毫秒之间。"
         case .missingAccessClientSecret: "开着远端上报时，Access Client ID 和 Client Secret 都要填。"
         }
     }

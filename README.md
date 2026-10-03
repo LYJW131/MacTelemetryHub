@@ -312,7 +312,7 @@ nothing; that case waits for the fallback poll
 (`AppleMusicMonitor.seekPollInterval`).
 
 Both monitors wake the reporter loop directly rather than waiting to be sampled.
-An activation reschedules `App/MacTelemetryHub/ServiceController.swift#desktopSettleDelay`,
+An activation reschedules the switch debounce (`App/MacTelemetryHub/AppSettings.swift#desktopSettleDelayMs`, set in Settings),
 which only coalesces those event wakeups. A periodic tick can still send an
 intermediate application (`ReportDecision`). The confirmation read absorbs the
 playback race. The loop tick (`ServiceController.tickInterval`) covers the

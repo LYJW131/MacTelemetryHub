@@ -74,7 +74,7 @@ final class DesktopActivityMonitor: ObservableObject {
      * 才不能信它（所以通知回调仍然用 userInfo 里那份）。
      *
      * Cmd-Tab 途经的应用照样会在这里被采成 snapshot，防抖不在这一层：
-     * 上报侧收到 onChange 后压一个 400ms 的窗口，只有最后停下的那个才发得出去。
+     * 上报侧收到 onChange 后压一个切换防抖窗口（`AppSettings.desktopSettleDelayMs`），只有最后停下的那个才发得出去。
      */
     func start() {
         capture()

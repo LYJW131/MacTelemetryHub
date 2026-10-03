@@ -41,7 +41,8 @@ private enum SettingsCategory: String, CaseIterable, Identifiable {
         case .invalidPort, .invalidBindAddress: .local
         case .invalidTiming, .invalidPostURL, .invalidR2Configuration, .missingAccessClientSecret: .reporting
         case .invalidCcusagePath, .invalidCodingSessionInterval,
-             .invalidVibeCodingUsageInterval, .invalidCodingFullRefreshInterval: .sources
+             .invalidVibeCodingUsageInterval, .invalidCodingFullRefreshInterval,
+             .invalidDesktopSettleDelay: .sources
         case .invalidWindowTitleRiskThresholds,
              .invalidWindowTitleInformativeMinimum: .windowTitle
         case nil: nil
@@ -286,6 +287,18 @@ struct SettingsView: View {
                 choosePrompt: "加入黑名单",
                 add: { settings.addToDesktopReportingBlacklist(bundleIdentifier: $0) }
             )
+
+            Divider().padding(.vertical, 3)
+
+            NumericField(
+                title: "切换防抖",
+                unit: "毫秒（0–\(Int(AppSettings.desktopSettleDelayRangeMs.upperBound))）",
+                placeholder: "\(Int(AppSettings.defaultDesktopSettleDelayMs))",
+                value: $settings.desktopSettleDelayMs
+            )
+            Text("前台应用停留满这么久才上报；连续 Cmd-Tab 路过的应用不会发出去。调小更跟手，调大更能压住快速切换。")
+                .font(.caption)
+                .foregroundStyle(.secondary)
 
             Text("命中时本机界面和本地 API 仍会显示当前应用；远端会收到一次空状态来清除上一个应用，应用身份和图标不会上传。")
                 .font(.caption)

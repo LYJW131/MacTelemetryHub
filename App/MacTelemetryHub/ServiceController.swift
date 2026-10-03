@@ -76,7 +76,7 @@ final class ServiceController: ObservableObject {
      * 已经宣告过离线，别再发在线的包了。
      *
      * 关盖时锁屏和睡眠是同时发生的两件事：`com.apple.loginwindow` 抢到前台会
-     * 排一个 400ms 的防抖，而 `willSleepNotification` 的观察者同步发出 offline。
+     * 排一个切换防抖，而 `willSleepNotification` 的观察者同步发出 offline。
      * 观察者返回后系统还要几百毫秒才真的挂起，防抖恰好在这段窗口里到点，于是
      * 那封「前台应用 = 锁屏」的信封跟在 offline 后面发了出去 —— 它的 presence
      * 默认是 online（见 `Sources/TelemetryCore/TelemetryEnvelope.swift#TelemetryEnvelope.make`），站点每封都算一次在线心跳，
@@ -99,16 +99,6 @@ final class ServiceController: ObservableObject {
     private static let tickInterval = Duration.seconds(5)
     /// 心跳间隔、追发节奏、进度容差都跟着判断逻辑搬进了 `ReportDecision`：
     /// 它们只被那段纯计算读，留在这里就得两处对照着看。
-
-    /**
-     * 前台应用的防抖窗口。
-     *
-     * 每收到一次激活通知就重新计时，所以连续 Cmd-Tab 只会在最后停下来的那个
-     * 应用上触发一次上报 —— 路过的应用停留远不到这个时长。
-     * 从前这个防抖是 2 秒采样「顺便」带来的，把延迟和防抖强度焊死成了同一个
-     * 数字；拆开之后延迟降到这个量级，而防抖强度可以单独调。
-     */
-    private static let desktopSettleDelay = Duration.milliseconds(400)
 
     init() {
         let settings = AppSettings()
@@ -641,7 +631,7 @@ final class ServiceController: ObservableObject {
         desktopActivity.judge = windowTitleJudge
         windowTitleJudge.onVerdict = { [weak self] in
             // 判断回来之后重采一次：标题进了快照，走的还是原来那条
-            // 「快照变化 → 400ms 防抖 → 叫醒上报循环」。
+            // 「快照变化 → 切换防抖 → 叫醒上报循环」。
             self?.desktopActivity.refreshAfterJudgment()
         }
         windowTitleJudge.configure(WindowTitleJudge.Rules(
@@ -656,7 +646,9 @@ final class ServiceController: ObservableObject {
 
         if settings.desktopModuleEnabled {
             // 每次激活都重排，连续 Cmd-Tab 只在最后停下的那个应用上叫醒一次。
-            // 开着远端上报时，图标在这 400ms 里先走后台 resolver；名称上报不等它。
+            // 路过的应用停留远不到这个窗口，窗口长度见设置页「切换防抖」。
+            // 开着远端上报时，图标在这段窗口里先走后台 resolver；名称上报不等它。
+            let settleDelay = Duration.milliseconds(settings.desktopSettleDelayMs)
             desktopActivity.onChange = { [weak self] in
                 guard let self else { return }
                 desktopSettleTask?.cancel()
@@ -666,7 +658,7 @@ final class ServiceController: ObservableObject {
                     startDesktopIconResolution(snapshot)
                 }
                 desktopSettleTask = Task { [weak self] in
-                    try? await Task.sleep(for: Self.desktopSettleDelay)
+                    try? await Task.sleep(for: settleDelay)
                     guard !Task.isCancelled else { return }
                     self?.wakeReporter()
                 }
@@ -1037,7 +1029,7 @@ final class ServiceController: ObservableObject {
             timeout: min(settings.postTimeout, 3)
         ) { [weak self] in
             guard let self else { return }
-            // resolver 早于首包完成时，400ms 防抖会自然把键带上，不额外叫醒。
+            // resolver 早于首包完成时，切换防抖会自然把键带上，不额外叫醒。
             // 只有无图版本已经成功发过，才需要补发同一应用的对象键。
             guard lastPosted.desktop?.identity == identity,
                   desktopActivity.snapshot.map({ DesktopUploadSignature($0).identity }) == identity else {
