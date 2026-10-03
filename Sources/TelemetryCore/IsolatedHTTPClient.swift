@@ -1,11 +1,12 @@
 import Foundation
 
 /**
- * 上报请求不能共用 `URLSession.shared` 的长连接池。
+ * 不能共用 `URLSession.shared` 的长连接池。
  *
  * 本机代理会让一条已经失活的 HTTP/2/HTTP/3 连接继续留在池里；下一次 POST
  * 复用它以后，请求体已经写出，却要等到 CFNetwork 的 stall recovery 才失败。
  * 一次性 session 让每次请求都重新建连，请求结束后随即丢掉对应连接池。
+ * 要复用连接走 `ReusableHTTPClient`，它用短超时兜住这种失活连接。
  */
 enum IsolatedHTTPClient {
     static func session(for request: URLRequest) -> URLSession {

@@ -4,10 +4,12 @@ import Foundation
  * 心跳和数据包共用的 ingest POST。
  *
  * 编码、User-Agent、鉴权头只在这里写一次。数据包走 `post`，失败不推进门闩。
- * 心跳的阻塞发送仍是信号量：睡眠和退出的观察者返回之后进程就停了。
+ * 数据包和异步心跳共用 `ingestClient` 的连接，心跳顺带让它保温。
+ * 心跳的阻塞发送仍是信号量加一次性连接：睡眠和退出的观察者返回之后进程就停了。
  */
 enum TelemetryPoster {
     static let userAgent = "mac-telemetry-hub/4"
+    private static let ingestClient = ReusableHTTPClient(firstAttemptTimeout: 3)
 
     static func request(
         url: URL,
@@ -29,7 +31,7 @@ enum TelemetryPoster {
     }
 
     static func post(_ request: URLRequest) async throws -> TelemetryIngestResponse {
-        let (responseData, response) = try await IsolatedHTTPClient.data(for: request)
+        let (responseData, response) = try await ingestClient.data(for: request)
         if let response = response as? HTTPURLResponse, !(200..<300).contains(response.statusCode) {
             throw ReporterError.httpStatus(
                 response.statusCode,
@@ -40,7 +42,7 @@ enum TelemetryPoster {
     }
 
     static func send(_ request: URLRequest) -> Task<Void, Never> {
-        Task { _ = try? await IsolatedHTTPClient.data(for: request) }
+        Task { _ = try? await ingestClient.data(for: request) }
     }
 
     static func sendBlocking(_ request: URLRequest) {
