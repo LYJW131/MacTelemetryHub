@@ -288,12 +288,11 @@ struct ReportDecisionTests {
     }
 
     /**
-     * 追发计数在结构再次变化时重置。
+     * 冷却里再次拔插：不即时发、不重置追发，还在跑的追发把它捎走。
      *
-     * 拔了又插算两次独立的接入，第二次同样需要完整的观察窗口。到点就扣，
-     * 不管这一圈最后有没有真发出去。
+     * 追发到点就扣，不管这一圈最后有没有真发出去。
      */
-    @Test func chargingBurstResetsWhenTheStructureChangesAgain() {
+    @Test func replugInsideTheCooldownRidesTheRunningBurst() {
         var lastPosted = LastPostedState()
         var burst = ChargingBurstState()
 
@@ -319,13 +318,30 @@ struct ReportDecisionTests {
         burst = decision.chargingBurst
         _ = lastPosted.commit(decision: decision, response: ok, desktopPayloadHasObjectKey: false)
 
-        // 拔线：结构又变了，额度重新满上而不是沿用剩下的四次
+        // 拔线：还在冷却里，不催发，追发额度也不动
+        let unplugged = charger(attached: false, powerW: 0)
         decision = decide(
-            inputs(now: due.addingTimeInterval(1), charger: charger(attached: false, powerW: 0)),
+            inputs(now: due.addingTimeInterval(1), charger: unplugged),
             lastPosted: lastPosted,
+            nextPostAt: due.addingTimeInterval(30),
             chargingBurst: burst
         )
-        #expect(decision.chargingBurst.remaining == ReportDecision.chargingBurstCount)
+        #expect(decision.chargerToSend)
+        #expect(!decision.urgent)
+        #expect(decision.chargingBurst.remaining == ReportDecision.chargingBurstCount - 1)
+        burst = decision.chargingBurst
+
+        // 下一次追发到点，把拔线捎走
+        decision = decide(
+            inputs(now: due.addingTimeInterval(ReportDecision.chargingBurstInterval), charger: unplugged),
+            lastPosted: lastPosted,
+            nextPostAt: due.addingTimeInterval(30),
+            chargingBurst: burst
+        )
+        #expect(decision.chargerToSend)
+        #expect(decision.urgent)
+        _ = lastPosted.commit(decision: decision, response: ok, desktopPayloadHasObjectKey: false)
+        #expect(lastPosted.chargingStructural == ChargingDevicesStructuralSignature(unplugged))
     }
 
     /// 每帧都会变的时间戳不是显示内容。安静连接靠心跳续期，不按发送间隔轮询。
@@ -728,5 +744,200 @@ struct ReportDecisionTests {
         var disabled = inputs(now: t0, coding: [.activity: collected(nil, activity(1), .activity, at: t0)])
         disabled.codingModuleEnabled = false
         #expect(decide(disabled).codingToSend.isEmpty)
+    }
+
+    private func chargerPort(
+        active: Bool,
+        currentA: Double,
+        model: String? = "iPhone",
+        updatedAt: TimeInterval
+    ) -> ChargingDevicesPayload {
+        ChargingDevicesPayload(devices: [
+            ChargingDevicePayload(
+                id: "SN-1",
+                kind: .charger,
+                model: "A2687",
+                connected: true,
+                updatedAt: updatedAt,
+                firmware: "1.0.0",
+                totalOutputW: active ? currentA * 5 : 0,
+                ports: [
+                    DevicePortPayload(
+                        name: "C1",
+                        active: active,
+                        direction: active ? "out" : nil,
+                        voltageV: 5,
+                        currentA: currentA,
+                        powerW: currentA * 5,
+                        cable: "5A",
+                        chargingInfo: active ? "PD" : nil,
+                        attachedDevice: AttachedDevicePayload(model: model, vendor: "Apple")
+                    ),
+                ],
+            ),
+        ])
+    }
+
+    /// 照真循环的样子推进：发不发看 `dataChanged && shouldPost`，发了就 commit 并把节流窗口推后 30 秒。
+    private struct ReporterLoop {
+        static let postInterval: TimeInterval = 30
+        var lastPosted = LastPostedState()
+        var burst = ChargingBurstState()
+        var nextPostAt = Date.distantPast
+        var posts: [Date] = []
+
+        mutating func tick(_ inputs: ReportInputs) -> ReportDecision {
+            let decision = ReportDecision(
+                inputs: inputs,
+                lastPosted: lastPosted,
+                backoffUntil: .distantPast,
+                nextPostAt: nextPostAt,
+                chargingBurst: burst
+            )
+            burst = decision.chargingBurst
+            if decision.shouldSendHeartbeat { lastPosted.heartbeatAt = inputs.now }
+            if decision.dataChanged, decision.shouldPost {
+                _ = lastPosted.commit(
+                    decision: decision,
+                    response: TelemetryIngestResponse.Result(desktopIconAvailable: true, chargerCoverIconAvailable: true),
+                    desktopPayloadHasObjectKey: false
+                )
+                nextPostAt = inputs.now.addingTimeInterval(Self.postInterval)
+                posts.append(inputs.now)
+            }
+            return decision
+        }
+    }
+
+    /// 先让设备静静插着，追发跑完、冷却过去，再开始测。
+    private func settledLoop(on payload: ChargingDevicesPayload, until end: Date) -> ReporterLoop {
+        var loop = ReporterLoop()
+        var now = end.addingTimeInterval(-120)
+        while now < end {
+            _ = loop.tick(inputs(now: now, charger: payload))
+            now = now.addingTimeInterval(1)
+        }
+        loop.posts.removeAll()
+        return loop
+    }
+
+    /**
+     * 0 A 时端口开关位 1 Hz 来回翻，设备一直插着。
+     *
+     * 这不是插拔，只按节流窗口发；从前每翻一次就即时上报一封并重置追发。
+     * 停下来之后最后那个状态要在一个节流窗口内送到。
+     */
+    @Test func zeroAmpPortFlappingOnlyPostsOnTheThrottle() {
+        let idle = chargerPort(active: false, currentA: 0, updatedAt: 0)
+        var loop = settledLoop(on: idle, until: t0)
+        let seconds = 600
+        for second in 0..<seconds {
+            let now = t0.addingTimeInterval(TimeInterval(second))
+            let decision = loop.tick(inputs(
+                now: now,
+                charger: chargerPort(active: second % 2 == 0, currentA: 0, updatedAt: TimeInterval(second))
+            ))
+            #expect(!decision.urgent)
+        }
+        #expect(loop.posts.count <= seconds / Int(ReporterLoop.postInterval) + 1, "posts: \(loop.posts.count)")
+
+        let final = chargerPort(active: true, currentA: 0, updatedAt: TimeInterval(seconds))
+        let stop = t0.addingTimeInterval(TimeInterval(seconds))
+        for second in 0...Int(ReporterLoop.postInterval) {
+            _ = loop.tick(inputs(now: stop.addingTimeInterval(TimeInterval(second)), charger: final))
+        }
+        #expect(lastPostedPortsMatch(loop.lastPosted, final))
+    }
+
+    /**
+     * 真正的结构字段来回翻（这里是设备身份）：冷却把它压成每个冷却期一封。
+     *
+     * 第一下是新的接入，即时发、追发排满；之后不再重置追发，冷却结束那一圈把
+     * 期间攒下的变化合并成一封，最终状态不丢。
+     */
+    @Test func structuralFlappingIsCoalescedByTheCooldown() {
+        let plugged = chargerPort(active: true, currentA: 2, updatedAt: 0)
+        var loop = settledLoop(on: plugged, until: t0)
+        let cooldown = ReportDecision.chargingStructuralCooldown
+        let burstSpan = ReportDecision.chargingBurstInterval * Double(ReportDecision.chargingBurstCount)
+        let seconds = 300
+        for second in 0..<seconds {
+            let now = t0.addingTimeInterval(TimeInterval(second))
+            let decision = loop.tick(inputs(
+                now: now,
+                charger: chargerPort(
+                    active: true,
+                    currentA: 2,
+                    model: second % 2 == 0 ? nil : "iPhone",
+                    updatedAt: TimeInterval(second)
+                )
+            ))
+            if second == 0 {
+                #expect(decision.urgent)
+                #expect(decision.chargingBurst.remaining == ReportDecision.chargingBurstCount)
+            }
+            if TimeInterval(second) > burstSpan {
+                #expect(decision.chargingBurst.remaining == 0)
+            }
+        }
+        let afterBurst = loop.posts.filter { $0.timeIntervalSince(t0) > burstSpan }
+        for (earlier, later) in zip(afterBurst, afterBurst.dropFirst()) {
+            #expect(later.timeIntervalSince(earlier) >= cooldown)
+        }
+        let bound = 1 + ReportDecision.chargingBurstCount + Int(Double(seconds) / cooldown)
+        #expect(loop.posts.count <= bound, "posts: \(loop.posts.count)")
+
+        let final = chargerPort(active: true, currentA: 2, model: "MacBook Pro", updatedAt: TimeInterval(seconds))
+        let stop = t0.addingTimeInterval(TimeInterval(seconds))
+        for second in 0...Int(cooldown) {
+            _ = loop.tick(inputs(now: stop.addingTimeInterval(TimeInterval(second)), charger: final))
+        }
+        #expect(loop.lastPosted.chargingStructural == ChargingDevicesStructuralSignature(final))
+        #expect(lastPostedPortsMatch(loop.lastPosted, final))
+    }
+
+    /// 安静了一阵之后的插上、拔下都即时发，各自排满追发。
+    @Test func plugAndUnplugAfterQuietAreImmediate() {
+        let idle = chargerPort(active: false, currentA: 0, model: nil, updatedAt: 0)
+        var loop = settledLoop(on: idle, until: t0)
+
+        let plugged = chargerPort(active: true, currentA: 2, updatedAt: 1)
+        var decision = loop.tick(inputs(now: t0, charger: plugged))
+        #expect(decision.urgent)
+        #expect(decision.shouldPost)
+        #expect(decision.chargingBurst.remaining == ReportDecision.chargingBurstCount)
+        #expect(loop.posts == [t0])
+
+        let later = t0.addingTimeInterval(2 * ReportDecision.chargingStructuralCooldown)
+        var now = t0.addingTimeInterval(1)
+        while now < later {
+            _ = loop.tick(inputs(now: now, charger: plugged))
+            now = now.addingTimeInterval(1)
+        }
+        decision = loop.tick(inputs(now: later, charger: idle))
+        #expect(decision.urgent)
+        #expect(decision.shouldPost)
+        #expect(decision.chargingBurst.remaining == ReportDecision.chargingBurstCount)
+        #expect(loop.posts.last == later)
+    }
+
+    /// 退避和离线时结构变化发不出去，不能白白耗掉冷却；能发的那一圈仍是即时的。
+    @Test func backoffAndSuspensionDoNotConsumeTheCooldown() {
+        let plugged = chargerPort(active: true, currentA: 2, updatedAt: 1)
+        let blocked = decide(inputs(now: t0, charger: plugged), backoffUntil: t0.addingTimeInterval(10))
+        #expect(!blocked.urgent)
+        #expect(blocked.chargingBurst.structuralPostedAt == .distantPast)
+
+        var asleep = inputs(now: t0, charger: plugged)
+        asleep.suspended = true
+        #expect(decide(asleep).chargingBurst.structuralPostedAt == .distantPast)
+
+        let awake = decide(inputs(now: t0.addingTimeInterval(10), charger: plugged), chargingBurst: blocked.chargingBurst)
+        #expect(awake.urgent)
+        #expect(awake.shouldPost)
+    }
+
+    private func lastPostedPortsMatch(_ lastPosted: LastPostedState, _ payload: ChargingDevicesPayload) -> Bool {
+        lastPosted.chargingContent == ChargingDevicesContentSignature(payload)
     }
 }

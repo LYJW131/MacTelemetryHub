@@ -9,15 +9,19 @@ import ChargerTelemetryKit
  *
  * 采集是 1 Hz 推流，但绝大多数帧只是功率在滚动，那种变化等节流窗口就行。真正
  * 该立刻发的是插拔、连断、设备换了。所以这里只收会「跳变」的字段，功率电压电流
- * 一概不进 —— 否则每帧都判定为变化，循环就从 5 秒一转变成 1 秒一转。
- */
-/**
- * 电量属于连续读数，不参与结构指纹，避免反复重置追发额度。
+ * 和电量一概不进 —— 否则每帧都判定为变化，循环就从 5 秒一转变成 1 秒一转。
+ *
+ * 端口的开关位只在真有电流时才算数。设备插着但不取电（充满、待机）时，模式字节
+ * 会在开 / 关之间来回翻，线缆和设备身份都不变 —— 那不是插拔。
+ * 插拔本身由线缆、`attached`、设备身份和「开始 / 停止过电流」认出来。
  */
 struct ChargingDevicesStructuralSignature: Equatable {
+    /// 和 `PortState.connected` 判「有东西在取电」用的是同一条线；读数已舍到两位小数。
+    static let carryingCurrentThresholdA = 0.02
+
     private struct Port: Equatable {
         let name: String
-        let active: Bool
+        let carrying: Bool
         let direction: String?
         let attached: Bool?
         let cable: String?
@@ -26,8 +30,10 @@ struct ChargingDevicesStructuralSignature: Equatable {
 
         init(_ port: DevicePortPayload) {
             name = port.name
-            active = port.active
-            direction = port.direction
+            // 开着但没给电流读数时按在用算：不知道不等于没有，不能把真插拔压下去。
+            carrying = port.active
+                && (port.currentA.map { $0 > ChargingDevicesStructuralSignature.carryingCurrentThresholdA } ?? true)
+            direction = carrying ? port.direction : nil
             attached = port.attached
             cable = port.cable
             deviceModel = port.attachedDevice?.model

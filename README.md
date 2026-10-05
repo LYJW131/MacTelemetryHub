@@ -321,9 +321,15 @@ quiet-time heartbeat and the coding modules' keepalive.
 The charger wakes it too, but selectively. Waking on every pushed frame would turn
 the loop tick into a per-frame loop, to watch numbers that wait for the throttle
 window. So the callback compares a structural fingerprint first — ports, cables, device
-identity — and only a plug, unplug, or device swap gets through. Those then take
+identity, whether current is actually flowing — and only a plug, unplug, or device swap
+gets through. A port that is on but drawing no current counts the same as an off port:
+with a device plugged in and idle, the mode byte flips on and off at 0 A, and those flips
+wait for the throttle window like any other reading. Structural changes then take
 the same urgent path as a track change, so they upload about a second after they
-happen instead of up to five seconds later.
+happen instead of up to five seconds later — at most once per
+`Sources/TelemetryCore/ReportDecision.swift#chargingStructuralCooldown`. Changes inside
+the cooldown are merged into the post that ends it (or ride an earlier follow-up post),
+so a field that keeps flapping cannot turn the urgent path into a per-frame upload.
 
 The charger is event-driven at the acquisition layer as well. The device pushes
 its stream; the app does not poll BLE to keep telemetry flowing. A link can stay

@@ -95,7 +95,7 @@ struct AppleMusicCredentialsSnapshot: Equatable, Sendable {
 }
 
 /**
- * 充电设备结构变化后的追发排期。
+ * 充电设备结构变化后的追发排期，以及结构即时上报的冷却。
  *
  * 插上负载的头几十秒功率还在剧烈变化 —— PD 协商完成、设备自己调整取电，
  * 都要一会儿才稳。即时上报只发出去插拔那一瞬间的那一帧，那一帧往往还是
@@ -104,14 +104,18 @@ struct AppleMusicCredentialsSnapshot: Equatable, Sendable {
  *
  * 所以结构变化后按这个节奏追发几次。次数是有限的：功率滚动本来就该等节流
  * 窗口，追发只是覆盖「刚接入」这段不稳定期，不是把上报变成 5 秒一次的轮询。
+ *
+ * `structuralPostedAt` 是最近一次因结构变化即时上报的时刻，冷却和追发重置都从它算。
  */
 struct ChargingBurstState: Equatable, Sendable {
     var remaining = 0
     var dueAt: Date = .distantPast
+    var structuralPostedAt: Date = .distantPast
 
-    init(remaining: Int = 0, dueAt: Date = .distantPast) {
+    init(remaining: Int = 0, dueAt: Date = .distantPast, structuralPostedAt: Date = .distantPast) {
         self.remaining = remaining
         self.dueAt = dueAt
+        self.structuralPostedAt = structuralPostedAt
     }
 }
 
@@ -141,6 +145,14 @@ struct ReportDecision: Sendable {
     static let heartbeatInterval: TimeInterval = 90
     static let chargingBurstInterval: TimeInterval = 5
     static let chargingBurstCount = 5
+    /**
+     * 两次结构即时上报之间至少隔这么久；冷却里的结构变化合并到冷却结束那一封。
+     *
+     * 必须短于发送间隔（本机 30 秒），否则插拔还不如等节流窗口快；又要长到能把 1 Hz
+     * 的来回翻合成一封。20 秒还盖住了追发的前四次，冷却里的变化多半已经被追发捎走。
+     * 发送间隔设得比它短时冷却形同虚设也无害：节流那一封照样带上结构变化。
+     */
+    static let chargingStructuralCooldown: TimeInterval = 20
 
     /// 判断所依据的那份快照。commit 要照它推进门闩，所以跟着决定一起走。
     let inputs: ReportInputs
@@ -333,17 +345,32 @@ struct ReportDecision: Sendable {
         let chargerStructuralChanged =
             chargerStructural != nil && chargerStructural != lastPosted.chargingStructural
         /**
-         * 结构一变就把计数重置满 —— 拔了又插算两次独立的接入，第二次
-         * 同样需要完整的观察窗口，不该沿用上一次剩下的额度。
+         * 结构差异一直挂到下一次成功发送才消失，所以不能每圈见到就即时发、就重置追发：
+         * 某个字段来回翻时那会变成每翻一次一封、追发永远发不完。
          *
-         * 到点就扣，不管这一圈最后有没有真发出去（比如退避期内）。
+         * 只有冷却过了、这一圈真能发出去时，结构变化才算即时；冷却里的变化不催发，
+         * 也不碰追发，等冷却结束那一圈合并成一封（期间到点的追发和节流照样会把它捎走）。
+         * 退避和离线时不消耗：不然冷却在发不出去的时候白白走掉。
+         *
+         * 计数重置满要求上一次结构即时上报之后安静满一个冷却期 —— 拔了又插算两次
+         * 独立的接入，第二次同样需要完整的观察窗口；但冷却一结束就又有变化，说明
+         * 是在来回翻，重置的话追发会接力不断。代价是间隔不到两个冷却期的再次插拔
+         * 只有即时那一封，没有自己的追发。
+         *
+         * 追发到点就扣，不管这一圈最后有没有真发出去（比如退避期内）。
          * 否则服务端一直失败时，这个计数会一直挂着，等退避结束后突然
          * 补发一串早就过时的追发。
          */
         var burst = chargingBurst
-        if chargerStructuralChanged {
-            burst.remaining = Self.chargingBurstCount
-            burst.dueAt = now.addingTimeInterval(Self.chargingBurstInterval)
+        let sinceStructuralPost = now.timeIntervalSince(burst.structuralPostedAt)
+        let chargerStructuralUrgent = chargerStructuralChanged && !manualMode && !inputs.suspended &&
+            now >= backoffUntil && sinceStructuralPost >= Self.chargingStructuralCooldown
+        if chargerStructuralUrgent {
+            if sinceStructuralPost >= 2 * Self.chargingStructuralCooldown {
+                burst.remaining = Self.chargingBurstCount
+                burst.dueAt = now.addingTimeInterval(Self.chargingBurstInterval)
+            }
+            burst.structuralPostedAt = now
         }
         let chargingBurstDue = burst.remaining > 0 && now >= burst.dueAt
         if chargingBurstDue {
@@ -355,7 +382,7 @@ struct ReportDecision: Sendable {
         // 网页一直看着无图版本。功率滚动不会让这个键变。
         let coverKey = chargerCoverObjectKey(charger)
         let coverKeyUrgent = coverKey != nil && coverKey != chargerCoverObjectKey(lastPosted.chargingDevices)
-        let chargerUrgent = !manualMode && (chargerStructuralChanged || chargingBurstDue || coverKeyUrgent)
+        let chargerUrgent = !manualMode && (chargerStructuralUrgent || chargingBurstDue || coverKeyUrgent)
         // 退避期内一律不放行。否则服务端挂掉时，未推进的 lastPosted 会让
         // urgent 一直为真，即时上报就变成每圈一次的重试风暴。
         urgent = (manualMode || musicUrgent || desktopUrgent || timezoneUrgent ||

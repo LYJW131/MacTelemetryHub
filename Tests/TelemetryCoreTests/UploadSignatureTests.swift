@@ -83,6 +83,48 @@ struct ChargingDevicesStructuralSignatureTests {
         )
         #expect(normal != throttled)
     }
+
+    private func idlePort(
+        active: Bool,
+        direction: String?,
+        currentA: Double?,
+        model: String? = "iPhone 17 Pro"
+    ) -> DevicePortPayload {
+        DevicePortPayload(
+            name: "C1",
+            active: active,
+            direction: direction,
+            voltageV: 5,
+            currentA: currentA,
+            powerW: currentA.map { $0 * 5 },
+            cable: "5A",
+            attachedDevice: AttachedDevicePayload(model: model, vendor: "Apple")
+        )
+    }
+
+    /// 设备插着不取电时，模式字节在开 / 关、取电 / 供电之间来回翻：不是插拔。
+    @Test func zeroAmpModeFlipsAreNotStructural() {
+        let off = ChargingDevicesStructuralSignature(payload(port: idlePort(active: false, direction: nil, currentA: 0)))
+        let on = ChargingDevicesStructuralSignature(payload(port: idlePort(active: true, direction: "out", currentA: 0)))
+        let input = ChargingDevicesStructuralSignature(payload(port: idlePort(active: true, direction: "in", currentA: 0.01)))
+        #expect(off == on)
+        #expect(on == input)
+    }
+
+    /// 真开始或停止过电流、或者 0 A 下换了设备，仍然是结构变化。
+    @Test func currentStartingOrIdentityChangingAtZeroAmpIsStructural() {
+        let idle = ChargingDevicesStructuralSignature(payload(port: idlePort(active: true, direction: "out", currentA: 0)))
+        let charging = ChargingDevicesStructuralSignature(payload(port: idlePort(active: true, direction: "out", currentA: 1.5)))
+        let reversed = ChargingDevicesStructuralSignature(payload(port: idlePort(active: true, direction: "in", currentA: 1.5)))
+        let swapped = ChargingDevicesStructuralSignature(
+            payload(port: idlePort(active: true, direction: "out", currentA: 0, model: "MacBook Pro"))
+        )
+        let unknownCurrent = ChargingDevicesStructuralSignature(payload(port: idlePort(active: true, direction: "out", currentA: nil)))
+        #expect(idle != charging)
+        #expect(charging != reversed)
+        #expect(idle != swapped)
+        #expect(idle != unknownCurrent)
+    }
 }
 
 struct DesktopAndTimeZoneSignatureTests {
