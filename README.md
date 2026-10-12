@@ -510,7 +510,9 @@ default unless you trust the whole network.
   `resolving`). Read this first when an app icon is missing on the site. Icon uploads
   follow `Sources/TelemetryCore/IconUploadBudget.swift#noteFailure` between failures
   and, after `IconUploadBudget.maxAttempts`, wait `IconUploadBudget.retryCooldown`
-  instead of giving up until restart; failures also go to the unified log under
+  instead of giving up until restart. Each HEAD/PUT attempt uses the reporter's
+  request timeout (`AppSettings.postTimeout`); the 3-second cap belongs only to
+  sleep heartbeats. Failures also go to the unified log under
   category `desktop-icon`. `windowTitle` carries the focused title's judgment
   `status` (`published`, `locked`, `needsConfirmation`, `judging`, `trusted`,
   `blacklisted`, `hidden`, `noAccess`, `unavailable`, `none`), whether a title is

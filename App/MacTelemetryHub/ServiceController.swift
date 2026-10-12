@@ -986,6 +986,14 @@ final class ServiceController: ObservableObject {
     }
 
     /**
+     * 后台直传自己建 TLS，超时跟遥测 POST 走同一档。
+     *
+     * 3 秒是 `sendHeartbeat(blocking:)` 的上限：睡眠窗口很窄。套到图标会让系统
+     * HTTPS 代理下的握手直接变成 TLS 失败或 timeout，三次额度在一次抖动里烧光。
+     */
+    private var r2UploadTimeout: TimeInterval { settings.postTimeout }
+
+    /**
      * 返回已经确认存在的对象键；没有准备好就启动后台 resolver 并立即返回 nil。
      *
      * 名称上报不 await R2。resolver 先 HEAD：对象还在就复用，被清掉就 PUT。
@@ -1026,7 +1034,7 @@ final class ServiceController: ObservableObject {
             data: iconData,
             ext: "png",
             configuration: r2Configuration,
-            timeout: min(settings.postTimeout, 3)
+            timeout: r2UploadTimeout
         ) { [weak self] in
             guard let self else { return }
             // resolver 早于首包完成时，切换防抖会自然把键带上，不额外叫醒。
@@ -1070,7 +1078,7 @@ final class ServiceController: ObservableObject {
             data: iconData,
             ext: "jpg",
             configuration: r2Configuration,
-            timeout: min(settings.postTimeout, 3)
+            timeout: r2UploadTimeout
         ) { [weak self] in
             guard let self,
                   lastPostedChargerCover(hash: iconHash, hasObjectKey: false) else { return }

@@ -93,7 +93,8 @@ final class IconUploadCoordinator {
      * 在后台把这枚图标弄到 R2 上：先 HEAD，对象还在就复用，被清掉就 PUT。
      *
      * 同一枚图标同时只有一次在飞。检查间隔见 `verificationInterval`，失败次数见
-     * `Sources/TelemetryCore/IconUploadBudget.swift#maxAttempts`，且绝不靠反复 POST 遥测来驱动重试。
+     * `Sources/TelemetryCore/IconUploadBudget.swift#maxAttempts`，HTTP 超时由调用方
+     * 传入（与遥测 POST 同一档，见 `ServiceController.r2UploadTimeout`），且绝不靠反复 POST 遥测来驱动重试。
      *
      * `onReady` 只在这一次真的把对象弄好之后调用一次。调用方在里面比对「已经
      * 发出去的那份是不是还是当前这份」再决定要不要叫醒循环 —— 不比的话，用户
@@ -121,10 +122,13 @@ final class IconUploadCoordinator {
             guard let self else { return }
             while !Task.isCancelled, self.budget.isAvailable(hash, now: Date()) {
                 do {
+                    let session = IsolatedHTTPClient.session(timeout: timeout)
+                    defer { session.finishTasksAndInvalidate() }
                     let exists = try await R2IconUploader.exists(
                         objectKey: objectKey,
                         configuration: configuration,
-                        timeout: timeout
+                        timeout: timeout,
+                        session: session
                     )
                     if !exists {
                         self.forget(hash)
@@ -133,7 +137,8 @@ final class IconUploadCoordinator {
                             contentHash: R2IconUploader.contentHash(of: data),
                             objectKey: objectKey,
                             configuration: configuration,
-                            timeout: timeout
+                            timeout: timeout,
+                            session: session
                         )
                     }
                     guard !Task.isCancelled else { break }

@@ -39,7 +39,8 @@ enum R2IconUploader {
     static func exists(
         objectKey: String,
         configuration: R2UploadConfiguration,
-        timeout: TimeInterval
+        timeout: TimeInterval,
+        session: URLSession
     ) async throws -> Bool {
         let url = try objectURL(
             endpoint: configuration.endpoint,
@@ -51,7 +52,7 @@ enum R2IconUploader {
         request.timeoutInterval = timeout
         sign(&request, payloadHash: emptyPayloadHash, contentType: nil,
              method: "HEAD", url: url, configuration: configuration, now: Date())
-        let (_, response) = try await IsolatedHTTPClient.data(for: request)
+        let (_, response) = try await IsolatedHTTPClient.data(for: request, session: session)
         guard let http = response as? HTTPURLResponse else {
             throw UploadError.httpStatus(0, "R2 返回了无效响应")
         }
@@ -67,7 +68,8 @@ enum R2IconUploader {
         contentHash: String,
         objectKey: String,
         configuration: R2UploadConfiguration,
-        timeout: TimeInterval
+        timeout: TimeInterval,
+        session: URLSession
     ) async throws {
         let actualHash = sha256Hex(data)
         guard actualHash == contentHash else { throw UploadError.hashMismatch }
@@ -86,7 +88,7 @@ enum R2IconUploader {
         sign(&request, payloadHash: actualHash, contentType: contentType(for: objectKey),
              method: "PUT", url: objectURL, configuration: configuration, now: Date())
 
-        let (responseData, response) = try await IsolatedHTTPClient.data(for: request)
+        let (responseData, response) = try await IsolatedHTTPClient.data(for: request, session: session)
         guard let http = response as? HTTPURLResponse else {
             throw UploadError.httpStatus(0, "R2 返回了无效响应")
         }
